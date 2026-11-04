@@ -1,0 +1,307 @@
+CRASH WATCHER — PHASE 2
+
+Real-Time Visual Monitoring & Multiplier Recognition Engine
+
+Phase 1 has been completed and verified with 143 passing tests.
+
+Now implement Phase 2 ONLY.
+
+You are working on an existing project. Do not rewrite or replace the Phase 1 strategy engine.
+
+Your task is to build a reliable local computer vision system that monitors an already-open Firefox game screen and detects completed Crash multipliers.
+
+IMPORTANT:
+This phase is ONLY about screen capture, image processing, multiplier recognition, and round detection.
+
+Do not implement GUI, real-money betting, automated betting clicks, or EXE packaging.
+
+1. First inspect Phase 1
+
+Before writing code:
+
+- Inspect the entire existing project.
+- Read the strategy engine API.
+- Inspect models, enums, events, configuration, and tests.
+- Understand how process_round() works.
+- Identify the exact data structure expected by the strategy engine.
+
+Do not assume the API matches any previous examples.
+
+Preserve all existing functionality.
+
+Run the existing 143 tests before making changes.
+
+2. Technology
+
+Use:
+
+- Python 3.11+
+- MSS for local screen capture.
+- OpenCV for image processing.
+- NumPy.
+- Tesseract OCR or another suitable local OCR engine.
+- pytest.
+
+All image processing must run locally.
+
+No website APIs.
+No network requests.
+No browser extensions.
+No website scripts.
+No direct website connections.
+
+The user manually logs into Firefox and opens the game.
+
+3. Screen Capture Module
+
+Create a screen capture module.
+
+Requirements:
+
+- Detect available monitors.
+- Allow monitor selection through configuration.
+- Allow selection of a rectangular screen region using x, y, width, and height.
+- Capture only the configured region.
+- Support configurable capture intervals.
+- Handle screen resolution changes.
+- Handle unavailable screens gracefully.
+- Release capture resources safely.
+
+Create a small command-line calibration utility if needed.
+
+Do not build the full graphical region selector yet.
+
+4. Multiplier Recognition
+
+Implement a recognition engine that identifies multipliers such as:
+
+1.08x
+2.45x
+9.99x
+10.00x
+12.45x
+25.67x
+
+The engine must distinguish:
+
+RED:
+Below 2.00.
+
+GREEN:
+2.00 to 9.99.
+
+YELLOW:
+10.00 and above.
+
+Use OCR and image processing together.
+
+Requirements:
+
+- Image preprocessing.
+- Contrast enhancement.
+- Appropriate thresholding.
+- Color sampling.
+- Text normalization.
+- Decimal point validation.
+- Multiplier parsing.
+- Confidence scoring.
+- Rejection of uncertain results.
+
+Do not classify a multiplier using color alone.
+
+Do not accept malformed OCR values.
+
+Examples of invalid readings:
+
+1O.OO
+1..00
+10.OO
+1,0O
+NaN
+Infinity
+
+Implement safe normalization only when the result is unambiguous.
+
+If recognition is uncertain, return an UNCERTAIN result.
+
+Never invent a multiplier.
+
+5. Round Detection
+
+This is extremely important.
+
+The game displays changing information during a round.
+
+The application must distinguish:
+
+- Previous round result.
+- Current round animation.
+- New round.
+- Final completed multiplier.
+
+A changing animation value must never be registered as a completed round.
+
+Implement a state machine for visual round detection.
+
+Possible states:
+
+WAITING
+ROUND_IN_PROGRESS
+RESULT_CANDIDATE
+RESULT_CONFIRMED
+UNCERTAIN
+
+A multiplier must be stable and visually confirmed before being emitted as a completed result.
+
+Use configurable stability requirements and frame comparisons.
+
+The engine must not emit the same completed result repeatedly.
+
+Do not assume that the previous multiplier remaining visible means a new round has completed.
+
+If the system cannot distinguish a previous result from a new result, mark it uncertain rather than creating a false round.
+
+6. Timing
+
+The interval between rounds is approximately six seconds.
+
+Optimize for low latency.
+
+Requirements:
+
+- Avoid expensive OCR on every captured frame.
+- Use image comparison to identify meaningful changes.
+- Run OCR only when appropriate.
+- Measure capture latency.
+- Measure processing latency.
+- Measure total detection latency.
+- Avoid blocking the main process.
+
+Use worker threads where appropriate.
+
+Do not promise impossible response times.
+
+7. Strategy Engine Integration
+
+Integrate the visual detector with the existing Phase 1 strategy engine.
+
+The integration must:
+
+- Send only confirmed completed round results.
+- Generate a unique round ID.
+- Prevent duplicate submissions.
+- Preserve the exact Phase 1 strategy logic.
+- Forward strategy events.
+- Keep uncertain results out of the strategy engine.
+
+Use the actual Phase 1 API discovered during inspection.
+
+Do not duplicate or reimplement strategy rules.
+
+Do not modify Phase 1 behavior just to simplify integration.
+
+8. Detection Events
+
+Create structured events:
+
+- SCREEN_CAPTURE_STARTED
+- SCREEN_CAPTURE_FAILED
+- SCREEN_REGION_CHANGED
+- MULTIPLIER_CANDIDATE
+- MULTIPLIER_CONFIRMED
+- MULTIPLIER_UNCERTAIN
+- ROUND_STARTED
+- ROUND_COMPLETED
+- DUPLICATE_RESULT_IGNORED
+- DETECTION_ERROR
+
+Each event should include useful timestamps and diagnostic information.
+
+9. Diagnostic Tools
+
+Create a local diagnostic utility that can:
+
+- Display the captured region.
+- Save screenshots locally.
+- Display the recognized multiplier.
+- Display the detected color category.
+- Display OCR confidence.
+- Display recognition latency.
+- Display round detector state.
+
+This utility is for development and testing, not the final application UI.
+
+Allow the user to save sample screenshots to a local dataset directory.
+
+Do not upload screenshots anywhere.
+
+10. Testing
+
+Create comprehensive automated tests.
+
+Test:
+
+- Different multiplier formats.
+- Red, green, and yellow classification.
+- Decimal point recognition.
+- OCR uncertainty.
+- Invalid multiplier rejection.
+- Stable result confirmation.
+- Changing animation rejection.
+- Duplicate result prevention.
+- New round detection.
+- Previous result rejection.
+- Missing frames.
+- Capture failures.
+- Screen resolution changes.
+- Integration with Phase 1.
+- Strategy engine receives each confirmed round exactly once.
+
+Use synthetic images and saved local fixtures.
+
+If real game screenshots are unavailable, explicitly document which recognition scenarios still require testing against actual Firefox screenshots.
+
+Do not claim real-world OCR accuracy without actual testing.
+
+11. Performance
+
+Measure:
+
+- Average capture time.
+- Average image processing time.
+- Average OCR time.
+- Average complete detection time.
+
+Provide a diagnostic report.
+
+Avoid unnecessary CPU usage.
+
+Keep the capture and recognition pipeline modular.
+
+12. Compatibility
+
+Preserve all Phase 1 files and APIs.
+
+After integration:
+
+- Run all previous tests.
+- Run all new tests.
+- Fix regressions.
+- Ensure Phase 1 remains independently testable.
+
+13. Completion
+
+At the end provide:
+
+1. Updated project structure.
+2. List of new modules.
+3. Actual pytest results.
+4. Recognition test results.
+5. Performance measurements.
+6. Known limitations.
+7. Instructions for running the live screen monitoring utility.
+8. Instructions for calibrating the screen region.
+
+Do not build Phase 3, GUI, automated betting, or EXE yet.
+
+STOP after completing Phase 2.
