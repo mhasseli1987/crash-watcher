@@ -1,0 +1,3 @@
+@echo off
+echo Starting Crash Watcher...
+python -m crash_watcher.desktop.app

@@ -11,7 +11,7 @@ from crash_watcher.desktop.final_result import (BangDetector, BangRecognizer, Fi
 from crash_watcher.vision.recognition import RapidOCRReader
 
 @pytest.mark.parametrize("text,value", [("Bang @1.46x", "1.46"), ("Bang@7.50x", "7.50"),
-                                        ("BANG @13.05×", "13.05")])
+                                        ("BANG @13.05×", "13.05"), ("Bang @1.07", "1.07")])
 def test_bang_parser(text, value):
     assert parse_bang(text) == Decimal(value)
 
@@ -21,6 +21,8 @@ def test_bang_rejects_live_countdown_and_labels(text):
 
 def test_history_entry_is_unambiguous():
     assert parse_history_entry("9342414 5.52x") == ("9342414", Decimal("5.52"))
+    assert parse_history_entry("9356780 1 89x") == ("9356780", Decimal("1.89"))
+    assert parse_history_entry("9356780 189x") == ("9356780", Decimal("1.89"))
     assert parse_history_entry("9342414 5.52x 9342413 2.02x") is None
 
 def test_real_ocr_bang_and_countdown():
@@ -82,6 +84,20 @@ def test_history_confirmation_and_strategy_handoff():
     assert confirmed and confirmed.round_id == "game-9342414"
     assert strategy.process_round(confirmed.round_id, confirmed.multiplier).cycle_triggered
     assert strategy.process_round(confirmed.round_id, confirmed.multiplier).duplicate
+
+def test_history_can_confirm_after_bang_changes_to_countdown():
+    detector = BangDetector(stable_frames=2, absent_frames=2)
+    now = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    detector.observe(_image(0), _reading(None), now)
+    detector.observe(_image(0), _reading(None), now)
+    detector.observe(_image(30), _reading("2.89"), now, "9342414", Decimal("1.44"), True)
+    detector.observe(_image(30), _reading("2.89"), now, "9342414", Decimal("1.44"), True)
+    assert detector.observe(_image(30), _reading("2.89"), now,
+                            "9342414", Decimal("1.44"), True) is None
+    confirmed = detector.observe(_image(0), _reading(None), now,
+                                 "9342415", Decimal("2.89"), True)
+    assert confirmed and confirmed.round_id == "game-9342415"
+    assert confirmed.multiplier == Decimal("2.89")
 
 def test_settings_roundtrip_and_validation(tmp_path):
     path = tmp_path / "settings.json"

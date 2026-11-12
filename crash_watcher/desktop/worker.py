@@ -15,6 +15,7 @@ from .final_result import BangDetector, BangRecognizer, parse_history_entry
 class MonitorWorker(QThread):
     observation = Signal(object, object, object)
     preview = Signal(object)
+    history_observation = Signal(object, object, str)
     problem = Signal(str)
     status = Signal(str)
 
@@ -53,6 +54,14 @@ class MonitorWorker(QThread):
             if self.settings.history_region:
                 from rapidocr import RapidOCR
                 history_engine = RapidOCR()
+                # RapidOCR lazily loads its detection/classification models on
+                # the first call. Paying that several-second cost when a Bang
+                # first appears can make the final screen disappear before the
+                # detector collects stable frames. Warm it before monitoring.
+                warmup = np.zeros((64, 240, 3), dtype=np.uint8)
+                cv2.putText(warmup, "1234567 1.23x", (4, 43),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.9, (255, 255, 255), 2)
+                history_engine(warmup)
             with ScreenCapture(self.settings.result_region.capture(self.settings.interval_ms)) as capture:
                 history_capture = (ScreenCapture(self.settings.history_region.capture(self.settings.interval_ms))
                                    if self.settings.history_region else None)
@@ -94,13 +103,18 @@ class MonitorWorker(QThread):
                                 previous_reading = reading
                             else:
                                 reading = previous_reading
-                            if history_capture and reading.value is not None:
+                            # The site updates history after the Bang screen is
+                            # replaced by the countdown, so observe history in
+                            # every phase (OCR still runs only when it changes).
+                            if history_capture:
                                 strip, _ = history_capture.capture()
                                 hthumb = cv2.resize(cv2.cvtColor(strip.image, cv2.COLOR_BGR2GRAY), (64, 32))
                                 if history_previous is None or float(np.mean(cv2.absdiff(hthumb, history_previous))) >= 1:
                                     parsed = history_engine(strip.image)
-                                    entry = parse_history_entry(" ".join(parsed.txts or ()))
+                                    history_text = " ".join(parsed.txts or ())
+                                    entry = parse_history_entry(history_text)
                                     history_id, history_value = entry if entry else (None, None)
+                                    self.history_observation.emit(history_id, history_value, history_text)
                                     history_previous = hthumb
                             completed = self.detector.observe(frame.image, reading, frame.captured_at,
                                                               history_id, history_value,

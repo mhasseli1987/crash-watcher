@@ -10,9 +10,15 @@ from crash_watcher.vision.models import DetectionState
 from crash_watcher.vision.recognition import category_for, preprocess
 from crash_watcher.vision.recognition import parse_multiplier
 
-_BANG = re.compile(r"^Bang\s*@\s*(\d{1,4}\.\d{2})\s*[xX×]$", re.IGNORECASE | re.ASCII)
+# RapidOCR occasionally drops the small trailing multiplier glyph while still
+# reading the distinctive, final-only ``Bang @`` prefix with high confidence.
+# Keep the prefix and exactly two decimal places mandatory so live multipliers,
+# payout labels and countdown text still cannot be accepted as final results.
+_BANG = re.compile(r"^Bang\s*@\s*(\d{1,4}\.\d{2})\s*[xX×]?$", re.IGNORECASE | re.ASCII)
 _HISTORY_ID = re.compile(r"\b(\d{6,12})\b")
 _HISTORY_VALUE = re.compile(r"(?<![\d.])\d{1,4}\.\d{2}[xX×](?!\w)")
+_HISTORY_VALUE_DROPPED_DOT = re.compile(r"(?<!\d)(\d{1,4})\s+(\d{2})[xX×](?!\w)")
+_HISTORY_VALUE_COMPACT = re.compile(r"(?<!\d)(\d{1,4})(\d{2})[xX×](?!\w)")
 
 def parse_bang(text: str) -> Decimal | None:
     match = _BANG.fullmatch(text.strip()) if isinstance(text, str) else None
@@ -28,6 +34,16 @@ def parse_history_id(text: str) -> str | None:
 def parse_history_entry(text: str) -> tuple[str, Decimal] | None:
     round_id = parse_history_id(text)
     values = _HISTORY_VALUE.findall(text)
+    # At the site's small history-badge size RapidOCR can see the decimal dot
+    # as whitespace (for example ``1 89x``). Only repair this exact shape: the
+    # round id and trailing x remain mandatory and exactly two fractional
+    # digits are required.
+    if not values:
+        dropped_dot = _HISTORY_VALUE_DROPPED_DOT.findall(text)
+        values = [f"{whole}.{fraction}x" for whole, fraction in dropped_dot]
+    if not values:
+        compact = _HISTORY_VALUE_COMPACT.findall(text)
+        values = [f"{whole}.{fraction}x" for whole, fraction in compact]
     if not round_id or len(values) != 1:
         return None
     value = parse_multiplier(values[0])
@@ -81,6 +97,7 @@ class BangDetector:
         self._last_image: np.ndarray | None = None
         self._previous: np.ndarray | None = None
         self._last_history_id: str | None = None
+        self._pending_history: tuple[Decimal, float, datetime] | None = None
         self._seen_ids: set[str] = getattr(self, "_seen_ids", set())
 
     def observe(self, image: np.ndarray, reading: FinalReading, timestamp: datetime,
@@ -91,6 +108,19 @@ class BangDetector:
         moving = self._previous is not None and float(np.mean(cv2.absdiff(thumb, self._previous))) >= self.pixel_difference
         self._previous = thumb
         if reading.value is None:
+            # Trenball adds the just-finished round to its history only after
+            # the Bang screen changes to the countdown. Confirm a stable Bang
+            # retained from the prior phase as soon as that history row lands.
+            if (require_history and self._pending_history and history_id and
+                    history_value == self._pending_history[0] and history_id not in self._seen_ids):
+                value, confidence, final_timestamp = self._pending_history
+                self._pending_history = None
+                self._last = value
+                self._last_image = thumb.copy()
+                self._last_history_id = history_id
+                self._seen_ids.add(history_id)
+                self.state = DetectionState.RESULT_CONFIRMED
+                return ConfirmedFinal(f"game-{history_id}", value, confidence, final_timestamp)
             self._absent += 1
             self._stable = 0
             self._candidate = None
@@ -109,6 +139,7 @@ class BangDetector:
         if self._stable < self.stable_frames:
             return None
         if require_history and (not history_id or history_value != reading.value):
+            self._pending_history = (reading.value, reading.confidence, timestamp)
             self.state = DetectionState.UNCERTAIN
             return None
         if history_id and history_id in self._seen_ids:
@@ -121,6 +152,7 @@ class BangDetector:
                 self.state = DetectionState.RESULT_CONFIRMED
                 return None
         self._last = reading.value
+        self._pending_history = None
         self._last_image = thumb.copy()
         self._last_history_id = history_id
         self._absent = 0

@@ -25,30 +25,31 @@ class Region:
 class DesktopSettings:
     result_region: Region | None = None
     history_region: Region | None = None
+    click_region: Region | None = None
+    click_point: tuple[int, int] | None = None
+    autoclick_enabled: bool = False
+    autoclick_mode: str = "detect"
+    autoclick_threshold: str = "10.00"
+    autoclick_cooldown_ms: int = 1500
+    autoclick_delay_ms: int = 0
+    autoclick_dry_run: bool = True
+    autoclick_restore_cursor: bool = True
     fixed_bet_amount: str = "10"
-    max_attempts: int = 10
+    max_attempts: int = 8
     yellow_threshold: str = "10.00"
+    red_threshold: str = "2.00"
     interval_ms: int = 100
-    ocr_confidence: float = 0.80
-    tesseract_path: str = ""
+    ocr_confidence: float = 0.55
     theme: str = "dark"
-
-    def validate(self) -> None:
-        StrategyConfig(fixed_bet_amount=Decimal(self.fixed_bet_amount),
-                       max_attempts=self.max_attempts, yellow_threshold=Decimal(self.yellow_threshold))
-        if not 0 < self.ocr_confidence <= 1:
-            raise ValueError("OCR confidence must be between 0 and 1")
-        if self.interval_ms < 20:
-            raise ValueError("capture interval must be at least 20 ms")
-        for region in (self.result_region, self.history_region):
-            if region:
-                region.capture(self.interval_ms)
+    tesseract_path: str = ""
 
     def strategy(self) -> StrategyConfig:
-        self.validate()
-        return StrategyConfig(fixed_bet_amount=Decimal(self.fixed_bet_amount),
-                              max_attempts=self.max_attempts, yellow_threshold=Decimal(self.yellow_threshold))
-
+        return StrategyConfig(
+            Decimal(self.fixed_bet_amount),
+            self.max_attempts,
+            Decimal(self.yellow_threshold),
+            Decimal(self.red_threshold),
+        )
 def load_settings(path: Path = SETTINGS_PATH) -> DesktopSettings:
     if not path.exists():
         return DesktopSettings()

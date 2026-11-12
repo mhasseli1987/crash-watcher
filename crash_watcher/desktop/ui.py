@@ -21,18 +21,18 @@ from .final_result import BangRecognizer
 from .worker import MonitorWorker
 
 STYLE = """
-QWidget { background:#101319; color:#e9edf4; font-family:'Segoe UI'; font-size:13px; }
-QMainWindow { background:#101319; }
-QGroupBox { border:1px solid #2a303b; border-radius:12px; margin-top:14px; padding:18px 12px 12px; font-weight:600; }
+QWidget { background:#10151f; color:#e9edf4; font-family:'Segoe UI'; font-size:14px; }
+QMainWindow { background:#10151f; }
+QGroupBox { border:1px solid #2a303b; border-radius:16px; margin-top:14px; padding:18px 12px 12px; font-weight:600; }
 QGroupBox::title { subcontrol-origin:margin; left:14px; padding:0 6px; color:#b8c2d0; }
-QLineEdit,QSpinBox,QDoubleSpinBox,QComboBox { background:#1b2029; border:1px solid #343c49; border-radius:7px; padding:7px; min-height:25px; }
+QLineEdit,QSpinBox,QDoubleSpinBox,QComboBox { background:#1b2533; border:1px solid #343c49; border-radius:7px; padding:7px; min-height:25px; }
 QPushButton { background:#252d39; border:1px solid #3c4656; border-radius:8px; padding:9px 14px; font-weight:600; }
-QPushButton:hover { background:#344052; } QPushButton:disabled { color:#697586; background:#1c222b; }
-QPushButton#start { background:#d7b300; color:#111319; border:0; }
-QPushButton#stop { background:#82363e; border:0; }
+QPushButton:hover { background:#344052; } QPushButton:pressed { background:#40516a; } QPushButton:focus { border:2px solid #e6ca4f; } QLineEdit:focus,QSpinBox:focus,QDoubleSpinBox:focus { border:1px solid #e6ca4f; } QPushButton:disabled { color:#697586; background:#1c222b; }
+QPushButton#start { background:#f0ca52; color:#111319; border:0; }
+QPushButton#stop { background:#7d3544; border:0; }
 QTableWidget { background:#151a22; alternate-background-color:#1b222c; border:1px solid #2a303b; gridline-color:#2a303b; }
 QHeaderView::section { background:#252d38; color:#cbd3df; padding:7px; border:0; }
-QTabWidget::pane { border:1px solid #29313d; } QTabBar::tab { background:#1b2029; padding:9px 18px; }
+QTabWidget::pane { border:1px solid #29313d; } QTabBar::tab { background:#1b2533; padding:9px 18px; }
 QTabBar::tab:selected { background:#343f50; }
 """
 
@@ -51,10 +51,11 @@ class RegionOverlay(QDialog):
         self.setCursor(Qt.CursorShape.CrossCursor)
         self._start: QPoint | None = None
         self._end: QPoint | None = None
-        with ScreenCapture(Region(monitor, geometry.x(), geometry.y(),
-                                  geometry.width(), geometry.height()).capture(100)) as capture:
-            frame, _ = capture.capture()
-        rgb = cv2.cvtColor(frame.image, cv2.COLOR_BGR2RGB)
+        # Capture full monitor image for the overlay background
+        with mss.MSS() as backend:
+            raw = backend.grab({"left": m["left"], "top": m["top"], "width": m["width"], "height": m["height"]})
+        frame = np.asarray(raw)[:, :, :3].copy()
+        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         self._image = QImage(rgb.data, rgb.shape[1], rgb.shape[0], rgb.strides[0], QImage.Format.Format_RGB888).copy()
 
     def paintEvent(self, _):
@@ -116,8 +117,12 @@ class MainWindow(QMainWindow):
         self.history: list[list[str]] = []
         self.success = self.expired = self.wins = self.losses = 0
         self.setWindowTitle("Crash Watcher · SIMULATED")
-        self.resize(1180, 790)
+        self.setWindowFlags(self.windowFlags() | Qt.WindowType.WindowStaysOnTopHint)
+        self.resize(650, 460)
+        screen = (self.screen() or QApplication.primaryScreen()).geometry()
+        self.move(screen.left(), screen.bottom() - self.height() + 1)
         self.setStyleSheet(STYLE)
+        self.setLayoutDirection(Qt.LayoutDirection.RightToLeft)
         root = QWidget()
         self.setCentralWidget(root)
         outer = QVBoxLayout(root)
@@ -125,7 +130,7 @@ class MainWindow(QMainWindow):
         header = QHBoxLayout()
         title = QLabel("CRASH WATCHER")
         title.setStyleSheet("font-size:25px;font-weight:800;letter-spacing:1px;color:#f4f6fa")
-        badge = QLabel("●  SIMULATED ONLY")
+        badge = QLabel("حالت شبیه‌سازی")
         badge.setStyleSheet("background:#363019;color:#e6ca4f;border-radius:9px;padding:9px 14px;font-weight:700")
         header.addWidget(title)
         header.addStretch()
@@ -140,12 +145,15 @@ class MainWindow(QMainWindow):
 
     def _metric(self, layout, row, column, label):
         box = QFrame()
-        box.setStyleSheet("QFrame{background:#1b2029;border:1px solid #2f3744;border-radius:12px;}")
+        box.setStyleSheet("QFrame{background:#1b2533;border:1px solid #2f3744;border-radius:16px;}")
         inside = QVBoxLayout(box)
         caption = QLabel(label)
         caption.setStyleSheet("color:#9eabba;border:0;background:transparent")
         value = QLabel("—")
         value.setStyleSheet("font-size:22px;font-weight:700;border:0;background:transparent")
+        value.setAlignment(Qt.AlignmentFlag.AlignRight)
+        if label == "ضریب شناسایی‌شده":
+            value.setStyleSheet("font-size:32px;font-weight:800;color:#f0ca52;border:0;background:transparent")
         inside.addWidget(caption)
         inside.addWidget(value)
         layout.addWidget(box, row, column)
@@ -181,7 +189,7 @@ class MainWindow(QMainWindow):
         self.preview = QLabel("پیش‌نمایش ناحیهٔ نتیجه")
         self.preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.preview.setMinimumHeight(150)
-        self.preview.setStyleSheet("background:#171b22;border:1px solid #343b46;border-radius:12px")
+        self.preview.setStyleSheet("background:#171b22;border:1px solid #343b46;border-radius:16px")
         layout.addWidget(self.preview)
         self.note = QLabel("فقط پیام پایان دور ثبت می‌شود؛ هیچ کلیکی روی بازی انجام نمی‌شود.")
         self.note.setStyleSheet("color:#aeb8c5")
@@ -277,7 +285,7 @@ class MainWindow(QMainWindow):
                        tesseract_path=self.tesseract.text().strip())
 
     def _update_region_status(self):
-        self.region_status.setText(f"نتیجه: {self.settings.result_region} | خانهٔ آخر تاریخچه: {self.settings.history_region}")
+        self.region_status.setText("ناحیهٔ نتیجه: " + ("تنظیم شده" if self.settings.result_region else "انتخاب نشده") + "  |  تأیید تاریخچه: " + ("فعال" if self.settings.history_region else "غیرفعال"))
 
     def select_region(self, history: bool):
         try:
@@ -288,6 +296,7 @@ class MainWindow(QMainWindow):
                 else:
                     self._fill_region(overlay.selected)
                     self.settings = replace(self.settings, result_region=overlay.selected)
+                self.save_ui_settings()  # فایل تنظیمات را ذخیره کن تا مقدارها به‌روز باشند
                 self._update_region_status()
         except Exception as exc:
             QMessageBox.warning(self, "انتخاب ناحیه", str(exc))
@@ -334,10 +343,17 @@ class MainWindow(QMainWindow):
     def start_monitoring(self):
         if self.worker and self.worker.isRunning():
             return
-        if self.settings.result_region is None and all(self.region_fields[name].value() in (0, 20) for name in self.region_fields):
-            QMessageBox.information(self, "ناحیهٔ نتیجه", "ابتدا ناحیهٔ پیام پایان دور را انتخاب کنید.")
-            self.tabs.setCurrentIndex(1)
-            return
+        if self.settings.result_region is None:
+            # بررسی اینکه مقدارها واقعاً تنظیم شده‌اند (نه پیش‌فرض)
+            x_val = self.region_fields["x"].value()
+            y_val = self.region_fields["y"].value()
+            width_val = self.region_fields["width"].value()
+            height_val = self.region_fields["height"].value()
+            # اگر مقادیر معتبر نباشند (پیش‌فرض یا نا موثر)، جلب توجه کن
+            if x_val == 0 and y_val == 0 and (width_val == 20 or width_val == 0) and (height_val == 20 or height_val == 0):
+                QMessageBox.information(self, "ناحیهٔ نتیجه", "ابتدا ناحیهٔ پیام پایان دور را انتخاب کنید.")
+                self.tabs.setCurrentIndex(1)
+                return
         if not self.save_ui_settings():
             return
         self.worker = MonitorWorker(self.settings, self.strategy)
@@ -375,14 +391,21 @@ class MainWindow(QMainWindow):
         self.settings = DesktopSettings()
         self.strategy = StrategyEngine(self.settings.strategy())
         self._fill_region(Region(1,0,0,20,20))
-        self.amount.setText(self.settings.fixed_bet_amount)
-        self.attempts.setValue(self.settings.max_attempts)
-        self.threshold.setText(self.settings.yellow_threshold)
+        self._sync_ui_to_settings()
         self._update_region_status()
         self._refresh()
 
+    def _sync_ui_to_settings(self):
+        """همه فیلدهای UI را با تنظیمات فعلی همگام کن."""
+        self.amount.setText(self.settings.fixed_bet_amount)
+        self.attempts.setValue(self.settings.max_attempts)
+        self.threshold.setText(self.settings.yellow_threshold)
+        self.interval.setValue(self.settings.interval_ms)
+        self.confidence.setValue(self.settings.ocr_confidence)
+        self.tesseract.setText(self.settings.tesseract_path)
+
     def _on_status(self, status):
-        self.values["وضعیت پایش"].setText(status)
+        self.values["وضعیت پایش"].setText({"MONITORING":"در حال پایش", "PAUSED":"مکث", "STOPPED":"متوقف"}.get(status,status))
         self._refresh()
 
     def _on_problem(self, message):
@@ -391,7 +414,7 @@ class MainWindow(QMainWindow):
 
     def _on_observation(self, reading, completed, result):
         self.values["ضریب شناسایی‌شده"].setText(str(reading.value) if reading.value else "—")
-        self.values["دسته"].setText(reading.category or "UNCERTAIN")
+        self.values["دسته"].setText({"RED":"قرمز", "GREEN":"سبز", "YELLOW":"زرد"}.get(reading.category,"نامطمئن"))
         self.values["اطمینان OCR"].setText(f"{reading.confidence:.0%}")
         if result:
             if result.bet_outcome == BetOutcome.WON:
@@ -417,7 +440,7 @@ class MainWindow(QMainWindow):
         self.resume_button.setEnabled(active)
         if not active:
             self.values["وضعیت پایش"].setText("متوقف")
-        self.values["وضعیت استراتژی"].setText(self.strategy.state.value)
+        self.values["وضعیت استراتژی"].setText("در انتظار ضریب زرد" if self.strategy.state == StrategyState.WAITING_FOR_YELLOW else "چرخهٔ فعال")
         self.values["شماره چرخه"].setText(str(self.strategy._cycle_id))
         self.values["شماره تلاش"].setText(str(self.strategy.attempt_number))
         self.values["تلاش‌های باقی‌مانده"].setText(str(self.strategy.remaining_attempts))
