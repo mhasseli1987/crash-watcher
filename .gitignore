@@ -5,6 +5,7 @@ build/
 dist/
 artifacts/
 logs/
+logs/rounds.testdata.backup.jsonl
 settings.json
 self-test.json
 *.spec

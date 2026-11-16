@@ -1,7 +1,9 @@
 """Qt worker: screenshots and OCR stay off the GUI thread."""
 from datetime import datetime, timezone
+import subprocess
+import sys
 from threading import Event
-from time import perf_counter
+from time import perf_counter, time
 import cv2
 import numpy as np
 from PySide6.QtCore import QThread, Signal
@@ -10,12 +12,16 @@ from crash_watcher.core.enums import StrategyState
 from crash_watcher.vision.capture import ScreenCapture, ScreenUnavailable
 from crash_watcher.vision.recognition import RapidOCRReader, tesseract_reader
 from .config import DesktopSettings
+from .clicker import AutoClicker
 from .final_result import BangDetector, BangRecognizer, parse_history_entry
 
 class MonitorWorker(QThread):
     observation = Signal(object, object, object)
     preview = Signal(object)
     history_observation = Signal(object, object, str)
+    click_report = Signal(object)
+    review_report = Signal(object)
+    session_finished = Signal(str, bool)  # report path, shutdown requested
     problem = Signal(str)
     status = Signal(str)
 
@@ -29,6 +35,15 @@ class MonitorWorker(QThread):
         self._pause = Event()
         self._resync_on_resume = Event()
         self.detector = BangDetector()
+        self._clicker: AutoClicker | None = None
+        self._session_started = time()
+        self._session_limit_reached = False
+
+    def configure(self, settings: DesktopSettings) -> None:
+        """Apply click settings from the window while the loop is running."""
+        self.settings = settings
+        if self._clicker is not None:
+            self._clicker.update(settings)
 
     def stop(self) -> None:
         self._stop.set()
@@ -41,6 +56,7 @@ class MonitorWorker(QThread):
         self._resync_on_resume.set()
 
     def run(self) -> None:
+        clicker = self._clicker = AutoClicker(self.settings)
         try:
             if self.settings.tesseract_path:
                 import pytesseract
@@ -75,6 +91,12 @@ class MonitorWorker(QThread):
                     history_id = None
                     history_value = None
                     while not self._stop.is_set():
+                        limit = self.settings.session_minutes
+                        if limit and time() - self._session_started >= limit * 60:
+                            # The overnight session is over: stop cleanly so the
+                            # clicker writes its report before the machine goes down.
+                            self._session_limit_reached = True
+                            break
                         if self._resync_on_resume.is_set():
                             self._resync_on_resume.clear()
                             self.detector.reset()
@@ -122,6 +144,12 @@ class MonitorWorker(QThread):
                             strategy_result = (self.strategy.process_round(completed.round_id, completed.multiplier)
                                                if completed else None)
                             self.observation.emit(reading, completed, strategy_result)
+                            if completed is not None:
+                                self.click_report.emit(clicker.fire(completed.round_id,
+                                                                    completed.multiplier))
+                                review = clicker.take_review()
+                                if review is not None:
+                                    self.review_report.emit(review)
                             self.preview.emit(frame.image.copy())
                         except Exception as exc:
                             self.detector.reset()
@@ -136,4 +164,22 @@ class MonitorWorker(QThread):
         except Exception as exc:
             self.problem.emit(str(exc))
         finally:
+            clicker.close()
+            self._clicker = None
             self.status.emit("STOPPED")
+            if self._session_limit_reached:
+                shutdown = self.settings.shutdown_after_session
+                self.session_finished.emit(str(clicker.report_path), shutdown)
+                if shutdown:
+                    self._schedule_shutdown()
+
+    def _schedule_shutdown(self) -> None:
+        """Ask Windows to power off shortly after the report is on disk."""
+        try:
+            if sys.platform != "win32":
+                self.problem.emit("خاموش‌کردن خودکار فقط روی ویندوز انجام می‌شود.")
+                return
+            subprocess.Popen(["shutdown", "/s", "/t", "60", "/c",
+                              "Crash Watcher: session finished"], close_fds=True)
+        except Exception as exc:
+            self.problem.emit(f"خاموش‌کردن ناموفق بود: {exc}")

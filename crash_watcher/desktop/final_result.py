@@ -82,10 +82,12 @@ class ConfirmedFinal:
 
 class BangDetector:
     """Requires a non-Bang phase then a stable Bang; ignores startup Bang."""
-    def __init__(self, stable_frames: int = 3, absent_frames: int = 2, pixel_difference: float = 3.0) -> None:
+    def __init__(self, stable_frames: int = 3, absent_frames: int = 2, pixel_difference: float = 3.0,
+                 history_timeout_frames: int = 15) -> None:
         self.stable_frames = stable_frames
         self.absent_frames = absent_frames
         self.pixel_difference = pixel_difference
+        self.history_timeout_frames = history_timeout_frames
         self.reset()
 
     def reset(self) -> None:
@@ -98,6 +100,7 @@ class BangDetector:
         self._previous: np.ndarray | None = None
         self._last_history_id: str | None = None
         self._pending_history: tuple[Decimal, float, datetime] | None = None
+        self._pending_steps = 0
         self._seen_ids: set[str] = getattr(self, "_seen_ids", set())
 
     def observe(self, image: np.ndarray, reading: FinalReading, timestamp: datetime,
@@ -115,12 +118,14 @@ class BangDetector:
                     history_value == self._pending_history[0] and history_id not in self._seen_ids):
                 value, confidence, final_timestamp = self._pending_history
                 self._pending_history = None
+                self._pending_steps = 0
                 self._last = value
                 self._last_image = thumb.copy()
                 self._last_history_id = history_id
                 self._seen_ids.add(history_id)
                 self.state = DetectionState.RESULT_CONFIRMED
                 return ConfirmedFinal(f"game-{history_id}", value, confidence, final_timestamp)
+            self._pending_steps = 0
             self._absent += 1
             self._stable = 0
             self._candidate = None
@@ -131,6 +136,7 @@ class BangDetector:
             return None
         if moving:
             self._stable = 0
+            self._pending_steps = 0
             self._candidate = None
             return None
         self._stable = self._stable + 1 if reading.value == self._candidate else 1
@@ -140,8 +146,23 @@ class BangDetector:
             return None
         if require_history and (not history_id or history_value != reading.value):
             self._pending_history = (reading.value, reading.confidence, timestamp)
-            self.state = DetectionState.UNCERTAIN
-            return None
+            self._pending_steps += 1
+            if self._pending_steps < self.history_timeout_frames:
+                self.state = DetectionState.UNCERTAIN
+                return None
+            # The history row never matched (tiny text, OCR noise). The Bang itself is
+            # strict, stable and confident, so confirm it before the betting window
+            # closes instead of silently dropping the round.
+            self._pending_history = None
+            self._pending_steps = 0
+            self._last = reading.value
+            self._last_image = thumb.copy()
+            self._last_history_id = None
+            self._absent = 0
+            self.state = DetectionState.RESULT_CONFIRMED
+            round_id = f"visual-{uuid4().hex}"
+            self._seen_ids.add(round_id)
+            return ConfirmedFinal(round_id, reading.value, reading.confidence, timestamp)
         if history_id and history_id in self._seen_ids:
             self.state = DetectionState.RESULT_CONFIRMED
             return None
@@ -153,6 +174,7 @@ class BangDetector:
                 return None
         self._last = reading.value
         self._pending_history = None
+        self._pending_steps = 0
         self._last_image = thumb.copy()
         self._last_history_id = history_id
         self._absent = 0

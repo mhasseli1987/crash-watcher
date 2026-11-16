@@ -1,14 +1,17 @@
 """Project-local validated desktop settings."""
-from dataclasses import asdict, dataclass
-from decimal import Decimal
+from dataclasses import asdict, dataclass, field, fields
+from decimal import Decimal, InvalidOperation
 import json
 import sys
 from pathlib import Path
-from crash_watcher.core.config import StrategyConfig
+from crash_watcher.core.config import StrategyConfig, positive_number
 from crash_watcher.vision.capture import CaptureConfig
 
 PROJECT_ROOT = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) else Path(__file__).resolve().parents[2]
 SETTINGS_PATH = PROJECT_ROOT / "settings.json"
+# Permanent rule: no click may be issued more than one second after the round
+# closes, so the window before every click is capped at this value.
+MAX_CLICK_DELAY_MS = 1000
 
 @dataclass(frozen=True)
 class Region:
@@ -26,14 +29,43 @@ class DesktopSettings:
     result_region: Region | None = None
     history_region: Region | None = None
     click_region: Region | None = None
+    chart_region: Region | None = None
+    bet_region: Region | None = None  # the row of the three bet buttons (region 4)
     click_point: tuple[int, int] | None = None
+    bet_point_red: tuple[int, int] | None = None
+    bet_point_green: tuple[int, int] | None = None
+    bet_point_yellow: tuple[int, int] | None = None
     autoclick_enabled: bool = False
     autoclick_mode: str = "detect"
     autoclick_threshold: str = "10.00"
     autoclick_cooldown_ms: int = 1500
-    autoclick_delay_ms: int = 0
+    autoclick_delay_ms: int = MAX_CLICK_DELAY_MS
+    autoclick_max_clicks: int = 3
+    autoclick_skip_rounds: int = 7
     autoclick_dry_run: bool = True
     autoclick_restore_cursor: bool = True
+    smart_click_enabled: bool = False
+    prediction_min_confidence: float = 0.60
+    signal_rule_enabled: bool = True
+    signal_repeat: int = 2
+    signal_burst_rounds: int = 9
+    pair_flip_enabled: bool = True
+    row_signal_enabled: bool = True
+    row_signal_gap: int = 4
+    row_signal_rows: int = 4
+    row_signal_recent_columns: int = 4
+    row_signal_clicks: int = 1
+    streak_signal_enabled: bool = True
+    streak_signal_length: int = 6
+    streak_signal_clicks: int = 10
+    pair_cycle_enabled: bool = True
+    double_bet_enabled: bool = True
+    value_bet_enabled: bool = True
+    value_bets: dict[str, str] = field(default_factory=lambda: {
+        "1.00": "GREEN", "1.11": "GREEN", "1.99": "GREEN", "2.08": "YELLOW"})
+    review_window_s: int = 1800
+    session_minutes: int = 0
+    shutdown_after_session: bool = False
     fixed_bet_amount: str = "10"
     max_attempts: int = 8
     yellow_threshold: str = "10.00"
@@ -50,13 +82,107 @@ class DesktopSettings:
             Decimal(self.yellow_threshold),
             Decimal(self.red_threshold),
         )
+
+    def validate(self) -> None:
+        """Reject settings that cannot build a usable session; raise ValueError."""
+        self.strategy()
+        if type(self.interval_ms) is not int or self.interval_ms < 20:
+            raise ValueError("interval_ms must be an integer of at least 20")
+        for name in ("result_region", "history_region", "click_region", "chart_region",
+                     "bet_region"):
+            region = getattr(self, name)
+            if region is None:
+                continue
+            if not isinstance(region, Region):
+                raise ValueError(f"{name} must be a Region")
+            region.capture(self.interval_ms)
+        for name in ("click_point", "bet_point_red", "bet_point_green", "bet_point_yellow"):
+            point = getattr(self, name)
+            if point is None:
+                continue
+            if (not isinstance(point, tuple) or len(point) != 2
+                    or any(type(value) is not int for value in point)):
+                raise ValueError(f"{name} must be a pair of integers")
+        if not 0 < self.ocr_confidence <= 1:
+            raise ValueError("ocr_confidence must be between 0 and 1")
+        if self.autoclick_mode not in ("detect", "point"):
+            raise ValueError("autoclick_mode must be 'detect' or 'point'")
+        try:
+            threshold = Decimal(self.autoclick_threshold)
+        except (InvalidOperation, TypeError, ValueError) as exc:
+            raise ValueError("autoclick_threshold must be a positive number") from exc
+        positive_number(threshold, "autoclick_threshold")
+        if type(self.autoclick_cooldown_ms) is not int or self.autoclick_cooldown_ms < 0:
+            raise ValueError("autoclick_cooldown_ms must be a non-negative integer")
+        if (type(self.autoclick_delay_ms) is not int
+                or not 0 <= self.autoclick_delay_ms <= MAX_CLICK_DELAY_MS):
+            raise ValueError(f"autoclick_delay_ms must be an integer between 0 and {MAX_CLICK_DELAY_MS}")
+        if type(self.autoclick_max_clicks) is not int or self.autoclick_max_clicks <= 0:
+            raise ValueError("autoclick_max_clicks must be a positive integer")
+        if type(self.autoclick_skip_rounds) is not int or self.autoclick_skip_rounds < 0:
+            raise ValueError("autoclick_skip_rounds must be a non-negative integer")
+        if not 0.5 <= self.prediction_min_confidence <= 1:
+            raise ValueError("prediction_min_confidence must be between 0.5 and 1")
+        if type(self.review_window_s) is not int or self.review_window_s < 60:
+            raise ValueError("review_window_s must be an integer of at least 60")
+        if (type(self.session_minutes) is not int or self.session_minutes < 0
+                or self.session_minutes > 1440):
+            raise ValueError("session_minutes must be an integer between 0 and 1440")
+        if type(self.shutdown_after_session) is not bool:
+            raise ValueError("shutdown_after_session must be a boolean")
+        if type(self.signal_repeat) is not int or self.signal_repeat < 1:
+            raise ValueError("signal_repeat must be a positive integer")
+        if type(self.signal_burst_rounds) is not int or self.signal_burst_rounds < 1:
+            raise ValueError("signal_burst_rounds must be a positive integer")
+        if type(self.row_signal_gap) is not int or self.row_signal_gap < 1:
+            raise ValueError("row_signal_gap must be a positive integer")
+        if type(self.row_signal_clicks) is not int or self.row_signal_clicks < 1:
+            raise ValueError("row_signal_clicks must be a positive integer")
+        for name in ("row_signal_rows", "row_signal_recent_columns",
+                     "streak_signal_length", "streak_signal_clicks"):
+            if type(getattr(self, name)) is not int or getattr(self, name) < 1:
+                raise ValueError(f"{name} must be a positive integer")
+        if not isinstance(self.value_bets, dict):
+            raise ValueError("value_bets must map a multiplier to a colour")
+        for text, color in self.value_bets.items():
+            try:
+                amount = Decimal(text)
+            except (InvalidOperation, TypeError, ValueError) as exc:
+                raise ValueError(f"value_bets key {text!r} must be a number") from exc
+            positive_number(amount, f"value_bets[{text}]")
+            if color not in ("RED", "GREEN", "YELLOW"):
+                raise ValueError(f"value_bets[{text}] must be RED, GREEN or YELLOW")
+
 def load_settings(path: Path = SETTINGS_PATH) -> DesktopSettings:
     if not path.exists():
         return DesktopSettings()
     data = json.loads(path.read_text(encoding="utf-8"))
-    for key in ("result_region", "history_region"):
+    for key in ("result_region", "history_region", "click_region", "chart_region", "bet_region"):
         if data.get(key):
             data[key] = Region(**data[key])
+    for key in ("click_point", "bet_point_red", "bet_point_green", "bet_point_yellow"):
+        if data.get(key) is not None:
+            data[key] = tuple(data[key])
+    # Older settings files still carry the immediate-click default of 0.
+    delay = data.get("autoclick_delay_ms")
+    if type(delay) is not int or delay < 0:
+        data["autoclick_delay_ms"] = MAX_CLICK_DELAY_MS
+    elif delay > MAX_CLICK_DELAY_MS:
+        data["autoclick_delay_ms"] = MAX_CLICK_DELAY_MS
+    if data.get("session_minutes") == 360 and data.get("shutdown_after_session") is True:
+        # The timer and the shutdown were the old defaults; the user stops the
+        # session by hand now, so an old file must not shut the machine down.
+        data["session_minutes"] = 0
+        data["shutdown_after_session"] = False
+    if "autoclick_skip_rounds" not in data:
+        # Files written for the old "ten clicks right after the yellow" rule must not
+        # keep clicking ten rounds; the run is now wait 7, click 3.
+        data["autoclick_skip_rounds"] = 7
+        data["autoclick_max_clicks"] = 3
+    known = {item.name for item in fields(DesktopSettings)}
+    # A file written by an older release can carry keys this build no longer has
+    # (a "version" tag, retired options): drop them instead of failing to start.
+    data = {key: value for key, value in data.items() if key in known}
     result = DesktopSettings(**data)
     result.validate()
     return result
