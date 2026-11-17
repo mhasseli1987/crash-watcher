@@ -14,7 +14,7 @@ import numpy as np
 from .config import DesktopSettings, PROJECT_ROOT
 from .color_grid import read_grid
 from .forecast import ColorForecaster
-from .signals import (green_row_repeat, next_dot_row, row_yellow_due, two_yellows_in_a_row,
+from .signals import (next_dot_row, row_yellow_due, row_yellow_repeat, two_yellows_in_a_row,
                       yellow_green_green_yellow, yellow_green_then_red)
 
 _DOWN = 0x0002
@@ -89,7 +89,7 @@ RULE_LABELS = {"yellow-run": "صف ۷+۳ زرد", "yellow-pair": "جفت زرد"
                "streak-run": "روند هم‌رنگ ۷+", "value-bet": "ضریب ویژه",
                "pair-flip": "جفت رنگ", "smart": "کلیک هوشمند",
                "yellow-pair-cycle": "جفت زرد ← زرد تکی",
-               "green-row-repeat": "سبز/زرد هم‌سطر ۴ ستون",
+               "row-repeat": "تکرار زرد در سطر",
                "yellow-green-red": "زرد-سبز ← قرمز",
                "yellow-red-double": "زرد+قرمز هم‌زمان"}
 
@@ -130,7 +130,7 @@ class AutoClicker:
         self._pair_ready = False
         self._pair_cycles = 0
         self._double_left = 0
-        self._green_locked = False
+        self._row_repeat_key: tuple[int, int] | None = None
         self._yg_locked = False
         self.forecaster = ColorForecaster()
         self._pending_color: str | None = None
@@ -438,25 +438,28 @@ class AutoClicker:
                 bets.append(("RED", "yellow-red-double"))
         shaped = (reading is not None and hasattr(reading, "color_at")
                   and self.settings.row_signal_enabled)
-        green_row_click = yg_red_click = False
+        row_repeat_click = yg_red_click = False
         if shaped:
-            if not self._green_locked:
-                green_row_click = green_row_repeat(
-                    reading, self.settings.row_signal_gap, 1,
-                    max(1, self.settings.row_signal_rows - 1)) is not None
+            gap = self.settings.row_signal_gap
+            last_row = max(0, self.settings.row_signal_rows - 1)
+            repeat = None
+            for candidate in (gap, gap + 1):
+                hit = row_yellow_repeat(reading, candidate, last_row)
+                if hit is not None:
+                    repeat = (candidate, hit)
+                    break
+            # Only a shape that was not already bet may click again, so one
+            # repeat costs one bet and a persisting shape never repeats itself.
+            row_repeat_click = repeat is not None and repeat != self._row_repeat_key
+            self._row_repeat_key = repeat
             if not self._yg_locked:
-                yg_red_click = yellow_green_then_red(reading,
-                                                     self.settings.row_signal_gap + 1)
-        if color != "GREEN":
-            self._green_locked = False
-        elif green_row_click:
-            self._green_locked = True
+                yg_red_click = yellow_green_then_red(reading, gap + 1)
         if color != "RED":
             self._yg_locked = False
         elif yg_red_click:
             self._yg_locked = True
-        if green_row_click:
-            bets.append(("YELLOW", "green-row-repeat"))
+        if row_repeat_click:
+            bets.append(("YELLOW", "row-repeat"))
         if yg_red_click:
             bets.append(("YELLOW", "yellow-green-red"))
         threshold = Decimal(self.settings.autoclick_threshold)
