@@ -653,3 +653,43 @@ def test_clicker_without_target_sends_nothing(no_detection):
                                          autoclick_cooldown_ms=0, autoclick_skip_rounds=0),
                          sender=sender).fire("r1", Decimal("10.00"))
     assert not report.clicked and report.reason == "target not found" and sender.calls == []
+
+
+def _grid(cells, columns=8, rows=6):
+    from crash_watcher.desktop.color_grid import Dot, GridReading
+    dots = tuple(Dot(color, column, row, column * 10, row * 10)
+                 for color, column, row in cells)
+    return GridReading(dots, columns, rows, 10.0)
+
+
+def test_row_signal_reads_a_repeat_four_and_five_columns_back():
+    cells = [("RED", 0, 0), ("GREEN", 0, 1),
+             ("RED", 1, 0), ("RED", 2, 0), ("RED", 3, 0),
+             ("YELLOW", 4, 2), ("YELLOW", 5, 2)]
+    reading = _grid(cells)
+    assert row_yellow_due(reading, 4, 4, 4) is True
+    assert row_yellow_due(reading, 5, 4, 4) is True
+    assert row_yellow_due(reading, 6, 4, 4) is False
+
+
+def test_row_signal_stops_below_the_fourth_row():
+    # The next dot fills row five, where the user never bets a repeated yellow.
+    cells = [("RED", 0, 0), ("RED", 0, 1), ("RED", 0, 2), ("RED", 0, 3),
+             ("YELLOW", 4, 4)]
+    assert row_yellow_due(_grid(cells), 4, 4, 4) is False
+
+
+def test_row_signal_bets_one_shape_once(no_detection, monkeypatch):
+    sender = _Sender()
+    clicker = AutoClicker(_clicker(autoclick_threshold="100", row_signal_clicks=1,
+                                   pair_flip_enabled=False, streak_signal_enabled=False,
+                                   value_bet_enabled=False, signal_rule_enabled=False,
+                                   double_bet_enabled=False), sender=sender)
+    reading = _grid([("RED", 0, 0), ("GREEN", 0, 1),
+                     ("RED", 1, 0), ("RED", 2, 0), ("RED", 3, 0),
+                     ("YELLOW", 4, 2)])
+    monkeypatch.setattr(AutoClicker, "_chart_reading", lambda self: reading)
+    first = clicker.fire("r1", Decimal("1.50"))
+    assert first.clicked and first.rule == "row-signal" and first.target == "YELLOW"
+    again = clicker.fire("r2", Decimal("1.50"))
+    assert not again.clicked and len(sender.calls) == 1

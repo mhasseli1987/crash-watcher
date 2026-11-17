@@ -14,7 +14,7 @@ import numpy as np
 from .config import DesktopSettings, PROJECT_ROOT
 from .color_grid import read_grid
 from .forecast import ColorForecaster
-from .signals import (next_dot_row, row_yellow_due, row_yellow_repeat, two_yellows_in_a_row,
+from .signals import (next_dot_row, row_yellow_due, two_yellows_in_a_row,
                       yellow_green_green_yellow, yellow_green_then_red)
 
 _DOWN = 0x0002
@@ -89,7 +89,7 @@ RULE_LABELS = {"yellow-run": "صف ۷+۳ زرد", "yellow-pair": "جفت زرد"
                "streak-run": "روند هم‌رنگ ۷+", "value-bet": "ضریب ویژه",
                "pair-flip": "جفت رنگ", "smart": "کلیک هوشمند",
                "yellow-pair-cycle": "جفت زرد ← زرد تکی",
-               "row-repeat": "تکرار زرد در سطر",
+               "row-signal": "سیگنال سطری (تکرار زرد در سطر)",
                "yellow-green-red": "زرد-سبز ← قرمز",
                "yellow-red-double": "زرد+قرمز هم‌زمان"}
 
@@ -130,7 +130,7 @@ class AutoClicker:
         self._pair_ready = False
         self._pair_cycles = 0
         self._double_left = 0
-        self._row_repeat_key: tuple[int, int] | None = None
+
         self._yg_locked = False
         self.forecaster = ColorForecaster()
         self._pending_color: str | None = None
@@ -402,13 +402,17 @@ class AutoClicker:
             self._yellow_burst_uses = self.settings.signal_burst_rounds
         self._run_seen = run_shape
         row_gap = self.settings.row_signal_gap
-        row_due = (self.settings.row_signal_enabled
-                   and row_yellow_due(reading, row_gap, self.settings.row_signal_rows,
-                                      self.settings.row_signal_recent_columns))
+        row_due = False
         row_cell = None
-        if row_due:
-            row = next_dot_row(reading)
-            row_cell = (row, row_gap) if row is not None else None
+        if self.settings.row_signal_enabled and reading is not None:
+            # One rule, two spacings the user has seen: four or five columns back.
+            for candidate in (row_gap, row_gap + 1):
+                if row_yellow_due(reading, candidate, self.settings.row_signal_rows,
+                                  self.settings.row_signal_recent_columns):
+                    row_due = True
+                    row = next_dot_row(reading)
+                    row_cell = (candidate, row) if row is not None else None
+                    break
         if (row_due and self._row_uses <= 0
                 and (row_cell is None or row_cell != self._row_cell)):
             # The row this round fills was yellow `gap` columns back, so the repeat
@@ -438,28 +442,13 @@ class AutoClicker:
                 bets.append(("RED", "yellow-red-double"))
         shaped = (reading is not None and hasattr(reading, "color_at")
                   and self.settings.row_signal_enabled)
-        row_repeat_click = yg_red_click = False
-        if shaped:
-            gap = self.settings.row_signal_gap
-            last_row = max(0, self.settings.row_signal_rows - 1)
-            repeat = None
-            for candidate in (gap, gap + 1):
-                hit = row_yellow_repeat(reading, candidate, last_row)
-                if hit is not None:
-                    repeat = (candidate, hit)
-                    break
-            # Only a shape that was not already bet may click again, so one
-            # repeat costs one bet and a persisting shape never repeats itself.
-            row_repeat_click = repeat is not None and repeat != self._row_repeat_key
-            self._row_repeat_key = repeat
-            if not self._yg_locked:
-                yg_red_click = yellow_green_then_red(reading, gap + 1)
+        yg_red_click = False
+        if shaped and not self._yg_locked:
+            yg_red_click = yellow_green_then_red(reading, self.settings.row_signal_gap + 1)
         if color != "RED":
             self._yg_locked = False
         elif yg_red_click:
             self._yg_locked = True
-        if row_repeat_click:
-            bets.append(("YELLOW", "row-repeat"))
         if yg_red_click:
             bets.append(("YELLOW", "yellow-green-red"))
         threshold = Decimal(self.settings.autoclick_threshold)

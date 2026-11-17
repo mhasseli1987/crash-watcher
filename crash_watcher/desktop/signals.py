@@ -55,26 +55,6 @@ def row_yellow_due(reading: GridReading | None, gap: int = 4, rows: int = 4,
     return reading.color_at(gap, row) == "YELLOW"
 
 
-def row_yellow_repeat(reading: GridReading | None, gap: int = 4,
-                      last_row: int = 3) -> int | None:
-    """Rule 2: the row the next dot fills was yellow `gap` columns back.
-
-    The user watches yellows repeating along one row of the chart — in any of
-    the first four rows, never row five or lower — and wants the bet placed on
-    the round that is about to land there, before that yellow is drawn.
-
-    Returns the row the repeat is expected in, or None.
-    """
-    if reading is None or gap < 1:
-        return None
-    if reading.columns <= gap:
-        return None
-    row = next_dot_row(reading)
-    if row is None or row > last_row:
-        return None
-    return row if reading.color_at(gap, row) == "YELLOW" else None
-
-
 def yellow_green_then_red(reading: GridReading | None, gap: int = 5) -> bool:
     """Rule 3: yellow then green in a column, and `gap` columns later a red one.
 
