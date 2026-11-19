@@ -1,0 +1,384 @@
+PHASE 1 — Crash Watcher Strategy Engine
+
+You are a senior Python software engineer specializing in event-driven systems, state machines, and automated testing.
+
+We are developing a Windows desktop application called Crash Watcher.
+
+IMPORTANT: This is Phase 1 only.
+
+Do not build the GUI, screen monitoring, OCR, browser integration, mouse automation, or EXE package yet.
+
+Your ONLY responsibility is to build a robust, independently testable strategy engine and a comprehensive automated test suite.
+
+Do not attempt to implement future phases prematurely.
+
+1. Development Environment
+
+Use:
+
+- Python 3.11+
+- Standard Python libraries wherever possible
+- pytest for automated testing
+- dataclasses and enums where appropriate
+- Type hints throughout the code
+
+Keep the implementation modular and easy to integrate into a future PySide6 desktop application.
+
+2. Strategy Rules
+
+The strategy is called:
+
+YELLOW HUNTER
+
+Crash multipliers have three categories:
+
+- RED: multiplier below 2.00
+- GREEN: multiplier from 2.00 to 9.99
+- YELLOW: multiplier equal to or above 10.00
+
+The strategy must operate using confirmed round results.
+
+STATE 1 — WAITING_FOR_YELLOW
+
+Initially, the strategy is inactive.
+
+Wait until a confirmed yellow result (10.00 or higher) arrives.
+
+This yellow result is the trigger.
+
+IMPORTANT:
+The trigger round itself is NOT a bet.
+
+After receiving the trigger:
+
+- Activate a new cycle.
+- Set attempt number to 0.
+- Set remaining attempts to 10.
+- Transition to ACTIVE_CYCLE.
+
+STATE 2 — ACTIVE_CYCLE
+
+The strategy tracks the NEXT 10 completed rounds.
+
+Each subsequent completed round represents exactly one simulated bet.
+
+The bet:
+
+- Always targets YELLOW.
+- Always uses the same fixed amount.
+- Does not increase after losses.
+- Does not use Martingale.
+- Does not use progressive staking.
+
+For each completed round:
+
+IF multiplier >= 10.00:
+
+- Register a simulated WIN.
+- Mark the current cycle as WON.
+- Immediately terminate the cycle.
+- Reset attempt number to 0.
+- Reset remaining attempts.
+- Return to WAITING_FOR_YELLOW.
+- Do not reuse this winning yellow as a new trigger.
+
+IF multiplier < 10.00:
+
+- Register a simulated LOSS.
+- Increase attempt number by one.
+- Decrease remaining attempts by one.
+
+IF attempt number reaches 10 without a yellow result:
+
+- Mark the cycle as EXPIRED.
+- Stop registering bets.
+- Reset the strategy state.
+- Return to WAITING_FOR_YELLOW.
+
+A win on ANY attempt from 1 to 10 must immediately terminate the cycle.
+
+3. Configuration
+
+Create a configurable strategy configuration.
+
+Fields:
+
+- fixed_bet_amount: configurable positive number.
+- max_attempts: default 10.
+- yellow_threshold: default 10.00.
+- red_threshold: 2.00.
+
+Validate all configuration values.
+
+The fixed bet amount must remain unchanged throughout a cycle.
+
+Reject invalid amounts, invalid thresholds, and invalid attempt counts.
+
+4. Architecture
+
+Create a clean project structure:
+
+crash_watcher/
+init.py
+
+core/
+    __init__.py
+    models.py
+    enums.py
+    config.py
+    strategy_engine.py
+    events.py
+
+tests/
+    __init__.py
+    test_strategy_engine.py
+    test_edge_cases.py
+    test_configuration.py
+
+examples/
+    strategy_simulation.py
+
+requirements.txt
+README.md
+
+You may improve the architecture if necessary, but maintain clear separation of responsibilities.
+
+5. Strategy Engine API
+
+Design a simple public interface.
+
+Example:
+
+engine = StrategyEngine(
+config=StrategyConfig(
+fixed_bet_amount=10,
+max_attempts=10,
+yellow_threshold=10.0
+)
+)
+
+result = engine.process_round(
+round_id="round_001",
+multiplier=12.45
+)
+
+The engine should return a structured result describing:
+
+- Round ID
+- Multiplier
+- Multiplier category
+- Previous strategy state
+- Current strategy state
+- Whether a cycle was triggered
+- Whether a simulated bet was registered
+- Bet amount
+- Attempt number
+- Remaining attempts
+- Bet outcome: WON, LOST, or NONE
+- Cycle outcome: ACTIVE, WON, EXPIRED, or NONE
+- Event timestamp
+
+Use structured Python objects, not unstructured dictionaries where avoidable.
+
+6. Duplicate Protection
+
+The same round must NEVER be processed twice.
+
+Implement round ID validation.
+
+If an already-processed round ID is submitted again:
+
+- Do not change the strategy state.
+- Do not register another simulated bet.
+- Return a clear duplicate-event result.
+
+Round IDs must be unique.
+
+7. Event System
+
+Create structured strategy events.
+
+Examples:
+
+- YELLOW_TRIGGER_DETECTED
+- CYCLE_STARTED
+- SIMULATED_BET_REGISTERED
+- SIMULATED_BET_WON
+- SIMULATED_BET_LOST
+- CYCLE_EXPIRED
+- CYCLE_RESET
+- DUPLICATE_ROUND_IGNORED
+
+Keep event generation independent from the future GUI.
+
+The GUI will eventually consume these events.
+
+8. Important Edge Cases
+
+Handle:
+
+- Missing round IDs.
+- Duplicate rounds.
+- Invalid multiplier values.
+- Negative multipliers.
+- NaN and infinity.
+- Invalid configuration.
+- Consecutive yellow results.
+- Yellow trigger after an expired cycle.
+- Winning yellow on attempt 1.
+- Winning yellow on attempt 2.
+- Winning yellow on attempt 5.
+- Winning yellow on attempt 9.
+- Winning yellow on attempt 10.
+- Ten consecutive losses.
+- Engine reset.
+- Multiple consecutive cycles.
+
+Never silently accept invalid input.
+
+9. Automated Tests
+
+Use pytest.
+
+Write comprehensive tests covering all strategy rules.
+
+At minimum, implement these scenarios:
+
+TEST 1:
+Initial state is WAITING_FOR_YELLOW.
+
+TEST 2:
+A red result does not activate a cycle.
+
+TEST 3:
+A green result does not activate a cycle.
+
+TEST 4:
+A yellow result activates a cycle.
+
+TEST 5:
+The trigger yellow is not counted as a bet.
+
+TEST 6:
+The first subsequent red result registers one loss.
+
+TEST 7:
+The first subsequent green result registers one loss.
+
+TEST 8:
+Yellow on attempt 1 registers a win and resets immediately.
+
+TEST 9:
+Yellow on attempt 2 registers a win and resets immediately.
+
+TEST 10:
+Yellow on attempt 5 registers a win and resets immediately.
+
+TEST 11:
+Yellow on attempt 9 registers a win and resets immediately.
+
+TEST 12:
+Yellow on attempt 10 registers a win and resets immediately.
+
+TEST 13:
+Ten consecutive non-yellow results expire the cycle.
+
+TEST 14:
+No additional bets are registered after cycle expiration.
+
+TEST 15:
+A winning yellow is not reused as the next cycle trigger.
+
+TEST 16:
+A new yellow after a completed cycle starts a new cycle.
+
+TEST 17:
+The fixed bet amount remains unchanged throughout a cycle.
+
+TEST 18:
+Duplicate round IDs do not register duplicate bets.
+
+TEST 19:
+Invalid multipliers are rejected.
+
+TEST 20:
+Invalid configuration is rejected.
+
+TEST 21:
+Multiple cycles work independently.
+
+TEST 22:
+Reset functionality returns the engine to its initial state.
+
+Add additional tests wherever useful.
+
+10. Simulation Example
+
+Create:
+
+examples/strategy_simulation.py
+
+This script must simulate a sequence of rounds and print:
+
+- Round number
+- Multiplier
+- Category
+- Strategy state
+- Attempt number
+- Remaining attempts
+- Simulated bet
+- Win/loss
+- Cycle status
+
+Use deterministic test data.
+
+Include examples of:
+
+- A successful cycle on attempt 3.
+- An expired cycle after 10 losses.
+- A second cycle starting after expiration.
+
+11. Code Quality
+
+Requirements:
+
+- Type hints.
+- Clear documentation.
+- Small, focused methods.
+- No unnecessary dependencies.
+- No global mutable state.
+- Deterministic behavior.
+- Predictable state transitions.
+- Readable code.
+- Comprehensive error handling.
+
+Do not mix strategy rules with screen recognition or UI code.
+
+12. Completion Criteria
+
+Before finishing:
+
+1. Create every required file.
+2. Run pytest.
+3. Fix all failing tests.
+4. Run the simulation example.
+5. Verify all state transitions.
+6. Inspect the project for unfinished placeholders.
+7. Update README with usage examples.
+
+Do not claim success unless tests have actually passed.
+
+At the end, provide:
+
+- Project structure.
+- Explanation of the strategy engine.
+- Test results.
+- Instructions for running the tests.
+- Instructions for running the simulation.
+- Any known limitations.
+
+STOP after completing Phase 1.
+
+Do not start Phase 2 until explicitly instructed.
+
+The strategy engine must be stable, deterministic, and ready for integration into the future Crash Watcher desktop application.

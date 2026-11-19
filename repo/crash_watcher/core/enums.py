@@ -1,0 +1,28 @@
+"""Public strategy vocabulary."""
+from enum import Enum
+class StrategyState(str, Enum):
+    WAITING_FOR_YELLOW = "WAITING_FOR_YELLOW"
+    ACTIVE_CYCLE = "ACTIVE_CYCLE"
+class MultiplierCategory(str, Enum):
+    RED = "RED"
+    GREEN = "GREEN"
+    YELLOW = "YELLOW"
+class BetOutcome(str, Enum):
+    NONE = "NONE"
+    WON = "WON"
+    LOST = "LOST"
+class CycleOutcome(str, Enum):
+    NONE = "NONE"
+    ACTIVE = "ACTIVE"
+    WON = "WON"
+    EXPIRED = "EXPIRED"
+class EventType(str, Enum):
+    YELLOW_TRIGGER_DETECTED = "YELLOW_TRIGGER_DETECTED"
+    CYCLE_STARTED = "CYCLE_STARTED"
+    SIMULATED_BET_REGISTERED = "SIMULATED_BET_REGISTERED"
+    SIMULATED_BET_WON = "SIMULATED_BET_WON"
+    SIMULATED_BET_LOST = "SIMULATED_BET_LOST"
+    CYCLE_WON = "CYCLE_WON"
+    CYCLE_EXPIRED = "CYCLE_EXPIRED"
+    CYCLE_RESET = "CYCLE_RESET"
+    DUPLICATE_ROUND_IGNORED = "DUPLICATE_ROUND_IGNORED"

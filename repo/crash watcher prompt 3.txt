@@ -1,0 +1,433 @@
+FINAL PHASE — Build the Complete Crash Watcher Windows Desktop Application
+
+You are now working on the FINAL PHASE of Crash Watcher.
+
+Your task is to integrate Phase 1 (Strategy Engine) and Phase 2 (Vision Engine) into a complete, professional Windows desktop application that I can run directly on my laptop.
+
+Do not rebuild existing modules unnecessarily. First inspect the entire repository, understand the existing architecture, and reuse the completed and tested code.
+
+1. Mandatory pre-development inspection
+
+Before writing code:
+
+1. Inspect the complete project structure.
+2. Read the Phase 1 strategy engine and its tests.
+3. Read the Phase 2 vision engine, OCR, screen capture, calibration, diagnostics, and CLI utilities.
+4. Identify the actual public APIs and integration points.
+5. Run the existing complete test suite.
+6. Check how the local Tesseract installation and its language/data files are configured.
+7. Inspect the two reference screenshots I provide. Use them to understand the actual Crash game interface, multiplier display, colors, and screen layout.
+
+Do not assume module names, function signatures, or file paths. Inspect them.
+
+If the screenshots are not available in the project, ask me to provide them before finalizing the screen-detection configuration.
+
+2. Build the desktop GUI
+
+Create a polished, professional Windows desktop application.
+
+The interface should be modern, clean, dark-themed, and easy to use.
+
+Required sections:
+
+A. Main dashboard
+
+Display:
+
+- Current monitoring status
+- Current detected multiplier
+- Detected result color: RED / GREEN / YELLOW
+- OCR confidence
+- Current strategy state
+- Current cycle number
+- Current attempt number
+- Remaining attempts
+- Fixed bet amount
+- Total completed cycles
+- Successful cycles
+- Expired cycles
+- Simulated wins and losses
+
+B. Screen selection and calibration
+
+The user opens the game manually in Firefox.
+
+The application must:
+
+- Allow the user to select a rectangular screen region using the mouse.
+- Display a live preview of the selected region.
+- Allow resizing and repositioning the selected region.
+- Save the selected region configuration locally.
+- Provide a calibration/test button.
+- Display the captured image and OCR output.
+- Show the detected multiplier and color.
+- Clearly indicate low-confidence or uncertain detections.
+
+Use the existing Phase 2 screen capture and vision modules.
+
+Do not connect to the website, browser APIs, game APIs, network endpoints, or browser extensions.
+
+C. Monitoring controls
+
+Provide:
+
+- START MONITORING
+- STOP MONITORING
+- PAUSE
+- RESUME
+- RESET SESSION
+
+The application must never start monitoring automatically when opened.
+
+Monitoring starts only after the user presses START.
+
+D. Live event history
+
+Create a readable event log showing:
+
+- Round ID
+- Detected multiplier
+- Detected color
+- OCR confidence
+- Detection timestamp
+- Strategy state
+- Attempt number
+- Result: TRIGGER / SIMULATED WIN / SIMULATED LOSS / EXPIRED / UNCERTAIN
+
+Allow the user to clear or export the event history.
+
+3. Preserve the exact Phase 1 strategy
+
+The strategy logic must remain unchanged.
+
+Rules:
+
+1. Wait until a confirmed YELLOW multiplier (10.00 or higher) appears.
+2. That first yellow result is only a trigger. It is NOT a bet.
+3. After the trigger, simulate a fixed amount on yellow for the next 10 confirmed rounds.
+4. If yellow appears during any of those 10 attempts, record a simulated win and immediately end the cycle.
+5. The winning yellow must NOT be reused as the trigger for another cycle.
+6. Wait for a NEW yellow result to start the next cycle.
+7. If all 10 attempts fail, mark the cycle EXPIRED.
+8. After expiration, wait for a new yellow trigger.
+9. The simulated amount must remain fixed. Never increase it after losses.
+10. Never implement Martingale.
+
+Only confirmed rounds from Phase 2 may enter the strategy engine.
+
+Uncertain OCR results, animation frames, and duplicate round IDs must never produce additional strategy attempts.
+
+4. Important: simulation only
+
+For this final phase, implement signal detection and simulated betting only.
+
+Do not:
+
+- Place real bets.
+- Click the game's betting buttons.
+- Enter amounts into the website.
+- Automate Firefox.
+- Interact with the website through scripts.
+- Use browser cookies, APIs, network requests, or extensions.
+
+The software is a local screen-monitoring and strategy-simulation tool.
+
+Clearly label simulated results as SIMULATED.
+
+5. Reliability and error handling
+
+The application must:
+
+- Prevent duplicate round processing.
+- Handle temporary OCR failures.
+- Handle Firefox being minimized or the selected region becoming unavailable.
+- Detect screen resolution changes.
+- Handle Tesseract startup or path errors.
+- Avoid freezing the GUI during OCR or screen capture.
+- Use a background worker for monitoring.
+- Stop workers cleanly when monitoring stops or the application closes.
+- Prevent multiple monitoring workers from running simultaneously.
+- Keep the UI responsive.
+- Log errors in a useful way.
+
+Do not silently convert uncertain results into valid rounds.
+
+6. Configuration and persistence
+
+Save locally:
+
+- Selected screen region
+- OCR configuration
+- Yellow threshold
+- Maximum attempts
+- Fixed simulated bet amount
+- UI preferences
+
+Default values:
+
+- Yellow threshold: 10.00
+- Maximum attempts: 10
+- Browser: Firefox
+- Bet amount: configurable but fixed during each cycle
+
+On application restart, restore settings but do not automatically resume monitoring.
+
+Provide a RESET ALL SETTINGS option with confirmation.
+
+7. Windows packaging
+
+Prepare the project to run as a standalone Windows application.
+
+Use an appropriate packaging solution such as PyInstaller, after inspecting the existing dependencies.
+
+Requirements:
+
+- Provide a Windows build script (.bat or PowerShell).
+- Include all necessary application modules.
+- Include or correctly bundle the local Tesseract executable and required OCR data files.
+- Handle paths correctly when running from an EXE.
+- Do not assume Python is installed on the target laptop.
+- Provide a clean application icon if feasible.
+- Avoid unnecessary console windows in the final GUI build.
+- Generate a distributable Windows build.
+
+Prefer a one-folder distribution if bundling Tesseract into a single EXE would make the application unreliable. A reliable working application is more important than forcing a single-file EXE.
+
+Also provide a portable development/run mode for debugging.
+
+8. Testing requirements
+
+Before declaring the project complete:
+
+1. Run all Phase 1 tests.
+2. Run all Phase 2 tests.
+3. Add GUI and integration tests.
+4. Test the complete strategy lifecycle.
+5. Test screen-region selection and configuration persistence.
+6. Test OCR errors and uncertain detections.
+7. Test duplicate round protection.
+8. Test stopping and restarting monitoring.
+9. Test application shutdown while monitoring is active.
+10. Test the packaged application on Windows if a Windows environment is available.
+
+Report exact test results:
+
+- Passed
+- Failed
+- Skipped
+- Errors
+
+Do not claim Windows EXE execution was verified if you only built it on Linux or another operating system.
+
+9. Documentation
+
+Create a Persian-language README or installation guide explaining:
+
+- How to install and run the application.
+- How to open the game in Firefox.
+- How to select the game region.
+- How to calibrate OCR.
+- How to start and stop monitoring.
+- What each dashboard value means.
+- How the strategy works.
+- Where settings and logs are stored.
+- How to troubleshoot Tesseract and screen capture errors.
+
+10. Final deliverables
+
+At the end, provide:
+
+1. Complete integrated source code.
+2. Windows build script.
+3. Working Windows distribution, if the build environment supports it.
+4. Persian installation guide.
+5. Test report.
+6. Exact output folder location.
+7. Instructions for running the application on my laptop.
+
+Do not delete or damage the existing Phase 1 and Phase 2 implementations.
+
+Do not replace working code with simplified mock implementations.
+
+Do not fabricate test results or claim that real Firefox detection works without actually testing it.
+
+Work carefully, finish the integration, and leave the repository in a clean, runnable state.
+
+This is the FINAL PHASE. Do not start unrelated features.
+IMPORTANT — Game Interface Reference Screenshots
+
+I am providing two real screenshots of the game interface.
+
+Study both screenshots carefully and use them as visual references when integrating the Vision Engine.
+
+Observations from the screenshots
+
+The interface contains:
+
+1. A Trends section with a grid of colored circular markers.
+2. A recent-results strip showing round IDs and numeric multipliers, for example values such as 1.16x, 4.20x, and 1.33x.
+3. A main game chart.
+4. A countdown message such as "Starts in 4.4 s".
+5. Three betting categories:
+   - Red: orange-colored visual indicator.
+   - Green: green-colored visual indicator.
+   - Moon: yellow-colored visual indicator, with a displayed 10x payout.
+
+Critical color classification
+
+Do not assume that the visual red category is necessarily displayed as pure RGB red.
+
+The screenshot shows:
+
+- Red category: orange-looking marker.
+- Green category: green marker.
+- Moon category: yellow marker.
+
+The strategy's YELLOW category means the game's MOON category, with a confirmed multiplier of 10.00 or higher.
+
+Use actual screenshot sampling and calibration to determine reliable color ranges. Do not rely on arbitrary hardcoded RGB values.
+
+Detection requirements
+
+1. The countdown text "Starts in ..." is not a completed round result.
+2. Do not interpret countdown values as multipliers.
+3. Do not interpret chart axes, payout labels, or button text as round results.
+4. Do not interpret historical trend dots as numeric multipliers.
+5. A trend dot may help identify a historical category, but it cannot prove the exact multiplier.
+6. Prefer a verified numeric result source for the actual multiplier.
+7. Inspect the recent-results strip and actual completed-round states to determine where the latest confirmed multiplier is displayed.
+8. Do not assume the order of trend-grid cells without verifying the game's chronological ordering.
+9. Prevent the same historical result from being processed more than once.
+10. If the current result cannot be read reliably, mark it UNCERTAIN and do not send it to the strategy engine.
+
+Desktop and laptop compatibility
+
+The provided screenshots are mobile screenshots.
+
+Do not use their pixel coordinates as fixed desktop coordinates.
+
+The application must support:
+
+- Different screen resolutions.
+- Browser window resizing.
+- Desktop Firefox.
+- Different zoom levels.
+- User-selected capture regions.
+- Calibration on the actual laptop display.
+
+The user must be able to select the relevant game region manually.
+
+Required validation
+
+Before claiming the vision system is ready:
+
+- Test the actual game page in Firefox on the target laptop.
+- Verify detection of all three categories.
+- Verify numeric multiplier extraction.
+- Verify countdown rejection.
+- Verify that the latest completed round is detected only once.
+- Verify that the trend grid is not mistaken for a numeric multiplier.
+- Report any cases where detection remains uncertain.
+
+The screenshots are interface references, not proof that every game state has been tested.
+
+Preserve the Phase 1 strategy rules exactly. Keep the final application in simulation-only mode. Do not implement automated betting.
+FINAL VISION UPDATE — Confirmed Crash Result Detection
+
+I have provided an additional real screenshot showing the exact moment a Crash round ends.
+
+This screenshot reveals the most important visual element for result detection.
+
+1. Primary result detection
+
+When a round ends, the center of the game chart displays a message similar to:
+
+"Bang @1.46x"
+
+The numeric multiplier following the @ symbol is the final multiplier of that completed round.
+
+Examples:
+
+- Bang @1.46x → 1.46
+- Bang @7.50x → 7.50
+- Bang @13.05x → 13.05
+
+Prioritize detecting this final-result message.
+
+Do not read the chart axis, payout labels, or betting buttons as results.
+
+2. Secondary result verification
+
+The top recent-results strip displays:
+
+- Round ID
+- Colored indicator
+- Numeric multiplier
+
+Example values from the reference screenshot:
+
+- 1.82x (orange)
+- 13.05x (yellow)
+- 7.50x (green)
+
+Use this strip as a secondary verification source and for duplicate protection.
+
+Never confuse a historical result in this strip with the newly completed round.
+
+3. Round confirmation state machine
+
+Implement or adapt the detection logic as follows:
+
+- WAITING: no confirmed final result.
+- ROUND_RUNNING: game is running.
+- RESULT_CANDIDATE: a possible "Bang @..." result is detected.
+- RESULT_CONFIRMED: the multiplier is stable and sufficiently reliable.
+- UNCERTAIN: OCR or visual evidence is insufficient.
+
+Only RESULT_CONFIRMED may be forwarded to the Phase 1 strategy engine.
+
+Require appropriate stability checks and duplicate protection.
+
+4. Color classification
+
+The strategy's yellow category means Moon:
+
+- Yellow result: multiplier >= 10.00
+- Green result: multiplier from 2.00 to 9.99
+- Red result: multiplier < 2.00
+
+The screenshot's orange-looking marker corresponds to the game's Red category.
+
+Do not classify colors using button colors alone.
+
+Use the confirmed numeric multiplier as the primary category classification whenever available. Use the visual marker as a consistency check.
+
+5. Important exclusions
+
+Never treat these as completed results:
+
+- "Starts in 4.4 s"
+- Chart axis values such as 1.2x or 1.8x
+- Payout values such as 1.96x or 10x
+- Historical results that were already processed
+- Animated or unstable text
+
+6. Final validation
+
+Use the provided screenshots as visual references.
+
+Test the actual game in desktop Firefox at the laptop's real screen resolution.
+
+Verify:
+
+- Bang result extraction
+- Decimal accuracy
+- Yellow, green, and red classification
+- Round ID handling
+- Duplicate protection
+- Correct handoff to Phase 1
+- No false triggers from countdown or payout labels
+
+If the real game cannot be tested, clearly report that live detection is not yet verified.
+
+Do not modify Phase 1 strategy rules. Keep the application simulation-only.
