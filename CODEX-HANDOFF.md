@@ -1,11 +1,116 @@
 # Crash Watcher — complete handoff brief for Codex
 
-Last updated: 2026-11-19 (فیکس کرش settings.json قدیمی + بیلد دوبارهٔ exe). This file is the single source of truth for the
+Last updated: 2026-11-19 (AI Analysis با مغز OpenAI، حذف قواعد، و کلیک کلاسیک + Cash Out). This file is the single source of truth for the
 current state of the project. Read it fully before touching code.
 
 ---
 
-## 2026-11-19 (ج) — فیکس کرش «unexpected keyword argument» هنگام اجرای exe (آخرین تغییر)
+## 2026-11-19 (و) — AI Analysis، حذف قواعد، و کلیک کلاسیک + Cash Out (آخرین تغییر)
+
+### خلاصهٔ فارسی
+
+- زبانهٔ «بررسی هوشمند» به **AI Analysis** تغییر نام داد (انگلیسی) و در آن **هیچ‌کدام از
+  قواعد قبلی ربات اجرا نمی‌شوند**: نه ۷+۳، نه جفت زرد/سطری/روند، نه ضریب ویژه و نه موتور ۳x.
+  پرسمان فقط دادهٔ خام می‌فرستد (تا ۳۰ ضریب گذشته با رنگ هر کدام، ضریب جاری، ستون‌های
+  نمودار رنگ، دکمه‌های شرط و تعداد دور) و مدل خودش الگو را پیدا می‌کند.
+- «مغز متفکر»: FreeLLMAPI محلی یا **API رسمی OpenAI** (`https://api.openai.com/v1`،
+  پیش‌فرض `gpt-4o-mini`؛ `auto` برای OpenAI به `gpt-4o-mini` تبدیل می‌شود).
+- چهار زبانهٔ پایین پنجره هم‌رنگ سبز شدند؛ نشان «بدون تایمر» بالای پنجره و کنترل «مهلت
+  پاسخ مدل» حذف شد (مهلت ثابت ۱۲۰ ثانیه).
+- **گزینهٔ جدید «کلیک کلاسیک + Cash Out زیر ۱٫۹۹»** در AI Analysis: ربات دکمه‌های رنگ را
+  نمی‌زند؛ پیش از پایان ۶ ثانیه یک بار روی «محل کلیک کلاسیک» (دکمهٔ Bet / Cash Out) کلیک
+  می‌کند و وارد بازی می‌شود، بعد ضریب زنده را از ناحیهٔ ۲ می‌خواند و روی عددی که مدل در فیلد
+  `exit` انتخاب کرده (مثلاً ۱٫۳۰ یا ۱٫۸۵) دوباره همان نقطه را می‌زند و خارج می‌شود؛ هرگز
+  روی ۱٫۹۹ یا بیشتر کلیک نمی‌شود (سقف ۱٫۹۸). شروع دست با دو خوانش کوچک پشت‌سرهم تأیید
+  می‌شود تا عدد قبلیِ روی صفحه باعث کلیک زودهنگام و لغو شرط نشود.
+- **کالیبراسیون:** دکمهٔ «محل کلیک کلاسیک (دکمهٔ Bet / Cash Out)» + «کلیک تست کلاسیک» و
+  نمایش مختصات در نوار وضعیت (`classic_click_point` در settings.json).
+- **۸ باخت متوالی** در شرط کلاسیک ← شروع دوبارهٔ ۳۰ دقیقه تحلیل بدون شرط
+  (`SmartPlanner.restart_learning` و ثبت `{"event":"relearn"}` در `logs/smart-review.jsonl`).
+- تست‌ها: **222 passed** با `QT_QPA_PLATFORM=offscreen ./.venv/Scripts/python.exe -m pytest -q`.
+  تست‌های جدید: ورود/خروج کلاسیک، سقف ۱٫۹۹، ۸ باخت و relearn، خواندن ضریب زنده،
+  `exit` در پرسمان/پاسخ، و اعتبارسنجی `classic_click_point` و `smart_cashout_enabled`.
+- ربات با کد جدید اجرا شد (`app-run.log` خالی، بدون خطا). `CrashWatcher-final.zip`
+  (۶۵ فایل) بازسازی شد؛ exe طبق خواستهٔ کاربر تا اعلام نهایی ساخته نشد.
+
+### English technical state
+
+- `smart_review.py`: `build_prompt(..., classic=False)` sends raw data only and asks for
+  `exit` (capped at 1.98) in classic mode; `SmartVerdict.exit_at`; `CASHOUT_LIMIT = 1.99`.
+- `clicker.py`: `set_smart_play(bets, active, cashout)`; `_enter_classic` clicks
+  `classic_click_point` once; `watch_live`/`live_due`/`wants_live` cash out below 1.99;
+  `take_relearn_request` after `RESTART_AFTER_LOSSES = 8` uncashed bets.
+- `worker.py`: `live_multiplier()` OCRs region 2 while a classic bet is open; a relearn
+  request calls `planner.restart_learning(RESTART_LEARNING_MINUTES)`.
+- `config.py`: `classic_click_point`, `smart_cashout_enabled` (+ validation and load).
+- `ui.py`: `PointOverlay`, «محل کلیک کلاسیک» + test button, AI tab option, green tabs.
+- `three_x.py` and `tests/test_three_x.py` are now committed (they were untracked).
+
+---
+
+## 2026-11-19 (هـ) — موتور ورود ۳x و حذف قوانین زیان‌ده
+
+### خلاصهٔ فارسی
+
+- تحلیل لاگ جلسهٔ ۶ ساعته نشان داد قوانین «شکل رنگ» بازدهی نداشتند: سیگنال سطری ۹٪،
+  صف ۷+۳ زرد ۱۱٪، جفت زرد ۰٪، روند هم‌رنگ ۴۵٪ در برابر خط پایهٔ ۵۱٫۷٪. بنابراین همهٔ
+  این قوانین (و جفت رنگ و ضریب ویژه) **پیش‌فرض خاموش** شدند و فایل تنظیمات قدیمی هم
+  هنگام بارگذاری آن‌ها را خاموش می‌کند.
+- **موتور جدید `crash_watcher/desktop/three_x.py`** تنها مسیر ورود است و دقیقاً پیکربندی
+  درخواستی کاربر را اجرا می‌کند: مشاهدهٔ اولیهٔ ۶۰ دقیقه و حداقل ۱۰۰ دور؛ احتمال رسیدن
+  دور بعد به ۳x با نمونهٔ مشابه (حداقل ۲۰ نمونه) و آستانهٔ ۴۰٪ در برابر سربه‌سر ۳۳٫۳٪؛
+  اطمینان OCR حداقل ۹۵٪ (فقط برای صحت خواندن)؛ هر سیگنال یک ورود و حداقل ۵ دور فاصله؛
+  شرط ثابت حداکثر ۰٫۲۵٪ موجودی و بدون فیبوناچی/جبران ضرر؛ ۳ باخت متوالی ← ۳۰ دور
+  توقف؛ حد سود و حد ضرر ۲٪ جلسه ← توقف کامل (worker هم پایش را می‌بندد و گزارش
+  جلسه نوشته می‌شود).
+- آمار ساعت که کاربر خواسته بود در `logs/session-report.txt` و `summary.txt` نوشته
+  می‌شود: سهم ضرایب ≥۳، بلندترین زنجیرهٔ زیر ۳، عملکرد ۲۰/۵۰/۱۰۰ دور اخیر، نتیجهٔ دور
+  بعد بعد از هر بازهٔ ضریب (۱–۱٫۵، ۱٫۵–۲، ۲–۳، ۳–۵، ۵+) و تفاوت ۲۰ دور اخیر با کل ساعت.
+- `clicker.fire` حالا اطمینان OCR را هم می‌گیرد (`worker.py` مقدار `completed.confidence`
+  را می‌دهد) و برای هر ورود `rule="three-x"` و مبلغ شرط را در گزارش ثبت می‌کند.
+- رابط کاربری: بخش «موتور ۳x» در تب کالیبراسیون (مشاهده، حداقل دور، احتمال، نمونه،
+  اطمینان OCR، ضریب خروج، درصد شرط، موجودی مجازی، حد سود/ضرر، باخت متوالی، مدت توقف،
+  فاصلهٔ ورود). شرط روی دکمهٔ رنگ همان بازه است (۳x ← سبز).
+- تست‌ها: `tests/test_three_x.py` (۸ تست جدید) و به‌روزرسانی تست‌های قدیمی که به
+  پیش‌فرض روشن قوانین تکیه داشتند → **208 passed**.
+  `QT_QPA_PLATFORM=offscreen ./.venv/Scripts/python.exe -m pytest -q`.
+- exe بازساخته و کل `dist/CrashWatcher` روی
+  `F:\CRASH WATCHER\FINAL VERSION\repo 1\CrashWatcher` کپی شد؛ `settings.json` و `logs`
+  دست‌نخورده ماندند و نسخهٔ جدید اجرا شد (PID زنده).
+- یادآوری: این تغییر فقط در حالت شبیه‌سازی معنا دارد؛ معیار پذیرش همان است که کاربر
+  گفته: بعد از حداقل ۵۰۰ ورود، نرخ برد بالای ۳۷٪ در چند جلسهٔ جداگانه.
+
+---
+
+## 2026-11-19 (د) — «کلیک تست» بعد از کالیبراسیون کار نمی‌کرد (آخرین تغییر)
+
+### خلاصهٔ فارسی
+
+- کاربر بعد از کالیبره‌کردن ناحیه‌ها روی «کلیک تست» می‌زد و هیچ کلیکی انجام نمی‌شد.
+- **علت**: این نسخه فقط چهار ناحیه را کالیبره می‌کند (تاریخچه، ضریب، شبکهٔ رنگ،
+  دکمه‌های شرط) و دکمه‌ای برای «ناحیهٔ کلیک» ندارد؛ در settings.json واقعی کاربر هم
+  `click_region` و `click_point` هر دو `null` بودند. `AutoClicker._resolve` در این حالت
+  `None` برمی‌گرداند و `test()` با `target not found` بدون هیچ کلیکی تمام می‌شد.
+- **رفع**: اگر ناحیهٔ کلیک/نقطهٔ کلیک ذخیره نشده باشد، هدف کلیک از ناحیه ۴ (مرکز
+  دکمه‌های شرط) و در آخرین مرحله از `bet_point_yellow` گرفته می‌شود. پیام «هدف پیدا نشد»
+  هم حالا می‌گوید «ناحیه ۴ — دکمه‌های شرط» را کالیبره کنید. تست جدید:
+  `test_test_click_uses_the_bet_region_when_no_click_area_is_saved` و
+  `test_test_click_uses_the_yellow_bet_button_as_the_last_fallback` → **200 passed**.
+- با settings.json واقعی کاربر چک شد: `clicked (685, 831)` (مرکز ناحیهٔ دکمه‌های شرط).
+  exe دوباره ساخته و در `F:\CRASH WATCHER\FINAL VERSION\repo 1\CrashWatcher`
+  جای‌گذاری و اجرا شد (PID زنده، بدون پنجرهٔ خطا).
+
+### English technical state
+
+- `clicker.py` `_resolve`: detect (only when a yellow is actually found) → `click_point` →
+  `click_region` centre → `bet_region` centre → `bet_point_yellow` → `None`.
+  `clicker.test()` still ignores `autoclick_dry_run` and clicks the resolved point once.
+- `ui.py` `test_click`: a `target not found` report now shows the calibration hint instead of
+  the generic "انجام نشد".
+
+---
+
+## 2026-11-19 (ج) — فیکس کرش «unexpected keyword argument» هنگام اجرای exe
 
 ### خلاصهٔ فارسی
 

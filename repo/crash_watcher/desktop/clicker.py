@@ -16,8 +16,15 @@ from .color_grid import read_grid
 from .forecast import ColorForecaster
 from .signals import (next_dot_row, row_yellow_due, two_yellows_in_a_row,
                       yellow_green_green_yellow)
+from .smart_play import RESTART_AFTER_LOSSES
+from .smart_review import CASHOUT_LIMIT
+from .three_x import ThreeXSession
 
 _DOWN = 0x0002
+# «کلیک کلاسیک»: ورود پیش از پایان ۶ ثانیه، خروج روی ضریبی زیر ۱٫۹۹.
+CASHOUT_CEILING = Decimal(str(CASHOUT_LIMIT))
+CLASSIC_ENTRY_WINDOW_S = 6.0
+DEFAULT_CASHOUT = Decimal("1.30")
 _UP = 0x0004
 try:
     _user32 = ctypes.windll.user32
@@ -88,7 +95,7 @@ RULE_LABELS = {"yellow-run": "صف ۷+۳ زرد", "yellow-pair": "جفت زرد"
                "yellow-burst": "۹ کلیک زرد", "row-signal": "سیگنال سطری",
                "streak-run": "روند هم‌رنگ ۷+", "value-bet": "ضریب ویژه",
                "pair-flip": "جفت رنگ", "smart": "کلیک هوشمند",
-               "smart-play": "ورود هوشمند (مدل)"}
+               "smart-play": "ورود هوشمند (مدل)", "three-x": "ورود ۳x"}
 
 
 class AutoClicker:
@@ -124,8 +131,14 @@ class AutoClicker:
         self._pattern_seen = False
         self._run_seen = False
         self.forecaster = ColorForecaster()
+        self.three_x = ThreeXSession(settings)
         self._pending_color: str | None = None
         self._smart_play: tuple[str, ...] = ()
+        self._smart_play_active = False
+        self._smart_cashout: Decimal | None = None
+        self._ai_bet: dict | None = None
+        self._ai_losses = 0
+        self._ai_relearn = False
         self._window = {"rounds": 0, "clicks": 0, "skipped": 0,
                         "gated_correct": 0, "gated_total": 0}
         self._window_started = monotonic()
@@ -145,9 +158,15 @@ class AutoClicker:
         """Rounds still to skip before the click window of the current run."""
         return self._waiting
 
+    @property
+    def halted(self) -> bool:
+        """True once the 3x session hit its profit or loss limit."""
+        return self.settings.three_x_enabled and self.three_x.halted
+
     def update(self, settings: DesktopSettings) -> None:
         """Apply a settings change made while monitoring is already running."""
         self.settings = settings
+        self.three_x.update(settings)
 
     @property
     def enabled(self) -> bool:
@@ -169,17 +188,22 @@ class AutoClicker:
         return (region.x + found[0], region.y + found[1]) if found else None
 
     def _resolve(self):
-        """Target: detected yellow, fixed point, else the saved click region centre."""
+        """Target: detected yellow, fixed point, the saved click region, else a bet button."""
         if self.settings.autoclick_mode == "detect":
-            found = self._detect() or self.settings.click_point
+            found = self._detect()
             if found is not None:
                 return found
-        elif self.settings.click_point is not None:
+        if self.settings.click_point is not None:
             return self.settings.click_point
         region = self.settings.click_region
         if region is not None:
             return (region.x + region.width // 2, region.y + region.height // 2)
-        return self.settings.click_point
+        # This build's calibration only stores the four regions, so the bet
+        # buttons from region 4 are the click target when no click area was saved.
+        if self.settings.bet_region is not None:
+            region = self.settings.bet_region
+            return (region.x + region.width // 2, region.y + region.height // 2)
+        return self.settings.bet_point_yellow
 
     def _chart_reading(self):
         """Read the chart region once per round; None when no chart is usable."""
@@ -258,16 +282,36 @@ class AutoClicker:
         ok = self.sender(point[0], point[1], restore=self.settings.autoclick_restore_cursor)
         return ClickReport(True, "clicked" if ok else "click failed", point, self._clicks, self._armed)
 
+    def test_classic(self) -> ClickReport:
+        """کلیک تست روی «محل کلیک کلاسیک» (دکمهٔ Bet / Cash Out)."""
+        point = self.settings.classic_click_point
+        if point is None:
+            return ClickReport(False, "classic click point not calibrated", count=self._clicks)
+        self._wait_before_click()
+        ok = self.sender(point[0], point[1], restore=self.settings.autoclick_restore_cursor)
+        return ClickReport(True, "clicked" if ok else "click failed", point,
+                           self._clicks, 0, rule="classic")
+
     def color(self, value: Decimal) -> str:
         """رنگ ضریب — همین قاعدهٔ رنگ در بخش بررسی هوشمند هم استفاده می‌شود."""
         return self._color(value)
 
-    def set_smart_play(self, bets) -> None:
-        """تصمیم آمادهٔ مدل برای دست بعد: یک یا دو رنگ."""
-        self._smart_play = tuple(color for color in (bets or ()) if color)
+    def set_smart_play(self, bets, active: bool = False, cashout=None) -> None:
+        """تصمیم آمادهٔ مدل برای دست بعد: یک یا دو رنگ و ضریب خروج کلاسیک.
 
-    def fire(self, round_id: str, value: Decimal) -> ClickReport:
-        report = self._decide(round_id, value)
+        `active` یعنی زبانهٔ AI Analysis در حال کار است؛ در این حالت هیچ‌کدام از
+        قواعد ربات اجرا نمی‌شوند و فقط تصمیم مدل کلیک می‌شود. `cashout` ضریبی
+        است که مدل برای «کلیک کلاسیک» انتخاب کرده (همیشه زیر ۱٫۹۹).
+        """
+        self._smart_play = tuple(color for color in (bets or ()) if color)
+        self._smart_play_active = bool(active)
+        try:
+            self._smart_cashout = Decimal(str(cashout)) if cashout is not None else None
+        except Exception:
+            self._smart_cashout = None
+
+    def fire(self, round_id: str, value: Decimal, confidence: float | None = None) -> ClickReport:
+        report = self._decide(round_id, value, confidence)
         if self.settings.autoclick_enabled:
             self._record(round_id, value, report)
         return report
@@ -304,12 +348,21 @@ class AutoClicker:
                 f"مدل فعال: {model} | دقت پایه: {review.get('base_accuracy', 0):.0%} | "
                 f"دقت شرطی: {review.get('cond_accuracy', 0):.0%}",
                 f"تصمیم خودکار: {decision}",
+                *self._three_x_lines(),
                 *self._rule_lines(),
                 f"لاگ هر دور: {self.log_path}",
             ]
             self.summary_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
         except Exception:
             pass
+
+    def _three_x_lines(self) -> list[str]:
+        if not self.settings.three_x_enabled:
+            return []
+        try:
+            return self.three_x.report_lines()
+        except Exception:
+            return []
 
     def _rule_lines(self) -> list[str]:
         if not self._rule_stats:
@@ -336,6 +389,8 @@ class AutoClicker:
                 f"مدل فعال: {model['model']} | دقت پایه: {model['base_accuracy']:.0%} | "
                 f"دقت شرطی: {model['cond_accuracy']:.0%}",
                 "",
+                *self._three_x_lines(),
+                "",
                 *self._rule_lines(),
                 "",
                 f"دادهٔ کامل هر دور: {self.log_path}",
@@ -346,11 +401,155 @@ class AutoClicker:
         except Exception:
             pass
 
-    def _decide(self, round_id: str, value: Decimal) -> ClickReport:
+    def wants_live(self) -> bool:
+        """یک شرط کلاسیک باز است و باید ضریب زنده زیر نظر باشد؟"""
+        return self._ai_bet is not None and not self._ai_bet["cashed"]
+
+    def live_due(self) -> bool:
+        """خواندن ضریب زنده فقط پس از پایان پنجرهٔ ۶ ثانیه‌ای شرط معنا دارد."""
+        bet = self._ai_bet
+        if bet is None or bet["cashed"]:
+            return False
+        return monotonic() - bet["entered"] >= CLASSIC_ENTRY_WINDOW_S - 2.5
+
+    def watch_live(self, value: Decimal) -> ClickReport | None:
+        """ضریب زندهٔ دست جاری: سر هدفِ زیر ۱٫۹۹ کلیک خروج کلاسیک زده می‌شود."""
+        bet = self._ai_bet
+        if bet is None or bet["cashed"] or value is None:
+            return None
+        if not bet["started"]:
+            # تا شروع دست همان عدد قبلی روی صفحه می‌ماند؛ دو خوانش کوچک
+            # پشت‌سرهم یعنی شمارش تازه شروع شده است.
+            if value <= Decimal("1.20"):
+                bet["low"] += 1
+                bet["started"] = bet["low"] >= 2
+            else:
+                bet["low"] = 0
+            return None
+        if value >= CASHOUT_CEILING or value < bet["target"]:
+            return None
+        point = self.settings.classic_click_point
+        if point is None:
+            return None
+        ok = self.sender(point[0], point[1], restore=self.settings.autoclick_restore_cursor)
+        bet["cashed"] = True
+        self._clicks += 1
+        self._window["clicks"] += 1
+        self._last_at = monotonic()
+        return ClickReport(True, "clicked" if ok else "click failed", point,
+                           self._clicks, 0, target=str(bet["target"]),
+                           rule="smart-play", detail=f"خروج کلاسیک روی {value}×")
+
+    def take_relearn_request(self) -> bool:
+        """آیا ۸ باخت متوالی رسیده و باید دوباره نیم ساعت فقط تحلیل کرد؟"""
+        requested, self._ai_relearn = self._ai_relearn, False
+        return requested
+
+    def _settle_ai_bet(self) -> None:
+        """دست کلاسیکی که تمام شده را تسویه کن و باخت‌های متوالی را بشمار."""
+        bet = self._ai_bet
+        if bet is None:
+            return
+        self._ai_bet = None
+        if bet["cashed"]:
+            self._ai_losses = 0
+            return
+        # بدون خروج: ضریب پیش از رسیدن به هدف بسته شده است.
+        self._ai_losses += 1
+        if self._ai_losses >= RESTART_AFTER_LOSSES:
+            self._ai_losses = 0
+            self._ai_relearn = True
+
+    def _enter_classic(self, round_id: str, bets: tuple[str, ...],
+                       cashout: Decimal | None) -> ClickReport:
+        """AI Analysis + کلیک کلاسیک: یک کلیک برای ورود، کلیک دوم برای خروج."""
+        if self._ai_bet is not None:
+            return ClickReport(False, "smart-play: شرط قبلی هنوز باز است",
+                               count=self._clicks)
+        if not bets:
+            return ClickReport(False, "smart-play: مدل برای این دست تصمیمی نداد",
+                               count=self._clicks)
+        point = self.settings.classic_click_point
+        if point is None:
+            return ClickReport(False, "smart-play: محل کلیک کلاسیک کالیبره نشده است",
+                               count=self._clicks)
+        target = cashout if cashout is not None else DEFAULT_CASHOUT
+        # زیر ۱٫۹۹ و به‌قدر کافی دور از ۱٫۰۰ تا «عدد قبلی روی صفحه» باعث
+        # کلیک زودهنگام نشود.
+        target = min(max(target, Decimal("1.10")), CASHOUT_CEILING - Decimal("0.01"))
+        if monotonic() - self._last_at < self.settings.autoclick_cooldown_ms / 1000:
+            return ClickReport(False, "cooldown", count=self._clicks)
+        self._last_id, self._last_at = round_id, monotonic()
+        self._clicks += 1
+        self._window["clicks"] += 1
+        self._pending_rule = (bets, "smart-play")
+        self._rule_stats.setdefault("smart-play", [0, 0])[1] += 1
+        # Permanent rule: the entry click happens at most one second after the
+        # round closed, well inside the game's six-second betting window.
+        self._wait_before_click()
+        ok = self.sender(point[0], point[1], restore=self.settings.autoclick_restore_cursor)
+        if ok:
+            self._ai_bet = {"target": target, "colors": bets, "entered": monotonic(),
+                            "low": 0, "started": False, "cashed": False}
+        return ClickReport(True, "clicked" if ok else "click failed", point,
+                           self._clicks, 0, target="+".join(bets),
+                           rule="smart-play",
+                           detail=f"ورود کلاسیک — خروج زیر {target}")
+
+    def _decide_smart_play(self, round_id: str, value: Decimal) -> ClickReport:
+        """AI Analysis: فقط تصمیم مدل اجرا می‌شود؛ هیچ قانونی از ربات اجرا نمی‌شود."""
+        self._settle_ai_bet()
+        color = self._color(value)
+        if self._pending_rule is not None:
+            target_colors, rule = self._pending_rule
+            self._pending_rule = None
+            if target_colors and color in target_colors:
+                self._rule_stats.setdefault(rule, [0, 0])[0] += 1
+        self.forecaster.observe(color)
+        self._window["rounds"] += 1
+        self._rounds_seen += 1
+        bets = tuple(dict.fromkeys(self._smart_play))
+        self._smart_play = ()
+        cashout, self._smart_cashout = self._smart_cashout, None
+        if self.settings.smart_cashout_enabled:
+            return self._enter_classic(round_id, bets, cashout)
+        if not bets:
+            return ClickReport(False, "smart-play: مدل برای این دست تصمیمی نداد",
+                               count=self._clicks)
+        points = [(bet, self._bet_point(bet)) for bet in bets]
+        points = [(bet, point) for bet, point in points if point is not None]
+        if not points:
+            return ClickReport(False, "target not found", count=self._clicks)
+        if monotonic() - self._last_at < self.settings.autoclick_cooldown_ms / 1000:
+            return ClickReport(False, "cooldown", count=self._clicks)
+        self._last_id = round_id
+        self._last_at = monotonic()
+        self._clicks += 1
+        self._window["clicks"] += 1
+        colors = tuple(bet for bet, _ in points)
+        self._pending_rule = (colors, "smart-play")
+        self._rule_stats.setdefault("smart-play", [0, 0])[1] += 1
+        # Permanent rule: one second at most after the round, so both colours are
+        # clicked right after the same wait instead of waiting twice.
+        self._wait_before_click()
+        ok = True
+        for _, point in points:
+            ok = self.sender(point[0], point[1],
+                             restore=self.settings.autoclick_restore_cursor) and ok
+        return ClickReport(True, "clicked" if ok else "click failed", points[0][1],
+                           self._clicks, 0, target="+".join(colors), rule="smart-play")
+
+    def _decide(self, round_id: str, value: Decimal,
+                confidence: float | None = None) -> ClickReport:
         if not self.settings.autoclick_enabled:
             return ClickReport(False, "disabled", count=self._clicks)
         if round_id == self._last_id:
             return ClickReport(False, "same round", count=self._clicks, remaining=self._armed)
+        if self._smart_play_active:
+            # AI Analysis روشن است: مغز ربات مدل است، نه قواعد قبلی.
+            return self._decide_smart_play(round_id, value)
+        if self.settings.three_x_enabled:
+            return self._decide_three_x(round_id, value, confidence)
         color = self._color(value)
         if self._pending_rule is not None:
             target_colors, rule = self._pending_rule
@@ -530,6 +729,44 @@ class AutoClicker:
                            self._armed, forecast=self.forecaster.forecast().label,
                            target="+".join(colors) or (target_color or ""),
                            rule=rule, detail=row_detail)
+
+    def _decide_three_x(self, round_id: str, value: Decimal,
+                        confidence: float | None) -> ClickReport:
+        """ورود ۳x: تسویهٔ شرط قبلی، بعد تصمیم برای دست بعد."""
+        outcome = self.three_x.observe(value, confidence)
+        decision = self.three_x.decide(confidence)
+        stats = self.three_x.stats()
+        detail = decision.detail or decision.reason
+        if outcome:
+            detail = f"{outcome} | {detail}"
+        report = ClickReport(
+            False, decision.reason, count=self._clicks, remaining=0,
+            detail=detail, target=f"احتمال {decision.probability:.0%}",
+            rule="three-x")
+        if not decision.bet:
+            return report
+        color = self._color(self.three_x.exit_factor)
+        point = self._bet_point(color)
+        if point is None:
+            self.three_x._pending_stake = None
+            return ClickReport(False, "target not found", count=self._clicks,
+                               detail=detail, rule="three-x")
+        now = monotonic()
+        if now - self._last_at < self.settings.autoclick_cooldown_ms / 1000:
+            self.three_x._pending_stake = None
+            return ClickReport(False, "cooldown", count=self._clicks, detail=detail,
+                               rule="three-x")
+        self._last_id, self._last_at = round_id, now
+        self._clicks += 1
+        self._window["clicks"] += 1
+        self._pending_rule = ((color,), "three-x")
+        self._rule_stats.setdefault("three-x", [0, 0])[1] += 1
+        self._wait_before_click()
+        ok = self.sender(point[0], point[1],
+                         restore=self.settings.autoclick_restore_cursor)
+        return ClickReport(True, "clicked" if ok else "click failed", point,
+                           self._clicks, 0, target=color, rule="three-x",
+                           detail=detail)
 
     def close(self) -> None:
         self._write_session()

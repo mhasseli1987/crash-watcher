@@ -1,10 +1,11 @@
-"""بررسی هوشمند ضریب‌ها: ارسال ناحیه‌های ۱ تا ۴ به مدل زبانی محلی.
+"""AI Analysis: ارسال ناحیه‌های ۱ تا ۴ به مدل زبانی (FreeLLMAPI محلی یا OpenAI).
 
 The bot already reads four screen regions: the history multipliers (1), the
 current round's multiplier (2), the colour-dot chart (3) and the row of bet
 buttons (4). This module packs them into one compact, human-readable prompt and
-sends it to a local OpenAI-compatible server — the user runs FreeLLMAPI on
-`http://127.0.0.1:31415/v1` — then parses the model's JSON answer into a bet.
+sends it to any OpenAI-compatible server — the local FreeLLMAPI on
+`http://127.0.0.1:31415/v1` or the official OpenAI API on
+`https://api.openai.com/v1` — then parses the model's JSON answer into a bet.
 
 Nothing here touches the mouse: the verdict is advice, and the clicker keeps
 following its own rules.
@@ -21,6 +22,14 @@ from urllib import request as urlrequest
 
 DEFAULT_BASE_URL = "http://127.0.0.1:31415/v1"
 DEFAULT_MODEL = "auto"
+# API رسمی OpenAI؛ کلید از platform.openai.com گرفته می‌شود.
+OPENAI_BASE_URL = "https://api.openai.com/v1"
+OPENAI_MODEL = "gpt-4o-mini"
+# بارگذاری سرد مدل محلی می‌تواند بیش از یک دقیقه طول بکشد؛ مهلت ۴۵ ثانیه‌ای
+# باعث می‌شد درخواست‌ها بی‌دلیل با «timed out» شکست بخورند.
+DEFAULT_TIMEOUT = 120.0
+# «کلیک کلاسیک»: شرط باید همیشه زیر این ضریب بسته شود.
+CASHOUT_LIMIT = 1.99
 
 # Region 4 is the row of three buttons the user marked: red, green, moon.
 DEFAULT_BETS: tuple[tuple[str, str], ...] = (("RED", "2x"), ("GREEN", "2x"), ("YELLOW", "10x"))
@@ -35,9 +44,9 @@ _COLOR_ALIASES = {"قرمز": "RED", "رد": "RED", "red": "RED", "r": "RED",
                   "صبر": "SKIP", "wait": "SKIP"}
 
 SYSTEM_PROMPT = (
-    "تو دستیار تحلیل یک بازی Crash (Trenball) هستی. ورودی، وضعیت آخرین دست‌ها و "
-    "شبکهٔ رنگ نمودار است. فقط بر اساس همین داده و قواعدی که کاربر داده تحلیل کن؛ "
-    "هیچ ادعای قطعی نکن و پاسخ را همیشه در قالب JSON بده."
+    "تو مغز تحلیل یک بازی Crash (Trenball) هستی. هیچ قاعدهٔ آماده‌ای نداری؛ فقط دادهٔ "
+    "خام همین لحظه را داری: ترتیب ضرایب گذشته، رنگ آن‌ها و شبکهٔ رنگ نمودار. خودت "
+    "الگو را کشف کن، ادعای قطعی نکن و پاسخ را همیشه در قالب JSON بده."
 )
 
 
@@ -45,7 +54,7 @@ def chat_completions_url(base_url: str) -> str:
     """Accept `http://host:port`, `.../v1` or a full chat-completions URL."""
     url = (base_url or "").strip().rstrip("/")
     if not url:
-        raise ValueError("آدرس FreeLLMAPI خالی است")
+        raise ValueError("آدرس سرور خالی است")
     if not url.lower().startswith(("http://", "https://")):
         raise ValueError("آدرس باید با http:// یا https:// شروع شود")
     if url.endswith("/chat/completions"):
@@ -105,44 +114,68 @@ def _grid_text(snapshot: SmartSnapshot) -> str:
     return "\n".join(lines)
 
 
+def _color_of(text: str, threshold: str) -> str:
+    """رنگ هر ضریب از روی خود عدد، تا مدل توالی رنگ‌ها را ببیند."""
+    try:
+        value = float(str(text).replace(",", ""))
+        limit = float(str(threshold).replace(",", ""))
+    except (TypeError, ValueError):
+        return "?"
+    if value >= limit:
+        return "زرد"
+    return "قرمز" if value < 2 else "سبز"
+
+
 def build_prompt(snapshot: SmartSnapshot, threshold: str = "10.00",
                  extra_rules: str = "", *, min_confidence: float = 0.40,
-                 allow_two: bool = True) -> str:
-    """The exact user message sent to the model."""
-    recent = "، ".join(snapshot.recent[-20:]) or "ندارد"
+                 allow_two: bool = True, classic: bool = False) -> str:
+    """The exact user message sent to the model: raw data, no fixed rules."""
+    history = " | ".join(f"{index}. {value} ({_color_of(value, threshold)})"
+                         for index, value in enumerate(snapshot.recent[-30:], 1)) or "ندارد"
     bets = "، ".join(f"{_LETTER_FA.get(_LETTER.get(color, ''), color)} "
                      f"({payout})" for color, payout in snapshot.bets)
-    rules = [
-        "- قرمز: ضریب کمتر از ۲ | سبز: بین ۲ و آستانهٔ زرد | زرد (مون): ≥ " + threshold,
-        "- هفت دست صبر بعد از هر ضریب زرد، سپس سه کلیک",
-        "- دو زرد پشت‌سرهم → انتظار زرد بعدی",
-        "- جفت سبز یا جفت قرمز پشت‌سرهم → رنگ مخالف",
-        "- یک رنگ بیشتر از ۶ بار پشت‌سرهم → همان رنگ برای ده دست",
-        "- سطر زرد با چهار ستون فاصله (چهار ستون آخر، چهار سطر اول) → زرد همان دست",
-        "- ضرایب 1.00، 1.11 و 1.99 → سبز؛ 2.08 → زرد",
-        f"- فقط وقتی شرط ببند که احتمالِ درست بودن پیش‌بینی‌ات {min_confidence:.0%} یا بیشتر باشد؛ در غیر این صورت bet را SKIP بگذار",
-        "- لازم نیست هر دست بازی کنی؛ دست‌های بی‌اطمینان را رد کن",
+    lines = [
+        "تو مغز تحلیل این ربات هستی. هیچ قاعدهٔ آماده و هیچ فرض ثابتی نداری؛ فقط همین "
+        "دادهٔ خام را داری و باید خودت الگو را از دل آن پیدا کنی.",
+        "",
+        "داده‌های این لحظه:",
+        f"۱) ضرایب دست‌های بسته‌شده به ترتیب زمان (قدیمی ← جدید): {history}",
+        f"۲) ضریب دست فعلی/آخر: {snapshot.current or 'خوانده نشد'}",
+        "۳) شبکهٔ رنگ نمودار (ستون ۱ جدیدترین است؛ هر ستون از بالا جدید به پایین قدیمی):",
+        f"{_grid_text(snapshot)}",
+        f"۴) دکمه‌های شرط این دست: {bets}",
+        f"۵) تعداد دورهای دیده‌شده در این جلسه: {snapshot.rounds_seen}",
+        f"۶) رنگ هر ضریب: کمتر از ۲ قرمز، از ۲ تا {threshold} سبز، {threshold} و بیشتر زرد (مون).",
+        "",
+        "خودت این داده‌ها را با دقت بررسی کن و به نتیجه برس:",
+        "- ترتیب و روند عددها: صعودی یا نزولی بودن، جهش‌های بزرگ، برگشت به محدودهٔ قبلی و "
+        "فاصلهٔ تکرار هر رنگ.",
+        "- توالی رنگ‌ها در ضرایب گذشته و در ستون‌های نمودار: رنگ‌های پشت‌سرهم، جای خالی‌ها و "
+        "شکل ستون‌ها.",
+        "- شباهت همین لحظه با نمونه‌های مشابه در همین فهرست و اینکه آن نمونه‌ها بعدش چه رنگی دادند.",
+        "- نتیجه باید یک پیش‌بینی عملی برای دست بعد باشد، نه توضیح کلی.",
+        f"- احتمال پیش‌بینی‌ات را صادقانه بده؛ اگر از {min_confidence:.0%} کمتر است bet را "
+        "SKIP بگذار. لازم نیست هر دست بازی کنی.",
     ]
     if allow_two:
-        rules.append("- اگر بین دو رنگ شک داری می‌توانی هر دو را بزنی: رنگ دوم را در second بگذار. "
-                     "چون پرداخت هر رنگ دست‌کم دو برابر است، شرط روی دو رنگ در بدترین حالت "
-                     "سربه‌سر می‌شود و ضرر نمی‌دهد؛ برای ضریب زرد که احتمال کمتری دارد همین را در نظر بگیر")
+        lines.append("- اگر بین دو رنگ شک داری می‌توانی هر دو را بزنی: رنگ دوم را در second بگذار.")
+    if classic:
+        lines.append(
+            "- خروج کلاسیک: ربات پیش از پایان ۶ ثانیه با یک کلیک روی دکمهٔ big Bet / Cash Out "
+            "وارد بازی می‌شود و بعد با کلیک دوباره خارج می‌شود. در فیلد exit عدد خروج را خودت "
+            f"انتخاب کن؛ هرچه ریسک را کمتر می‌بینی پایین‌تر (مثلاً 1.30) و هرچه مطمئن‌تری "
+            f"بالاتر (مثلاً 1.85)، ولی همیشه زیر {CASHOUT_LIMIT} (حداکثر 1.98).")
     if extra_rules.strip():
-        rules.append("- " + extra_rules.strip())
-    return (
-        "وضعیت فعلی بازی:\n"
-        f"۱) ضریب آخرین دست‌ها (قدیمی به جدید): {recent}\n"
-        f"۲) ضریب دست فعلی/آخر: {snapshot.current or 'خوانده نشد'}\n"
-        "۳) شبکهٔ رنگ نمودار (هر ستون از بالا جدید به پایین قدیمی):\n"
-        f"{_grid_text(snapshot)}\n"
-        f"۴) دکمه‌های شرط این دست: {bets}\n"
-        f"تعداد دورهای دیده‌شده در این جلسه: {snapshot.rounds_seen}\n\n"
-        "قواعد کاربر:\n" + "\n".join(rules) + "\n\n"
-        "برای دست بعد کدام رنگ بیشترین شانس را دارد؟ فقط JSON برگردان، بدون توضیح اضافه:\n"
-        + ('{"bet":"RED|GREEN|YELLOW|SKIP","second":"NONE|RED|GREEN|YELLOW",'
-           '"confidence":0.0,"reason":"یک جمله فارسی"}' if allow_two else
-           '{"bet":"RED|GREEN|YELLOW|SKIP","confidence":0.0,"reason":"یک جمله فارسی"}')
-    )
+        lines.append("- نکتهٔ اختیاری کاربر: " + extra_rules.strip() + " (اجباری نیست؛ داده بر آن مقدم است)")
+    lines += ["", "برای دست بعد کدام رنگ بیشترین شانس را دارد؟ فقط JSON برگردان، بدون توضیح اضافه:"]
+    answer = '{"bet":"RED|GREEN|YELLOW|SKIP",'
+    if allow_two:
+        answer += '"second":"NONE|RED|GREEN|YELLOW",'
+    if classic:
+        answer += '"exit":1.85,'
+    answer += '"confidence":0.0,"reason":"یک جمله فارسی"}'
+    lines.append(answer)
+    return "\n".join(lines)
 
 
 @dataclass(frozen=True)
@@ -151,6 +184,7 @@ class SmartVerdict:
     confidence: float  # 0..1
     reason: str
     second: str | None = None  # رنگ دوم اختیاری (پوشش ضرر)
+    exit_at: float | None = None  # ضریب خروج کلاسیک، همیشه زیر ۱٫۹۹
 
     @property
     def bets(self) -> tuple[str, ...]:
@@ -205,7 +239,21 @@ def parse_verdict(text: str) -> SmartVerdict | None:
     confidence = min(1.0, max(0.0, confidence))
     reason = str(payload.get("reason", payload.get("why", ""))).strip()
     second = _second_color(payload, color)
-    return SmartVerdict(color, confidence, reason, second)
+    return SmartVerdict(color, confidence, reason, second, _exit_target(payload))
+
+
+def _exit_target(payload: dict) -> float | None:
+    """ضریب خروجی که مدل برای «کلیک کلاسیک» انتخاب کرده؛ هرگز ۱٫۹۹ یا بیشتر."""
+    raw = payload.get("exit", payload.get("cashout", payload.get("cash_out", payload.get("target"))))
+    if raw is None:
+        return None
+    try:
+        value = float(str(raw).replace("%", "").strip())
+    except (TypeError, ValueError):
+        return None
+    if not 1.0 < value < 10.0:
+        return None
+    return min(value, CASHOUT_LIMIT - 0.01)
 
 
 def _second_color(payload: dict, first: str) -> str | None:
@@ -224,7 +272,14 @@ def _second_color(payload: dict, first: str) -> str | None:
     return color
 
 
-def _error_message(exc: Exception, base_url: str) -> str:
+def _error_message(exc: Exception, base_url: str, timeout: float = DEFAULT_TIMEOUT) -> str:
+    local = _is_local(base_url)
+    if isinstance(exc, TimeoutError):
+        hint = ("مطمئن شوید FreeLLMAPI روی همین آدرس باز است و صف درخواست ندارد؛ "
+                "یک مدل سبک‌تر بگذارید." if local else
+                "اتصال اینترنت یا صف API را بررسی کنید و دوباره تلاش کنید.")
+        return (f"سرور در مهلت {timeout:.0f} ثانیه پاسخ نداد ({base_url}). "
+                f"اگر مدل تازه در حال بارگذاری است یا سنگین است، {hint}")
     if isinstance(exc, urlerror.HTTPError):
         detail = ""
         try:
@@ -232,12 +287,25 @@ def _error_message(exc: Exception, base_url: str) -> str:
         except Exception:
             detail = ""
         if exc.code in (401, 403):
-            return f"کلید FreeLLMAPI پذیرفته نشد (HTTP {exc.code})؛ کلید یکپارچهٔ داشبورد را بگذارید."
+            who = ("کلید یکپارچهٔ داشبورد FreeLLMAPI" if local
+                   else "کلید رسمی OpenAI (sk-...)")
+            return f"کلید پذیرفته نشد (HTTP {exc.code})؛ {who} را بررسی کنید."
         return f"خطای HTTP {exc.code} از {base_url}: {detail}".strip()
     if isinstance(exc, urlerror.URLError):
+        if local:
+            return (f"اتصال به {base_url} برقرار نشد ({exc.reason}). "
+                    "مطمئن شوید FreeLLMAPI روی همان پورت در حال اجراست.")
         return (f"اتصال به {base_url} برقرار نشد ({exc.reason}). "
-                "مطمئن شوید FreeLLMAPI روی همان پورت در حال اجراست.")
+                "اینترنت، VPN یا صحت آدرس را بررسی کنید.")
     return f"خطا در تماس با {base_url}: {exc}"
+
+
+def _model_name(base_url: str, model: str) -> str:
+    """`auto` مخصوص سرور محلی است؛ API رسمی OpenAI نام مدل واقعی می‌خواهد."""
+    name = (model or "").strip()
+    if name and name.lower() != "auto":
+        return name
+    return DEFAULT_MODEL if _is_local(base_url) else OPENAI_MODEL
 
 
 def _headers(api_key: str) -> dict[str, str]:
@@ -248,11 +316,11 @@ def _headers(api_key: str) -> dict[str, str]:
 
 
 def ask(base_url: str, api_key: str, model: str, prompt: str,
-        timeout: float = 45.0, system: str = SYSTEM_PROMPT) -> str:
+        timeout: float = DEFAULT_TIMEOUT, system: str = SYSTEM_PROMPT) -> str:
     """POST one chat completion and return the assistant text."""
     url = chat_completions_url(base_url)
     payload = {
-        "model": model.strip() or DEFAULT_MODEL,
+        "model": _model_name(url, model),
         "messages": [{"role": "system", "content": system},
                      {"role": "user", "content": prompt}],
         "temperature": 0.2,
@@ -264,7 +332,7 @@ def ask(base_url: str, api_key: str, model: str, prompt: str,
         with urlrequest.urlopen(request, timeout=timeout) as response:
             body = response.read().decode("utf-8", "replace")
     except Exception as exc:  # noqa: BLE001 - surfaced to the UI as a message
-        raise RuntimeError(_error_message(exc, url)) from exc
+        raise RuntimeError(_error_message(exc, url, timeout)) from exc
     try:
         parsed = json.loads(body)
         return str(parsed["choices"][0]["message"]["content"])
@@ -273,12 +341,12 @@ def ask(base_url: str, api_key: str, model: str, prompt: str,
 
 
 def review(base_url: str, api_key: str, model: str, snapshot: SmartSnapshot,
-           timeout: float = 45.0, threshold: str = "10.00",
+           timeout: float = DEFAULT_TIMEOUT, threshold: str = "10.00",
            extra_rules: str = "", *, min_confidence: float = 0.40,
-           allow_two: bool = True) -> tuple[SmartVerdict | None, str, str]:
+           allow_two: bool = True, classic: bool = False) -> tuple[SmartVerdict | None, str, str]:
     """Ask for a verdict: (parsed, raw answer, prompt sent)."""
-    prompt = build_prompt(snapshot, threshold, extra_rules,
-                          min_confidence=min_confidence, allow_two=allow_two)
+    prompt = build_prompt(snapshot, threshold, extra_rules, min_confidence=min_confidence,
+                          allow_two=allow_two, classic=classic)
     raw = ask(base_url, api_key, model, prompt, timeout)
     return parse_verdict(raw), raw, prompt
 
@@ -291,7 +359,7 @@ def probe_models(base_url: str, api_key: str, timeout: float = 15.0) -> list[str
         with urlrequest.urlopen(request, timeout=timeout) as response:
             body = response.read().decode("utf-8", "replace")
     except Exception as exc:  # noqa: BLE001
-        raise RuntimeError(_error_message(exc, url)) from exc
+        raise RuntimeError(_error_message(exc, url, timeout)) from exc
     try:
         data = json.loads(body)
         return [str(item.get("id", "")) for item in data.get("data", []) if item.get("id")]

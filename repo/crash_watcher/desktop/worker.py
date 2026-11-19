@@ -11,13 +11,25 @@ from PySide6.QtCore import QThread, Signal
 from crash_watcher import StrategyEngine
 from crash_watcher.core.enums import StrategyState
 from crash_watcher.vision.capture import ScreenCapture, ScreenUnavailable
-from crash_watcher.vision.recognition import RapidOCRReader, tesseract_reader
+from crash_watcher.vision.recognition import (RapidOCRReader, parse_multiplier, preprocess,
+                                              tesseract_reader)
 from .config import DesktopSettings, PROJECT_ROOT
 from .clicker import AutoClicker
 from .color_grid import read_grid
 from .final_result import BangDetector, BangRecognizer, parse_history_entry
-from .smart_play import SmartPlanner
+from .smart_play import RESTART_LEARNING_MINUTES, SmartPlanner
 from .smart_review import SmartSnapshot, append_log, build_prompt, grid_columns, review
+
+
+def live_multiplier(reader, image, minimum: float = 0.55):
+    """Read the big running multiplier (region 2) while a classic bet is open."""
+    try:
+        text, confidence = reader(preprocess(image)[0])
+    except Exception:
+        return None
+    if not np.isfinite(confidence) or confidence < minimum:
+        return None
+    return parse_multiplier(text)
 
 
 def session_seconds_left(started: float, limit_minutes: int,
@@ -180,17 +192,43 @@ class MonitorWorker(QThread):
                             strategy_result = (self.strategy.process_round(completed.round_id, completed.multiplier)
                                                if completed else None)
                             self.observation.emit(reading, completed, strategy_result)
+                            if clicker.wants_live():
+                                # خروج کلاسیک: ضریب زنده فقط پس از پنجرهٔ شرط خوانده
+                                # می‌شود تا عدد قبلی که روی صفحه مانده کلیک نسازد.
+                                live = (live_multiplier(reader, frame.image,
+                                                        self.settings.ocr_confidence)
+                                        if clicker.live_due() else None)
+                                if live is not None:
+                                    payout = clicker.watch_live(live)
+                                    if payout is not None:
+                                        self.click_report.emit(payout)
                             if completed is not None:
                                 # اول نتیجهٔ دست تازه ثبت و پیش‌بینی قبلی سنجیده
                                 # می‌شود، بعد تصمیمِ آمادهٔ مدل برای دست بعد به
                                 # کلیکر داده می‌شود تا در پنجرهٔ کوتاه فقط کلیک کند.
                                 planner.observe(completed.round_id,
                                                 clicker.color(completed.multiplier))
-                                ready = (planner.take() if self._smart_play_active()
-                                         else None)
-                                clicker.set_smart_play(ready.bets if ready else ())
-                                self.click_report.emit(clicker.fire(completed.round_id,
-                                                                    completed.multiplier))
+                                smart_active = self._smart_play_active()
+                                ready = planner.take() if smart_active else None
+                                clicker.set_smart_play(ready.bets if ready else (),
+                                                       active=smart_active,
+                                                       cashout=ready.exit_at if ready else None)
+                                click_report = clicker.fire(completed.round_id,
+                                                            completed.multiplier,
+                                                            completed.confidence)
+                                self.click_report.emit(click_report)
+                                if clicker.take_relearn_request():
+                                    # ۸ باخت متوالی: دوباره نیم ساعت فقط تحلیل.
+                                    planner.restart_learning(RESTART_LEARNING_MINUTES)
+                                    append_log(PROJECT_ROOT / "logs" / "smart-review.jsonl",
+                                               {"event": "relearn",
+                                                "round": str(completed.multiplier),
+                                                "minutes": RESTART_LEARNING_MINUTES})
+                                if clicker.halted:
+                                    # حد سود یا ضرر جلسه: توقف کامل تا جلسهٔ بعد.
+                                    self.problem.emit(click_report.reason)
+                                    self._stop.set()
+                                    break
                                 review = clicker.take_review()
                                 if review is not None:
                                     self.review_report.emit(review)
@@ -264,7 +302,8 @@ class MonitorWorker(QThread):
                                           settings.smart_review_timeout_s,
                                           settings.autoclick_threshold, settings.smart_review_rules,
                                           min_confidence=settings.smart_play_min_confidence,
-                                          allow_two=settings.smart_play_two_colors)
+                                          allow_two=settings.smart_play_two_colors,
+                                          classic=settings.smart_cashout_enabled)
         except Exception as exc:
             self._smart_busy = False
             append_log(PROJECT_ROOT / "logs" / "smart-review.jsonl",
@@ -275,7 +314,8 @@ class MonitorWorker(QThread):
                                     "prompt": build_prompt(snapshot, settings.autoclick_threshold,
                                                            settings.smart_review_rules,
                                                            min_confidence=settings.smart_play_min_confidence,
-                                                           allow_two=settings.smart_play_two_colors)})
+                                                           allow_two=settings.smart_play_two_colors,
+                                                           classic=settings.smart_cashout_enabled)})
             return
         self._smart_busy = False
         elapsed = perf_counter() - started

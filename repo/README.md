@@ -30,9 +30,10 @@ that file is the one to hand back for analysis. The game draws independent round
 expect the model to sit near the base rates (red ≈ 50%, green ≈ 40%, yellow ≈ 10%) most of
 the time.
 
-**Smart review and smart play (opt-in).** The «بررسی هوشمند ضریب‌ها» tab asks a local
-OpenAI-compatible server (FreeLLMAPI, default `http://127.0.0.1:31415/v1`, dashboard key
-required) about the four regions the user marked: multiplier history, the current
+**AI Analysis and smart play (opt-in).** The «AI Analysis» tab asks an OpenAI-compatible
+server — local FreeLLMAPI (default `http://127.0.0.1:31415/v1`, dashboard key required) or
+the official OpenAI API (`https://api.openai.com/v1`, `sk-...` key, model `gpt-4o-mini`) —
+about the four regions the user marked: multiplier history, the current
 multiplier, the colour-dot chart and the bet-button row. The model answers one JSON object
 (`bet`, optional `second`, `confidence`, `reason`); the answer is advice shown in the tab and
 logged to `logs/smart-review.jsonl`. With `smart_play_enabled` the answer becomes a bet:
@@ -43,6 +44,14 @@ buttons in one hand (payouts ≥ 2x make the worst case break-even). The decisio
 hand is prepared in a background thread while the current hand is still running, so the
 six-second window between two multipliers only needs the click; answers more than three
 rounds old are discarded. The existing rules keep priority over the model.
+
+With `smart_cashout_enabled` (the «کلیک کلاسیک» option in the AI tab) the bot plays the
+game's big Bet / Cash Out button instead of the colour buttons. Calibrate «محل کلیک
+کلاسیک» in the Calibration tab to that button; inside the six-second window the clicker
+clicks it once to enter, reads the running multiplier from region 2, and clicks the same
+point again at the model's `exit` value, which is capped below 1.99 (for example 1.30 or
+1.85). A cash-out is never issued at or above 1.99. Eight classic bets lost in a row make
+the bot start another 30 minutes of analysis without betting.
 
 **Chart signal (on by default).** When two consecutive rounds are both yellow (two yellow
 dots stacked in one column) the clicker arms `signal_repeat` (default 2) follow-up clicks:

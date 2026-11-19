@@ -21,7 +21,8 @@ from .clicker import AutoClicker
 from .config import (DesktopSettings, Region, SETTINGS_PATH, PROJECT_ROOT, MAX_CLICK_DELAY_MS,
                      load_settings, save_settings)
 from .final_result import BangRecognizer
-from .smart_review import DEFAULT_BASE_URL, DEFAULT_MODEL, chat_completions_url, probe_models
+from .smart_review import (DEFAULT_BASE_URL, DEFAULT_MODEL, OPENAI_BASE_URL, OPENAI_MODEL,
+                           chat_completions_url, probe_models)
 from .worker import MonitorWorker
 
 _FA_DIGITS = str.maketrans("0123456789", "۰۱۲۳۴۵۶۷۸۹")
@@ -57,17 +58,15 @@ QPushButton#reset:hover { background:rgba(90,120,108,200); }
 QPushButton#preset { background:rgba(245,200,107,28); border:1px solid rgba(245,200,107,110); color:#ffe9b5; border-radius:10px; padding:7px 12px; font-weight:700; }
 QPushButton#preset:hover { background:rgba(245,200,107,60); border:1px solid #ffd98a; }
 QTabWidget::pane { border:1px solid rgba(110,210,165,55); border-radius:18px; background:rgba(8,20,16,120); top:-1px; }
-QTabBar::tab { background:rgba(22,46,37,200); color:#a9c7b8; border:1px solid rgba(90,170,135,50); border-radius:12px; padding:10px 18px; margin:2px 3px; font-weight:600; }
-QTabBar::tab:hover { color:#eafff2; border:1px solid rgba(140,230,190,110); }
-QTabBar::tab:selected { background:qlineargradient(x1:0,y1:0,x2:0,y2:1, stop:0 #3cc994, stop:1 #1f7d59); color:#04231a; border:1px solid #8bffd0; }
+QTabBar::tab { background:qlineargradient(x1:0,y1:0,x2:0,y2:1, stop:0 #3cc994, stop:1 #1f7d59); color:#04231a; border:1px solid #8bffd0; border-radius:12px; padding:10px 18px; margin:2px 3px; font-weight:700; }
+QTabBar::tab:hover { background:qlineargradient(x1:0,y1:0,x2:0,y2:1, stop:0 #55ddaa, stop:1 #2a9a6e); color:#02231a; border:1px solid #b8ffdb; }
+QTabBar::tab:selected { background:qlineargradient(x1:0,y1:0,x2:0,y2:1, stop:0 #7af0b8, stop:1 #2aa877); color:#032018; border:1px solid #d6ffe9; }
 QTableWidget { background:rgba(8,20,16,200); alternate-background-color:rgba(20,42,34,200); border:1px solid rgba(110,210,165,60); border-radius:14px; gridline-color:rgba(110,210,165,40); }
 QTableWidget::item { padding:6px; }
 QTableWidget::item:selected { background:rgba(60,201,148,90); color:#f2fff8; }
 QHeaderView::section { background:qlineargradient(x1:0,y1:0,x2:0,y2:1, stop:0 #235242, stop:1 #17342a); color:#a8f0cd; padding:8px; border:0; border-right:1px solid rgba(110,210,165,45); font-weight:700; }
 QFrame#metric { background:qlineargradient(x1:0,y1:0,x2:1,y2:1, stop:0 rgba(38,80,64,235), stop:1 rgba(16,36,29,235)); border:1px solid rgba(110,210,165,70); border-radius:16px; }
 QFrame#metric:hover { border:1px solid rgba(150,245,200,150); }
-QLabel#sessionBadge { background:qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 rgba(120,90,20,225), stop:1 rgba(60,46,10,225)); border:1px solid rgba(245,200,107,160); border-radius:14px; color:#ffe9b5; font-weight:700; padding:9px 16px; }
-QLabel#sessionBadge[urgent="true"] { background:qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 rgba(160,40,60,235), stop:1 rgba(80,16,28,235)); border:1px solid #ff9db0; color:#ffd9e0; }
 QProgressBar#session { background:rgba(10,26,21,220); border:1px solid rgba(110,210,165,60); border-radius:8px; min-height:16px; max-height:16px; text-align:center; color:#d8f5e7; font-size:11px; font-weight:700; }
 QProgressBar#session::chunk { border-radius:7px; background:qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 #38c98d, stop:0.6 #6fe3ac, stop:1 #f5c86b); }
 QCheckBox { spacing:10px; padding:4px 0; }
@@ -147,6 +146,64 @@ class RegionOverlay(QDialog):
             self.selected = Region(self.monitor, geo.x()+rect.x(), geo.y()+rect.y(), rect.width(), rect.height())
             self.accept()
 
+class PointOverlay(QDialog):
+    """Pick one point on a screenshot of the chosen display.
+
+    Used for «محل کلیک کلاسیک»: the game's big Bet / Cash Out button. The main
+    window is hidden first, so the screenshot shows the live screen.
+    """
+    def __init__(self, monitor: int, parent=None) -> None:
+        super().__init__(parent)
+        self.monitor = monitor
+        self.selected: tuple[int, int] | None = None
+        self.setWindowTitle("محل کلیک کلاسیک")
+        with mss.MSS() as backend:
+            m = dict(backend.monitors[monitor])
+            raw = backend.grab({"left": m["left"], "top": m["top"],
+                                "width": m["width"], "height": m["height"]})
+        self.setGeometry(QRect(m["left"], m["top"], m["width"], m["height"]))
+        self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint
+                            | Qt.WindowType.Tool)
+        self.setModal(True)
+        self.setCursor(Qt.CursorShape.CrossCursor)
+        self._hover: QPoint | None = None
+        frame = np.asarray(raw)[:, :, :3].copy()
+        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        self._image = QImage(rgb.data, rgb.shape[1], rgb.shape[0], rgb.strides[0],
+                             QImage.Format.Format_RGB888).copy()
+
+    def paintEvent(self, _):
+        painter = QPainter(self)
+        painter.drawImage(self.rect(), self._image)
+        painter.fillRect(self.rect(), QColor(6, 9, 14, 90))
+        painter.setLayoutDirection(Qt.LayoutDirection.RightToLeft)
+        painter.setPen(QColor("#f4f6fa"))
+        painter.drawText(self.rect().adjusted(0, 24, 0, 0),
+                         Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop,
+                         "روی دکمهٔ کلاسیک (Bet / Cash Out) کلیک کنید — Esc برای انصراف")
+        if self._hover is not None:
+            painter.setPen(QPen(QColor("#7af0b8"), 2))
+            x, y = self._hover.x(), self._hover.y()
+            painter.drawEllipse(x - 14, y - 14, 28, 28)
+            painter.drawLine(x - 24, y, x + 24, y)
+            painter.drawLine(x, y - 24, x, y + 24)
+
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key.Key_Escape:
+            self.reject()
+            return
+        super().keyPressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        self._hover = event.position().toPoint()
+        self.update()
+
+    def mouseReleaseEvent(self, event):
+        geo = self.geometry()
+        point = event.position().toPoint()
+        self.selected = (geo.x() + point.x(), geo.y() + point.y())
+        self.accept()
+
 class CalibrationWorker(QThread):
     done = Signal(object, object)
     failed = Signal(str)
@@ -170,7 +227,7 @@ class CalibrationWorker(QThread):
             self.failed.emit(str(exc))
 
 class SmartProbeWorker(QThread):
-    """نسخهٔ /v1/models سرور محلی FreeLLMAPI را بررسی می‌کند."""
+    """نسخهٔ /v1/models سرور را بررسی می‌کند (FreeLLMAPI محلی یا OpenAI)."""
     done = Signal(object)
     failed = Signal(str)
 
@@ -226,12 +283,6 @@ class MainWindow(QMainWindow):
         titles.addWidget(subtitle)
         header.addLayout(titles)
         header.addStretch()
-        self.session_badge = QLabel("بدون تایمر")
-        self.session_badge.setObjectName("sessionBadge")
-        self.session_badge.setWordWrap(True)
-        self.session_badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.session_badge.setToolTip("زمان باقی‌ماندهٔ جلسه؛ از دکمه‌های زیر داشبورد قابل تغییر است")
-        header.addWidget(self.session_badge, 0, Qt.AlignmentFlag.AlignTop)
         outer.addLayout(header)
         toggles = QHBoxLayout()
         toggles.setSpacing(12)
@@ -512,6 +563,73 @@ class MainWindow(QMainWindow):
         self.value_bets_edit.setPlaceholderText("1.00:GREEN، 2.08:YELLOW")
         self.value_bets_edit.setToolTip("هر مورد به شکل ضریب:رنگ (RED/GREEN/YELLOW)، جداشده با کاما")
         form.addRow("ضریب‌های ویژه", self.value_bets_edit)
+        self.three_x = QCheckBox("موتور ۳x: فقط با احتمال ≥۴۰٪ از نمونهٔ مشابه وارد شو")
+        self.three_x.setChecked(self.settings.three_x_enabled)
+        form.addRow("موتور ورود", self.three_x)
+        self.three_x_minutes = QSpinBox()
+        self.three_x_minutes.setRange(0, 600)
+        self.three_x_minutes.setSuffix(" دقیقه")
+        self.three_x_minutes.setSingleStep(15)
+        self.three_x_minutes.setValue(self.settings.three_x_observation_minutes)
+        form.addRow("مشاهدهٔ اولیه", self.three_x_minutes)
+        self.three_x_rounds = QSpinBox()
+        self.three_x_rounds.setRange(0, 5000)
+        self.three_x_rounds.setSuffix(" دور")
+        self.three_x_rounds.setValue(self.settings.three_x_min_rounds)
+        form.addRow("حداقل دور قبل از ورود", self.three_x_rounds)
+        self.three_x_probability = QSpinBox()
+        self.three_x_probability.setRange(20, 95)
+        self.three_x_probability.setSuffix(" %")
+        self.three_x_probability.setValue(round(self.settings.three_x_probability * 100))
+        form.addRow("حداقل احتمال ورود", self.three_x_probability)
+        self.three_x_samples = QSpinBox()
+        self.three_x_samples.setRange(1, 2000)
+        self.three_x_samples.setSuffix(" نمونه")
+        self.three_x_samples.setValue(self.settings.three_x_min_samples)
+        form.addRow("حداقل نمونهٔ مشابه", self.three_x_samples)
+        self.three_x_ocr = QSpinBox()
+        self.three_x_ocr.setRange(50, 100)
+        self.three_x_ocr.setSuffix(" %")
+        self.three_x_ocr.setValue(round(self.settings.three_x_min_ocr * 100))
+        form.addRow("حداقل اطمینان OCR", self.three_x_ocr)
+        self.three_x_exit = QLineEdit(self.settings.three_x_exit)
+        form.addRow("ضریب خروج", self.three_x_exit)
+        self.three_x_stake = QDoubleSpinBox()
+        self.three_x_stake.setRange(.01, 10)
+        self.three_x_stake.setDecimals(2)
+        self.three_x_stake.setSuffix(" %")
+        self.three_x_stake.setSingleStep(.05)
+        self.three_x_stake.setValue(self.settings.three_x_stake_pct)
+        form.addRow("حداکثر مبلغ شرط از موجودی", self.three_x_stake)
+        self.three_x_bankroll = QLineEdit(self.settings.three_x_bankroll)
+        form.addRow("موجودی مجازی جلسه", self.three_x_bankroll)
+        self.three_x_profit = QDoubleSpinBox()
+        self.three_x_profit.setRange(.1, 100)
+        self.three_x_profit.setSuffix(" %")
+        self.three_x_profit.setSingleStep(.5)
+        self.three_x_profit.setValue(self.settings.three_x_profit_limit_pct)
+        form.addRow("حد سود جلسه", self.three_x_profit)
+        self.three_x_loss = QDoubleSpinBox()
+        self.three_x_loss.setRange(.1, 100)
+        self.three_x_loss.setSuffix(" %")
+        self.three_x_loss.setSingleStep(.5)
+        self.three_x_loss.setValue(self.settings.three_x_loss_limit_pct)
+        form.addRow("حد ضرر جلسه", self.three_x_loss)
+        self.three_x_streak = QSpinBox()
+        self.three_x_streak.setRange(1, 10)
+        self.three_x_streak.setSuffix(" باخت")
+        self.three_x_streak.setValue(self.settings.three_x_stop_losses)
+        form.addRow("توقف بعد از باخت متوالی", self.three_x_streak)
+        self.three_x_pause = QSpinBox()
+        self.three_x_pause.setRange(0, 200)
+        self.three_x_pause.setSuffix(" دور")
+        self.three_x_pause.setValue(self.settings.three_x_stop_rounds)
+        form.addRow("مدت توقف بعد از باخت‌ها", self.three_x_pause)
+        self.three_x_gap = QSpinBox()
+        self.three_x_gap.setRange(1, 100)
+        self.three_x_gap.setSuffix(" دور")
+        self.three_x_gap.setValue(self.settings.three_x_min_gap_rounds)
+        form.addRow("فاصلهٔ بین دو ورود", self.three_x_gap)
         layout.addLayout(form)
         regions = QHBoxLayout()
         for title, target in (("ناحیه ۱ — تاریخچه", "history"),
@@ -522,6 +640,14 @@ class MainWindow(QMainWindow):
             button.clicked.connect(lambda _=False, t=target: self.select_region(t))
             regions.addWidget(button)
         layout.addLayout(regions)
+        classic_row = QHBoxLayout()
+        self.classic_button = QPushButton("محل کلیک کلاسیک (دکمهٔ Bet / Cash Out)")
+        self.classic_button.clicked.connect(self.select_classic_point)
+        self.classic_test = QPushButton("کلیک تست کلاسیک")
+        self.classic_test.clicked.connect(self.test_classic_click)
+        classic_row.addWidget(self.classic_button)
+        classic_row.addWidget(self.classic_test)
+        layout.addLayout(classic_row)
         controls = QHBoxLayout()
         for title, handler in (("ذخیره", self.save_ui_settings), ("آزمون OCR", self.calibrate),
                                ("کلیک تست", self.test_click),
@@ -548,7 +674,7 @@ class MainWindow(QMainWindow):
         self._update_region_status()
 
     def _build_smart_review(self):
-        """ناحیهٔ جدید «بررسی هوشمند ضریب‌ها»: اتصال به FreeLLMAPI و ارزیابی ناحیه ۱ تا ۴."""
+        """زبانهٔ «AI Analysis»: تحلیل ناحیه ۱ تا ۴ با FreeLLMAPI محلی یا API رسمی OpenAI."""
         page = QWidget()
         layout = QVBoxLayout(page)
         layout.setSpacing(10)
@@ -567,31 +693,44 @@ class MainWindow(QMainWindow):
         self.smart_play_status.setWordWrap(True)
         self.smart_play_status.setStyleSheet("color:#c7d0dc;")
         layout.addWidget(self.smart_play_status)
+        self.smart_cashout = QCheckBox()
+        self.smart_cashout.setChecked(self.settings.smart_cashout_enabled)
+        self.smart_cashout.setToolTip(
+            "پیش از پایان ۶ ثانیه با یک کلیک روی «محل کلیک کلاسیک» وارد بازی می‌شود و با "
+            "کلیک دوم، ضریب را زیر ۱٫۹۹ می‌بندد و خارج می‌شود. بعد از ۸ باخت متوالی، "
+            "دوباره ۳۰ دقیقه فقط ضریب‌ها و ترکیب رنگ‌ها را تحلیل می‌کند.")
+        self._refresh_smart_cashout_label()
+        self.smart_cashout.toggled.connect(self._toggle_smart_cashout)
+        layout.addWidget(self.smart_cashout)
         form = QFormLayout()
+        self.smart_provider = QComboBox()
+        for label, value in (("FreeLLMAPI (محلی)", "freellmapi"),
+                             ("OpenAI GPT (رسمی)", "openai")):
+            self.smart_provider.addItem(label, value)
+        self.smart_provider.setCurrentIndex(
+            max(0, self.smart_provider.findData(self.settings.smart_review_provider)))
         self.smart_url = QLineEdit(self.settings.smart_review_url or DEFAULT_BASE_URL)
         self.smart_url.setPlaceholderText(DEFAULT_BASE_URL)
-        self.smart_url.setToolTip("آدرس سرور محلی FreeLLMAPI؛ مثلاً http://127.0.0.1:31415/v1")
-        form.addRow("آدرس FreeLLMAPI", self.smart_url)
+        self.smart_url.setToolTip("سرور سازگار با OpenAI: آدرس محلی FreeLLMAPI یا "
+                                  "https://api.openai.com/v1")
         self.smart_key = QLineEdit(self.settings.smart_review_key)
         self.smart_key.setEchoMode(QLineEdit.EchoMode.Password)
-        self.smart_key.setPlaceholderText("کلید یکپارچهٔ داشبورد FreeLLMAPI")
-        form.addRow("کلید", self.smart_key)
         self.smart_model = QLineEdit(self.settings.smart_review_model or DEFAULT_MODEL)
         self.smart_model.setPlaceholderText(DEFAULT_MODEL)
+        self._apply_provider_defaults()
+        form.addRow("مغز متفکر", self.smart_provider)
+        form.addRow("آدرس سرور", self.smart_url)
+        form.addRow("کلید", self.smart_key)
         form.addRow("مدل", self.smart_model)
-        self.smart_timeout = QSpinBox()
-        self.smart_timeout.setRange(5, 300)
-        self.smart_timeout.setSuffix(" ثانیه")
-        self.smart_timeout.setValue(self.settings.smart_review_timeout_s)
-        form.addRow("مهلت پاسخ مدل", self.smart_timeout)
+        self.smart_provider.currentIndexChanged.connect(self._on_provider_changed)
         self.smart_every = QSpinBox()
         self.smart_every.setRange(1, 100)
         self.smart_every.setSuffix(" دست")
         self.smart_every.setValue(self.settings.smart_review_every_rounds)
         form.addRow("ارزیابی هر چند دست", self.smart_every)
         self.smart_rules = QLineEdit(self.settings.smart_review_rules)
-        self.smart_rules.setPlaceholderText("قاعدهٔ اضافی اختیاری برای مدل")
-        form.addRow("قاعدهٔ اضافی", self.smart_rules)
+        self.smart_rules.setPlaceholderText("اختیاری — داده‌ها بر آن مقدم است")
+        form.addRow("نکتهٔ اختیاری برای مدل", self.smart_rules)
         self.smart_learning = QSpinBox()
         self.smart_learning.setRange(0, 600)
         self.smart_learning.setSuffix(" دقیقه")
@@ -629,14 +768,20 @@ class MainWindow(QMainWindow):
         self.smart_raw.setMinimumHeight(140)
         self.smart_raw.setPlaceholderText("آخرین پرسمان و پاسخ مدل اینجا نمایش داده می‌شود")
         layout.addWidget(self.smart_raw)
-        note = QLabel("پیشنهاد مدل فقط جهت اطلاع است؛ کلیک‌ها همچنان با قواعد خود ربات انجام می‌شوند. "
+        note = QLabel("در این زبانه هیچ‌کدام از قواعد ربات اجرا نمی‌شود؛ مدل خودش ترتیب ضرایب، "
+                      "توالی رنگ‌ها و نمودار رنگی را تحلیل می‌کند و همان تصمیم کلیک می‌شود. "
+                      "با «کلیک کلاسیک»، ربات قبل از پایان ۶ ثانیه وارد بازی می‌شود و روی "
+                      "ضریبی که خودش زیر ۱٫۹۹ انتخاب کرده شرط را می‌بندد؛ ۸ باخت متوالی هم "
+                      "دوباره ۳۰ دقیقه تحلیل بدون شرط را شروع می‌کند. برای فعال‌شدن باید "
+                      "«AI Analysis» و «ورود هوشمند به بازی» هم روشن باشند. "
                       "رویدادها در logs/smart-review.jsonl ذخیره می‌شوند.")
         note.setWordWrap(True)
         note.setStyleSheet("color:#aeb8c5")
         layout.addWidget(note)
         layout.addStretch()
-        self.tabs.addTab(self._scrollable(page), "بررسی هوشمند")
-        self.tabs.setTabToolTip(3, "بررسی هوشمند ضریب‌ها — اتصال به FreeLLMAPI")
+        self.tabs.addTab(self._scrollable(page), "AI Analysis")
+        self.tabs.setTabToolTip(3, "AI Analysis — تحلیل ناحیه ۱ تا ۴ با FreeLLMAPI محلی یا "
+                                   "API رسمی OpenAI")
 
     def _build_history(self):
         page = QWidget()
@@ -700,19 +845,35 @@ class MainWindow(QMainWindow):
                        streak_signal_length=self.streak_length.value(),
                        streak_signal_clicks=self.streak_clicks.value(),
                        value_bets=self._parse_value_bets(self.value_bets_edit.text()),
+                       three_x_enabled=self.three_x.isChecked(),
+                       three_x_observation_minutes=self.three_x_minutes.value(),
+                       three_x_min_rounds=self.three_x_rounds.value(),
+                       three_x_probability=self.three_x_probability.value() / 100,
+                       three_x_min_samples=self.three_x_samples.value(),
+                       three_x_min_ocr=self.three_x_ocr.value() / 100,
+                       three_x_exit=self.three_x_exit.text().strip() or "3",
+                       three_x_stake_pct=self.three_x_stake.value(),
+                       three_x_bankroll=self.three_x_bankroll.text().strip() or "1000",
+                       three_x_profit_limit_pct=self.three_x_profit.value(),
+                       three_x_loss_limit_pct=self.three_x_loss.value(),
+                       three_x_stop_losses=self.three_x_streak.value(),
+                       three_x_stop_rounds=self.three_x_pause.value(),
+                       three_x_min_gap_rounds=self.three_x_gap.value(),
                        smart_click_enabled=self.smart_click.isChecked(),
                        prediction_min_confidence=self.prediction_confidence.value() / 100,
                        smart_review_enabled=self.smart_enabled.isChecked(),
+                       smart_review_provider=self._provider(),
                        smart_review_url=self.smart_url.text().strip() or DEFAULT_BASE_URL,
                        smart_review_key=self.smart_key.text().strip(),
                        smart_review_model=self.smart_model.text().strip() or DEFAULT_MODEL,
-                       smart_review_timeout_s=self.smart_timeout.value(),
+                       smart_review_timeout_s=self.settings.smart_review_timeout_s,
                        smart_review_every_rounds=self.smart_every.value(),
                        smart_review_rules=self.smart_rules.text().strip(),
                        smart_play_enabled=self.smart_play.isChecked(),
                        smart_play_learning_minutes=self.smart_learning.value(),
                        smart_play_min_confidence=self.smart_min_conf.value() / 100,
                        smart_play_two_colors=self.smart_two.isChecked(),
+                       smart_cashout_enabled=self.smart_cashout.isChecked(),
                        review_window_s=self.review_minutes.value() * 60,
                        session_minutes=self.session_minutes.value(),
                        shutdown_after_session=self.shutdown_after.isChecked())
@@ -725,12 +886,49 @@ class MainWindow(QMainWindow):
         self.autoclick.setStyleSheet(f"QCheckBox {{ color: {color}; font-weight: bold; }}")
 
     def _refresh_smart_label(self) -> None:
-        """وضعیت روشن/خاموش «بررسی هوشمند» را با متن و رنگ نشان بده."""
+        """وضعیت روشن/خاموش «AI Analysis» را با متن و رنگ نشان بده."""
         on = self.smart_enabled.isChecked()
-        self.smart_enabled.setText("بررسی هوشمند ضریب‌ها: روشن" if on
-                                  else "بررسی هوشمند ضریب‌ها: خاموش")
+        self.smart_enabled.setText("AI Analysis: روشن" if on else "AI Analysis: خاموش")
         color = "#6fe3ac" if on else "#95a5a6"
         self.smart_enabled.setStyleSheet(f"QCheckBox {{ color: {color}; font-weight: bold; }}")
+
+    def _provider(self) -> str:
+        return self.smart_provider.currentData() or "freellmapi"
+
+    def _apply_provider_defaults(self) -> None:
+        """آدرس و مدل پیش‌فرض همان سرویس را بگذار؛ مقدار دستیِ کاربر را عوض نکن."""
+        openai = self._provider() == "openai"
+        url, other_url = ((OPENAI_BASE_URL, DEFAULT_BASE_URL) if openai
+                          else (DEFAULT_BASE_URL, OPENAI_BASE_URL))
+        model, other_model = ((OPENAI_MODEL, DEFAULT_MODEL) if openai
+                              else (DEFAULT_MODEL, OPENAI_MODEL))
+        for widget, value, other in ((self.smart_url, url, other_url),
+                                     (self.smart_model, model, other_model)):
+            current = widget.text().strip()
+            if not current or current == other:
+                widget.setText(value)
+        self.smart_key.setPlaceholderText("کلید رسمی OpenAI (sk-...)" if openai
+                                          else "کلید یکپارچهٔ داشبورد FreeLLMAPI")
+
+    def _on_provider_changed(self) -> None:
+        self._apply_provider_defaults()
+
+    def _refresh_smart_cashout_label(self) -> None:
+        """وضعیت گزینهٔ «کلیک کلاسیک + Cash Out» را با متن و رنگ نشان بده."""
+        on = self.smart_cashout.isChecked()
+        self.smart_cashout.setText(
+            "کلیک کلاسیک + Cash Out زیر ۱٫۹۹: روشن" if on
+            else "کلیک کلاسیک + Cash Out زیر ۱٫۹۹: خاموش")
+        color = "#6fe3ac" if on else "#95a5a6"
+        self.smart_cashout.setStyleSheet(f"QCheckBox {{ color: {color}; font-weight: bold; }}")
+
+    def _toggle_smart_cashout(self, on: bool) -> None:
+        self._refresh_smart_cashout_label()
+        self.apply_settings(smart_cashout_enabled=bool(on))
+        if on and self.settings.classic_click_point is None:
+            self.smart_play_status.setText(
+                "برای کلیک کلاسیک، در زبانهٔ کالیبراسیون «محل کلیک کلاسیک» را روی دکمهٔ "
+                "Bet / Cash Out انتخاب کنید.")
 
     def _refresh_smart_play_label(self) -> None:
         """وضعیت روشن/خاموش «ورود هوشمند به بازی» را واضح نشان بده."""
@@ -786,9 +984,8 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             QMessageBox.warning(self, "آدرس نامعتبر", str(exc))
             return
-        self.smart_probe_status.setText("در حال اتصال به FreeLLMAPI…")
-        self.smart_probe = SmartProbeWorker(self.smart_url.text(), self.smart_key.text(),
-                                            min(15, self.smart_timeout.value()))
+        self.smart_probe_status.setText("در حال اتصال…")
+        self.smart_probe = SmartProbeWorker(self.smart_url.text(), self.smart_key.text())
         self.smart_probe.done.connect(self._smart_probe_done)
         self.smart_probe.failed.connect(
             lambda message: self.smart_probe_status.setText("خطای اتصال: " + message))
@@ -799,7 +996,7 @@ class MainWindow(QMainWindow):
         if models:
             self.smart_probe_status.setText(
                 f"متصل شد — {len(models)} مدل در دسترس: {names}"
-                " (نام یکی از همین‌ها را در فیلد «مدل» بگذارید یا auto را نگه دارید)")
+                " (نام یکی از همین‌ها را در فیلد «مدل» بگذارید)")
         else:
             self.smart_probe_status.setText("متصل شد (فهرست مدل‌ها خالی بود؛ مدل را دستی بگذارید).")
 
@@ -839,6 +1036,9 @@ class MainWindow(QMainWindow):
                  f"{self._region_state(getattr(self.settings, name))}"
                  for number, name in ((1, "history_region"), (2, "result_region"),
                                       (3, "chart_region"), (4, "bet_region"))]
+        point = self.settings.classic_click_point
+        parts.append("محل کلیک کلاسیک: "
+                     + (f"{point[0]},{point[1]}" if point else "انتخاب نشده"))
         self.region_status.setText("  |  ".join(parts))
 
     def select_region(self, target: str = "result"):
@@ -882,6 +1082,29 @@ class MainWindow(QMainWindow):
             self.tabs.setCurrentIndex(1)
         if error is not None:
             QMessageBox.warning(self, "انتخاب ناحیه", str(error))
+
+    def select_classic_point(self):
+        """انتخاب تک‌نقطه‌ی «محل کلیک کلاسیک» روی صفحهٔ زنده."""
+        error = None
+        try:
+            self.hide()
+            QApplication.processEvents()
+            sleep(0.3)  # let this window actually leave the screen before the capture
+            overlay = PointOverlay(self.monitor.currentData())
+            if overlay.exec() and overlay.selected:
+                self.settings = replace(self.settings,
+                                        classic_click_point=overlay.selected)
+                self.save_ui_settings()
+                self._update_region_status()
+        except Exception as exc:
+            error = exc
+        finally:
+            self.show()
+            self.raise_()
+            self.activateWindow()
+            self.tabs.setCurrentIndex(1)
+        if error is not None:
+            QMessageBox.warning(self, "محل کلیک کلاسیک", str(error))
 
     def save_ui_settings(self):
         if self.worker and self.worker.isRunning():
@@ -1040,14 +1263,31 @@ class MainWindow(QMainWindow):
         self.value_bets_edit.setText(", ".join(f"{key}:{color}" for key, color in
                                                self.settings.value_bets.items()))
         self.smart_click.setChecked(self.settings.smart_click_enabled)
+        self.three_x.setChecked(self.settings.three_x_enabled)
+        self.three_x_minutes.setValue(self.settings.three_x_observation_minutes)
+        self.three_x_rounds.setValue(self.settings.three_x_min_rounds)
+        self.three_x_probability.setValue(round(self.settings.three_x_probability * 100))
+        self.three_x_samples.setValue(self.settings.three_x_min_samples)
+        self.three_x_ocr.setValue(round(self.settings.three_x_min_ocr * 100))
+        self.three_x_exit.setText(self.settings.three_x_exit)
+        self.three_x_stake.setValue(self.settings.three_x_stake_pct)
+        self.three_x_bankroll.setText(self.settings.three_x_bankroll)
+        self.three_x_profit.setValue(self.settings.three_x_profit_limit_pct)
+        self.three_x_loss.setValue(self.settings.three_x_loss_limit_pct)
+        self.three_x_streak.setValue(self.settings.three_x_stop_losses)
+        self.three_x_pause.setValue(self.settings.three_x_stop_rounds)
+        self.three_x_gap.setValue(self.settings.three_x_min_gap_rounds)
         self.smart_enabled.blockSignals(True)
         self.smart_enabled.setChecked(self.settings.smart_review_enabled)
         self.smart_enabled.blockSignals(False)
         self._refresh_smart_label()
+        self.smart_provider.blockSignals(True)
+        self.smart_provider.setCurrentIndex(
+            max(0, self.smart_provider.findData(self.settings.smart_review_provider)))
+        self.smart_provider.blockSignals(False)
         self.smart_url.setText(self.settings.smart_review_url)
         self.smart_key.setText(self.settings.smart_review_key)
         self.smart_model.setText(self.settings.smart_review_model)
-        self.smart_timeout.setValue(self.settings.smart_review_timeout_s)
         self.smart_every.setValue(self.settings.smart_review_every_rounds)
         self.smart_rules.setText(self.settings.smart_review_rules)
         self.smart_play.blockSignals(True)
@@ -1057,6 +1297,10 @@ class MainWindow(QMainWindow):
         self.smart_learning.setValue(self.settings.smart_play_learning_minutes)
         self.smart_min_conf.setValue(round(self.settings.smart_play_min_confidence * 100))
         self.smart_two.setChecked(self.settings.smart_play_two_colors)
+        self.smart_cashout.blockSignals(True)
+        self.smart_cashout.setChecked(self.settings.smart_cashout_enabled)
+        self.smart_cashout.blockSignals(False)
+        self._refresh_smart_cashout_label()
         self.prediction_confidence.setValue(round(self.settings.prediction_min_confidence * 100))
         self.review_minutes.setValue(max(1, self.settings.review_window_s // 60))
         self.session_minutes.setValue(self.settings.session_minutes)
@@ -1069,19 +1313,9 @@ class MainWindow(QMainWindow):
             self.report_status.setText(f"گزارش پایان جلسه آماده است: {PROJECT_ROOT / 'logs' / 'session-report.txt'}")
         self._refresh()
 
-    def _set_badge_urgent(self, urgent: bool) -> None:
-        """نشان تایمر را وقتی کمتر از پنج دقیقه مانده قرمز کن."""
-        if bool(self.session_badge.property("urgent")) == urgent:
-            return
-        self.session_badge.setProperty("urgent", urgent)
-        self.session_badge.style().unpolish(self.session_badge)
-        self.session_badge.style().polish(self.session_badge)
-
     def _on_session_tick(self, remaining: int, total: int) -> None:
-        """شمارش معکوس جلسه را روی نشان بالای پنجره و نوار داشبورد بنویس."""
+        """شمارش معکوس جلسه را روی نوار داشبورد بنویس."""
         if total <= 0:
-            self.session_badge.setText("بدون تایمر")
-            self._set_badge_urgent(False)
             self.session_left.setText("بدون تایمر")
             self.session_left.setStyleSheet("color:#f5c86b;font-weight:700;font-size:13px;"
                                             "background:transparent")
@@ -1096,8 +1330,6 @@ class MainWindow(QMainWindow):
         elapsed = max(0, total - remaining)
         percent = int(round(elapsed * 100 / total)) if total else 0
         urgent = remaining <= 300
-        self.session_badge.setText("زمان باقی‌ماندهٔ جلسه: " + clock)
-        self._set_badge_urgent(urgent)
         self.session_left.setText("پایان جلسه در " + clock if remaining else "جلسه تمام شد")
         self.session_left.setStyleSheet(
             "color:#ff9db0;font-weight:800;font-size:13px;background:transparent" if urgent
@@ -1112,13 +1344,11 @@ class MainWindow(QMainWindow):
         if not minutes:
             self._on_session_tick(0, 0)
         elif self.worker is None or not self.worker.isRunning():
-            self.session_badge.setText(f"تایمر {minutes} دقیقه — با شروع پایش شمرده می‌شود")
-            self.session_left.setText("آمادهٔ شروع")
+            self.session_left.setText(f"آمادهٔ شروع — {minutes} دقیقه")
             self.session_progress.setValue(0)
             self.session_progress.setFormat(f"0 از {minutes} دقیقه")
 
     def _on_session_finished(self, report_path, shutdown):
-        self.session_badge.setText("جلسه تمام شد")
         self.session_left.setText("جلسه تمام شد")
         self.session_left.setStyleSheet("color:#ff9db0;font-weight:800;font-size:13px;"
                                         "background:transparent")
@@ -1143,17 +1373,38 @@ class MainWindow(QMainWindow):
             report = clicker.test()
         finally:
             clicker.close()
+        if report.reason == "target not found":
+            self.click_status.setText(
+                "کلیک تست: هدف پیدا نشد — ابتدا «ناحیه ۴ — دکمه‌های شرط» را کالیبره کنید")
+            return
         label = {"clicked": "کلیک شد", "dry-run": "آزمایشی", "click failed": "کلیک ناموفق"}.get(
             report.reason, "انجام نشد")
         self.click_status.setText(f"کلیک تست: {label} — {report.reason} {report.point or ''}")
+
+    def test_classic_click(self):
+        """کلیک تست روی «محل کلیک کلاسیک» (دکمهٔ Bet / Cash Out)."""
+        clicker = AutoClicker(self.settings)
+        try:
+            report = clicker.test_classic()
+        finally:
+            clicker.close()
+        if report.reason == "classic click point not calibrated":
+            self.click_status.setText(
+                "کلیک تست کلاسیک: ابتدا «محل کلیک کلاسیک» را انتخاب کنید")
+            return
+        label = {"clicked": "کلیک شد", "click failed": "کلیک ناموفق"}.get(
+            report.reason, "انجام نشد")
+        self.click_status.setText(
+            f"کلیک تست کلاسیک: {label} — {report.point or ''}")
 
     def _on_click(self, report):
         label = {"clicked": "کلیک شد", "click failed": "کلیک ناموفق"}.get(report.reason, "انجام نشد")
         budget = (f" | باقی‌مانده {report.remaining}/{self.settings.autoclick_max_clicks}"
                   if report.remaining else "")
         forecast = f" | پیش‌بینی: {report.forecast}" if report.forecast else ""
-        self.click_status.setText(f"وضعیت کلیک: {label} — {report.reason}{budget}{forecast} "
-                                  f"{report.point or ''}")
+        detail = f" | {report.detail}" if report.detail else ""
+        self.click_status.setText(f"وضعیت کلیک: {label} — {report.reason}{budget}{forecast}"
+                                  f"{detail} {report.point or ''}")
         if report.clicked:
             self._add_history(["", "", "", "", datetime.now().isoformat(timespec="seconds"), "", "",
                                f"CLICK {report.reason}: {report.point}"])
@@ -1247,8 +1498,12 @@ class MainWindow(QMainWindow):
         self.smart_play.blockSignals(True)
         self.smart_play.setChecked(candidate.smart_play_enabled)
         self.smart_play.blockSignals(False)
+        self.smart_cashout.blockSignals(True)
+        self.smart_cashout.setChecked(candidate.smart_cashout_enabled)
+        self.smart_cashout.blockSignals(False)
         self._refresh_smart_label()
         self._refresh_smart_play_label()
+        self._refresh_smart_cashout_label()
         self._refresh_toggles()
         self._refresh()
 

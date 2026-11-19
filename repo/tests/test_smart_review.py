@@ -66,6 +66,33 @@ def test_prompt_covers_the_four_marked_regions():
     assert "second" not in single and "50%" in single
 
 
+def test_prompt_carries_no_fixed_betting_rules():
+    """در AI Analysis مدل باید خودش تحلیل کند، نه اینکه قواعد ربات را اجرا کند."""
+    snapshot = SmartSnapshot(recent=("1.66", "4.18"), current="8.01",
+                             grid_columns=(("Y", "G"),), rounds_seen=3)
+    prompt = build_prompt(snapshot, threshold="10.00")
+    for old_rule in ("هفت دست صبر", "قواعد کاربر", "ضرایب 1.00", "جفت سبز یا جفت قرمز",
+                     "همان رنگ برای ده دست"):
+        assert old_rule not in prompt
+    for data in ("1. 1.66 (قرمز)", "4.18 (سبز)", "ستون 1", "3"):
+        assert data in prompt
+
+
+def test_prompt_asks_for_a_cashout_exit_in_classic_mode():
+    snapshot = SmartSnapshot(recent=("1.66",), current="1.20")
+    prompt = build_prompt(snapshot, classic=True)
+    assert '"exit"' in prompt and "1.30" in prompt and "1.99" in prompt
+    assert '"exit"' not in build_prompt(snapshot)
+
+
+def test_parse_verdict_reads_the_cashout_exit_below_the_limit():
+    verdict = parse_verdict('{"bet":"GREEN","exit":1.85,"confidence":0.6}')
+    assert verdict is not None and verdict.exit_at == 1.85
+    capped = parse_verdict('{"bet":"GREEN","exit":2.4}')
+    assert capped is not None and capped.exit_at == 1.98
+    assert parse_verdict('{"bet":"GREEN","exit":"soon"}').exit_at is None
+
+
 def test_parse_verdict_accepts_plain_fenced_and_persian_answers():
     assert parse_verdict('{"bet":"GREEN","confidence":0.72,"reason":"روند سبز"}') == \
         SmartVerdict("GREEN", 0.72, "روند سبز")
@@ -114,6 +141,18 @@ def test_ask_explains_an_unreachable_port():
     assert "FreeLLMAPI" in str(error.value)
 
 
+def test_ask_explains_a_timeout():
+    def slow(request, timeout=None):
+        raise TimeoutError("timed out")
+
+    with mock.patch.object(smart_review.urlrequest, "urlopen", slow):
+        with pytest.raises(RuntimeError) as error:
+            ask("http://127.0.0.1:31415/v1", "", "auto", "سلام", timeout=90)
+    assert "مهلت" in str(error.value)
+    assert "90" in str(error.value)
+    assert "timed out" not in str(error.value)
+
+
 def test_ask_reports_a_rejected_key():
     def unauthorised(request, timeout=None):
         raise urlerror.HTTPError(request.full_url, 401, "unauthorized", {}, None)
@@ -150,6 +189,7 @@ def test_smart_review_settings_are_validated_and_persisted(tmp_path: Path):
     DesktopSettings(smart_review_url="http://127.0.0.1:31415/v1").validate()
     for bad in ({"smart_review_url": "127.0.0.1:31415"},
                 {"smart_review_timeout_s": 4},
+                {"smart_review_timeout_s": 30},
                 {"smart_review_timeout_s": "45"},
                 {"smart_review_every_rounds": 0},
                 {"smart_review_enabled": "yes"}):
@@ -160,10 +200,33 @@ def test_smart_review_settings_are_validated_and_persisted(tmp_path: Path):
     settings = DesktopSettings(smart_review_enabled=True,
                                smart_review_url="http://127.0.0.1:4000/v1",
                                smart_review_key="sk-local", smart_review_model="glm-5.2",
-                               smart_review_timeout_s=30, smart_review_every_rounds=2,
+                               smart_review_timeout_s=90, smart_review_every_rounds=2,
                                smart_review_rules="زرد بعد از سه سبز")
     save_settings(settings, path)
     loaded = load_settings(path)
     assert loaded == settings
     assert load_settings(tmp_path / "absent.json").smart_review_url == \
         "http://127.0.0.1:31415/v1"
+
+
+def test_old_timeout_default_is_raised_on_load(tmp_path: Path):
+    path = tmp_path / "settings.json"
+    for old in (30, 45, "90", 90.0, None):
+        path.write_text(json.dumps({"smart_review_timeout_s": old}), encoding="utf-8")
+        assert load_settings(path).smart_review_timeout_s == 120
+    path.write_text(json.dumps({"smart_review_timeout_s": 200}), encoding="utf-8")
+    assert load_settings(path).smart_review_timeout_s == 200
+
+
+def test_migration_leaves_the_rest_of_an_old_file_alone(tmp_path: Path):
+    path = tmp_path / "settings.json"
+    path.write_text(json.dumps({"smart_review_timeout_s": 30, "smart_review_key": "sk-old",
+                                "autoclick_threshold": "7.50",
+                                "three_x_enabled": True,
+                                "signal_rule_enabled": True}), encoding="utf-8")
+    loaded = load_settings(path)
+    assert loaded.smart_review_timeout_s == 120
+    assert loaded.smart_review_key == "sk-old"
+    assert loaded.autoclick_threshold == "7.50"
+    # فایلی که موتور ۳x را دارد نباید قوانین قدیمی را خاموش کند.
+    assert loaded.signal_rule_enabled is True

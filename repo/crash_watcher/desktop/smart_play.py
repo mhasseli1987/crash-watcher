@@ -21,6 +21,9 @@ from .smart_review import SmartVerdict
 
 LEARNING = "learning"
 TRADING = "trading"
+# پس از این تعداد باخت متوالی، تحلیل دوباره از سر گرفته می‌شود.
+RESTART_AFTER_LOSSES = 8
+RESTART_LEARNING_MINUTES = 30
 
 
 @dataclass(frozen=True)
@@ -31,6 +34,7 @@ class SmartDecision:
     confidence: float
     reason: str = ""
     prepared_after: str | None = None  # round id the snapshot ended with
+    exit_at: float | None = None  # ضریب خروج کلاسیک
 
     @property
     def target(self) -> str:
@@ -82,6 +86,12 @@ class SmartPlanner:
         self.allow_two_colors = bool(allow_two_colors)
 
     # -- prepare / consume ---------------------------------------------
+    def restart_learning(self, minutes: int = RESTART_LEARNING_MINUTES) -> None:
+        """پس از باخت‌های متوالی، دوباره فقط تحلیل کن (پیش‌فرض: نیم ساعت)."""
+        self.learning_seconds = max(0, int(minutes)) * 60
+        self._started = self._clock()
+        self._ready = None
+
     def store(self, verdict: SmartVerdict | None, prepared_after: str | None) -> None:
         """نتیجهٔ مدل را نگه دار تا سر بسته‌شدن ضریبِ بعدی استفاده شود."""
         if verdict is None or verdict.bet == "SKIP":
@@ -93,7 +103,8 @@ class SmartPlanner:
         if not bets:
             self._ready = None
             return
-        decision = SmartDecision(bets, verdict.confidence, verdict.reason, prepared_after)
+        decision = SmartDecision(bets, verdict.confidence, verdict.reason, prepared_after,
+                                 verdict.exit_at)
         self._ready = decision
         self._prepared_at = len(self.rounds)
         self._latest = decision

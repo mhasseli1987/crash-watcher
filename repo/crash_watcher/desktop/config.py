@@ -32,6 +32,8 @@ class DesktopSettings:
     chart_region: Region | None = None
     bet_region: Region | None = None  # the row of the three bet buttons (region 4)
     click_point: tuple[int, int] | None = None
+    # «محل کلیک کلاسیک»: همان دکمهٔ بزرگ Bet / Cash Out بازی.
+    classic_click_point: tuple[int, int] | None = None
     bet_point_red: tuple[int, int] | None = None
     bet_point_green: tuple[int, int] | None = None
     bet_point_yellow: tuple[int, int] | None = None
@@ -46,12 +48,13 @@ class DesktopSettings:
     autoclick_restore_cursor: bool = True
     smart_click_enabled: bool = False
     prediction_min_confidence: float = 0.60
-    # «بررسی هوشمند ضریب‌ها»: پرسش از سرور محلی FreeLLMAPI (OpenAI-compatible).
+    # AI Analysis: پرسش از سرور محلی FreeLLMAPI یا API رسمی OpenAI.
+    smart_review_provider: str = "freellmapi"  # freellmapi | openai
     smart_review_enabled: bool = False
     smart_review_url: str = "http://127.0.0.1:31415/v1"
     smart_review_key: str = ""
     smart_review_model: str = "auto"
-    smart_review_timeout_s: int = 45
+    smart_review_timeout_s: int = 120
     smart_review_every_rounds: int = 1
     smart_review_rules: str = ""
     # «ورود هوشمند به بازی»: اول یادگیری، بعد شرط‌بندی بر پایهٔ تصمیم آمادهٔ مدل.
@@ -59,19 +62,39 @@ class DesktopSettings:
     smart_play_learning_minutes: int = 30
     smart_play_min_confidence: float = 0.40
     smart_play_two_colors: bool = True
-    signal_rule_enabled: bool = True
+    # «کلیک کلاسیک»: ورود با یک کلیک پیش از پایان ۶ ثانیه و خروج با کلیک دوم زیر ۱٫۹۹.
+    smart_cashout_enabled: bool = False
+    # قوانین قدیمی «شکل رنگ» در تحلیل لاگ بازدهی نداشتند (۱۱٪ تا ۴۵٪) و پیش‌فرض
+    # خاموش‌اند؛ فقط موتور ۳x تصمیم ورود می‌گیرد.
+    signal_rule_enabled: bool = False
     signal_repeat: int = 2
     signal_burst_rounds: int = 9
-    pair_flip_enabled: bool = True
-    row_signal_enabled: bool = True
+    pair_flip_enabled: bool = False
+    row_signal_enabled: bool = False
     row_signal_gap: int = 4
     row_signal_rows: int = 4
     row_signal_recent_columns: int = 4
     row_signal_clicks: int = 1
-    streak_signal_enabled: bool = True
+    streak_signal_enabled: bool = False
     streak_signal_length: int = 6
     streak_signal_clicks: int = 10
-    value_bet_enabled: bool = True
+    value_bet_enabled: bool = False
+    # موتور ۳x: تنها مسیر ورود. یک ساعت مشاهده، ۱۰۰ دور، احتمال ≥۴۰٪ از ۲۰ نمونهٔ
+    # مشابه، شرط ثابت ≤۰٫۲۵٪ موجودی، توقف در ±۲٪ جلسه.
+    three_x_enabled: bool = True
+    three_x_observation_minutes: int = 60
+    three_x_min_rounds: int = 100
+    three_x_probability: float = 0.40
+    three_x_min_samples: int = 20
+    three_x_min_ocr: float = 0.95
+    three_x_exit: str = "3"
+    three_x_stake_pct: float = 0.25
+    three_x_bankroll: str = "1000"
+    three_x_profit_limit_pct: float = 2.0
+    three_x_loss_limit_pct: float = 2.0
+    three_x_stop_losses: int = 3
+    three_x_stop_rounds: int = 30
+    three_x_min_gap_rounds: int = 5
     value_bets: dict[str, str] = field(default_factory=lambda: {
         "1.00": "GREEN", "1.11": "GREEN", "1.99": "GREEN", "2.08": "YELLOW"})
     review_window_s: int = 1800
@@ -107,7 +130,8 @@ class DesktopSettings:
             if not isinstance(region, Region):
                 raise ValueError(f"{name} must be a Region")
             region.capture(self.interval_ms)
-        for name in ("click_point", "bet_point_red", "bet_point_green", "bet_point_yellow"):
+        for name in ("click_point", "classic_click_point", "bet_point_red",
+                     "bet_point_green", "bet_point_yellow"):
             point = getattr(self, name)
             if point is None:
                 continue
@@ -134,6 +158,8 @@ class DesktopSettings:
             raise ValueError("autoclick_skip_rounds must be a non-negative integer")
         if not 0.5 <= self.prediction_min_confidence <= 1:
             raise ValueError("prediction_min_confidence must be between 0.5 and 1")
+        if self.smart_review_provider not in ("freellmapi", "openai"):
+            raise ValueError("smart_review_provider must be 'freellmapi' or 'openai'")
         if type(self.smart_review_enabled) is not bool:
             raise ValueError("smart_review_enabled must be a boolean")
         if (not isinstance(self.smart_review_url, str)
@@ -144,13 +170,15 @@ class DesktopSettings:
         if not isinstance(self.smart_review_model, str):
             raise ValueError("smart_review_model must be text")
         if (type(self.smart_review_timeout_s) is not int
-                or not 5 <= self.smart_review_timeout_s <= 300):
-            raise ValueError("smart_review_timeout_s must be an integer between 5 and 300")
+                or not 60 <= self.smart_review_timeout_s <= 300):
+            raise ValueError("smart_review_timeout_s must be an integer between 60 and 300")
         if (type(self.smart_review_every_rounds) is not int
                 or not 1 <= self.smart_review_every_rounds <= 100):
             raise ValueError("smart_review_every_rounds must be an integer between 1 and 100")
-        if type(self.smart_play_enabled) is not bool or type(self.smart_play_two_colors) is not bool:
-            raise ValueError("smart_play_enabled and smart_play_two_colors must be booleans")
+        if (type(self.smart_play_enabled) is not bool or type(self.smart_play_two_colors) is not bool
+                or type(self.smart_cashout_enabled) is not bool):
+            raise ValueError("smart_play_enabled, smart_play_two_colors and "
+                             "smart_cashout_enabled must be booleans")
         if (type(self.smart_play_learning_minutes) is not int
                 or not 0 <= self.smart_play_learning_minutes <= 600):
             raise ValueError("smart_play_learning_minutes must be an integer between 0 and 600")
@@ -177,6 +205,34 @@ class DesktopSettings:
                      "streak_signal_length", "streak_signal_clicks"):
             if type(getattr(self, name)) is not int or getattr(self, name) < 1:
                 raise ValueError(f"{name} must be a positive integer")
+        for name in ("three_x_observation_minutes", "three_x_min_rounds", "three_x_min_samples",
+                     "three_x_stop_losses", "three_x_stop_rounds", "three_x_min_gap_rounds"):
+            if type(getattr(self, name)) is not int or getattr(self, name) < 0:
+                raise ValueError(f"{name} must be a non-negative integer")
+        if self.three_x_min_samples < 1 or self.three_x_stop_losses < 1 or self.three_x_min_gap_rounds < 1:
+            raise ValueError("three_x_min_samples, three_x_stop_losses and "
+                             "three_x_min_gap_rounds must be at least 1")
+        for name in ("three_x_probability", "three_x_min_ocr"):
+            value = getattr(self, name)
+            if (not isinstance(value, (int, float)) or isinstance(value, bool)
+                    or not 0.2 <= value <= 1):
+                raise ValueError(f"{name} must be a number between 0.2 and 1")
+        for name in ("three_x_profit_limit_pct", "three_x_loss_limit_pct"):
+            value = getattr(self, name)
+            if (not isinstance(value, (int, float)) or isinstance(value, bool)
+                    or not 0.1 <= value <= 100):
+                raise ValueError(f"{name} must be a number between 0.1 and 100")
+        if (not isinstance(self.three_x_stake_pct, (int, float))
+                or isinstance(self.three_x_stake_pct, bool)
+                or not 0.01 <= self.three_x_stake_pct <= 10):
+            raise ValueError("three_x_stake_pct must be between 0.01 and 10")
+        try:
+            exit_factor = Decimal(self.three_x_exit)
+            bankroll = Decimal(self.three_x_bankroll)
+        except (InvalidOperation, TypeError, ValueError) as exc:
+            raise ValueError("three_x_exit and three_x_bankroll must be numbers") from exc
+        positive_number(exit_factor, "three_x_exit")
+        positive_number(bankroll, "three_x_bankroll")
         if not isinstance(self.value_bets, dict):
             raise ValueError("value_bets must map a multiplier to a colour")
         for text, color in self.value_bets.items():
@@ -202,7 +258,8 @@ def load_settings(path: Path = SETTINGS_PATH) -> DesktopSettings:
     for key in ("result_region", "history_region", "click_region", "chart_region", "bet_region"):
         if data.get(key):
             data[key] = Region(**data[key])
-    for key in ("click_point", "bet_point_red", "bet_point_green", "bet_point_yellow"):
+    for key in ("click_point", "classic_click_point", "bet_point_red", "bet_point_green",
+                "bet_point_yellow"):
         if data.get(key) is not None:
             data[key] = tuple(data[key])
     # Older settings files still carry the immediate-click default of 0.
@@ -216,6 +273,18 @@ def load_settings(path: Path = SETTINGS_PATH) -> DesktopSettings:
         # session by hand now, so an old file must not shut the machine down.
         data["session_minutes"] = 0
         data["shutdown_after_session"] = False
+    if "three_x_enabled" not in data:
+        # A file written before the 3x engine still enables the old shape rules;
+        # those rules lost money, so a loaded file must not bring them back.
+        for key in ("signal_rule_enabled", "pair_flip_enabled", "row_signal_enabled",
+                    "streak_signal_enabled", "value_bet_enabled"):
+            data[key] = False
+    if "smart_review_timeout_s" in data:
+        timeout = data["smart_review_timeout_s"]
+        if type(timeout) is not int or timeout < 60:
+            # نسخه‌های قبلی ۳۰/۴۵ ثانیه ذخیره می‌کردند و مدل محلی در این مهلت پاسخ
+            # نمی‌داد؛ فقط همین مقدار اصلاح می‌شود، بقیهٔ فایل دست‌نخورده می‌ماند.
+            data["smart_review_timeout_s"] = 120
     if "autoclick_skip_rounds" not in data:
         # Files written for the old "ten clicks right after the yellow" rule must not
         # keep clicking ten rounds; the run is now wait 7, click 3.

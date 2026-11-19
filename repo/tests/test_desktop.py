@@ -154,7 +154,7 @@ def no_detection(monkeypatch):
 def _clicker(**overrides):
     values = dict(click_region=Region(1, 100, 200, 60, 40), autoclick_enabled=True,
                   autoclick_dry_run=False, autoclick_cooldown_ms=0, autoclick_delay_ms=0,
-                  autoclick_skip_rounds=0)
+                  autoclick_skip_rounds=0, three_x_enabled=False)
     values.update(overrides)
     return DesktopSettings(**values)
 
@@ -327,7 +327,8 @@ def test_two_yellows_in_a_row_signal():
 
 def test_signal_clicks_after_each_yellow_up_to_the_repeat_limit(no_detection, monkeypatch):
     sender = _Sender()
-    clicker = AutoClicker(_clicker(autoclick_threshold="100", signal_repeat=2), sender=sender)
+    clicker = AutoClicker(_clicker(autoclick_threshold="100", signal_repeat=2,
+                                   signal_rule_enabled=True), sender=sender)
     monkeypatch.setattr(AutoClicker, "_chart_reading", lambda self: object())
     monkeypatch.setattr("crash_watcher.desktop.clicker.two_yellows_in_a_row", lambda reading: True)
     monkeypatch.setattr("crash_watcher.desktop.clicker.yellow_green_green_yellow", lambda reading: False)
@@ -341,7 +342,8 @@ def test_signal_clicks_after_each_yellow_up_to_the_repeat_limit(no_detection, mo
 
 def test_signal_needs_a_rising_edge_to_arm_again(no_detection, monkeypatch):
     sender = _Sender()
-    clicker = AutoClicker(_clicker(autoclick_threshold="100", signal_repeat=1), sender=sender)
+    clicker = AutoClicker(_clicker(autoclick_threshold="100", signal_repeat=1,
+                                   signal_rule_enabled=True), sender=sender)
     pattern = {"value": False}
     monkeypatch.setattr(AutoClicker, "_chart_reading", lambda self: object())
     monkeypatch.setattr("crash_watcher.desktop.clicker.yellow_green_green_yellow", lambda reading: False)
@@ -367,8 +369,8 @@ def test_yellow_green_green_yellow_shape():
 
 def test_signal_burst_clicks_the_next_nine_rounds(no_detection, monkeypatch):
     sender = _Sender()
-    clicker = AutoClicker(_clicker(autoclick_threshold="100", streak_signal_enabled=False),
-                          sender=sender)
+    clicker = AutoClicker(_clicker(autoclick_threshold="100", streak_signal_enabled=False,
+                                   signal_rule_enabled=True), sender=sender)
     monkeypatch.setattr(AutoClicker, "_chart_reading", lambda self: object())
     monkeypatch.setattr("crash_watcher.desktop.clicker.two_yellows_in_a_row", lambda reading: False)
     monkeypatch.setattr("crash_watcher.desktop.clicker.yellow_green_green_yellow", lambda reading: True)
@@ -383,7 +385,8 @@ def test_signal_burst_clicks_the_next_nine_rounds(no_detection, monkeypatch):
 def test_pair_flip_clicks_the_opposite_color(no_detection):
     sender = _Sender()
     clicker = AutoClicker(_clicker(autoclick_threshold="100", bet_point_red=(11, 12),
-                                   bet_point_green=(21, 22)), sender=sender)
+                                   bet_point_green=(21, 22), pair_flip_enabled=True),
+                          sender=sender)
     assert not clicker.fire("a", Decimal("5.00")).clicked
     assert not clicker.fire("b", Decimal("6.00")).clicked
     flip = clicker.fire("c", Decimal("1.20"))
@@ -393,8 +396,8 @@ def test_pair_flip_clicks_the_opposite_color(no_detection):
 
 def test_pair_flip_after_two_reds_targets_green(no_detection):
     sender = _Sender()
-    clicker = AutoClicker(_clicker(autoclick_threshold="100", bet_point_green=(31, 32)),
-                          sender=sender)
+    clicker = AutoClicker(_clicker(autoclick_threshold="100", bet_point_green=(31, 32),
+                                   pair_flip_enabled=True), sender=sender)
     assert not clicker.fire("a", Decimal("1.10")).clicked
     assert not clicker.fire("b", Decimal("1.20")).clicked
     flip = clicker.fire("c", Decimal("2.50"))
@@ -431,6 +434,7 @@ def test_row_signal_is_due_when_the_next_row_was_yellow_four_columns_back():
 def test_row_signal_clicks_yellow_on_the_round_that_fills_the_row(no_detection, monkeypatch):
     sender = _Sender()
     clicker = AutoClicker(_clicker(autoclick_threshold="100", pair_flip_enabled=False,
+                                   row_signal_enabled=True,
                                    bet_point_yellow=(51, 52)), sender=sender)
     monkeypatch.setattr(AutoClicker, "_chart_reading", lambda self: object())
     monkeypatch.setattr("crash_watcher.desktop.clicker.two_yellows_in_a_row", lambda reading: False)
@@ -448,6 +452,7 @@ def test_row_signal_clicks_yellow_on_the_round_that_fills_the_row(no_detection, 
 def test_seven_greens_in_a_row_bet_green_for_ten_rounds(no_detection):
     sender = _Sender()
     clicker = AutoClicker(_clicker(autoclick_threshold="100", pair_flip_enabled=False,
+                                   streak_signal_enabled=True,
                                    bet_point_green=(91, 92), bet_point_red=(81, 82)),
                           sender=sender)
     # Six in a row are not enough for the user's streak rule.
@@ -465,6 +470,7 @@ def test_seven_greens_in_a_row_bet_green_for_ten_rounds(no_detection):
 def test_seven_reds_in_a_row_bet_red_for_ten_rounds(no_detection):
     sender = _Sender()
     clicker = AutoClicker(_clicker(autoclick_threshold="100", pair_flip_enabled=False,
+                                   streak_signal_enabled=True,
                                    bet_point_green=(91, 92), bet_point_red=(81, 82)),
                           sender=sender)
     for index in range(7):
@@ -481,6 +487,7 @@ def test_seven_reds_in_a_row_bet_red_for_ten_rounds(no_detection):
 def test_special_multiplier_bets_the_named_color(value, color, point, no_detection):
     sender = _Sender()
     clicker = AutoClicker(_clicker(autoclick_threshold="100", pair_flip_enabled=False,
+                                   value_bet_enabled=True,
                                    bet_point_green=(61, 62), bet_point_yellow=(71, 72)),
                           sender=sender)
     report = clicker.fire(f"r{value}", Decimal(value))
@@ -528,6 +535,18 @@ def test_settings_file_with_removed_keys_still_loads(tmp_path):
                                 "double_bet_enabled": False}), encoding="utf-8")
     loaded = load_settings(path)
     assert loaded.fixed_bet_amount == "12"
+    # A file from before the 3x engine must not revive the old shape rules.
+    assert loaded.signal_rule_enabled is False and loaded.streak_signal_enabled is False
+    assert loaded.three_x_enabled is True
+
+def test_live_multiplier_reads_the_running_number_only():
+    """خروج کلاسیک باید فقط عدد زنده را بفهمد، نه پیام پایان دور یا عدد نامطمئن."""
+    from crash_watcher.desktop.worker import live_multiplier
+    image = np.zeros((40, 160, 3), dtype=np.uint8)
+    assert live_multiplier(lambda _: ("1.73x", 0.95), image) == Decimal("1.73")
+    assert live_multiplier(lambda _: ("Bang @1.73x", 0.95), image) is None
+    assert live_multiplier(lambda _: ("1.73x", 0.30), image) is None
+
 
 def test_session_seconds_left_counts_down_and_rounds_safely():
     from crash_watcher.desktop.worker import session_seconds_left
@@ -546,6 +565,7 @@ def test_value_bets_reject_bad_entries():
 def test_clicks_are_attributed_to_a_rule_and_the_report_counts_hits(tmp_path, no_detection):
     sender = _Sender()
     clicker = AutoClicker(_clicker(autoclick_threshold="100", pair_flip_enabled=False,
+                                   value_bet_enabled=True,
                                    bet_point_green=(61, 62)), sender=sender,
                           log_path=tmp_path / "rounds.jsonl",
                           summary_path=tmp_path / "summary.txt",
@@ -661,6 +681,25 @@ def test_review_window_reports_after_ten_minutes(no_detection, monkeypatch):
 def test_clicker_without_target_sends_nothing(no_detection):
     sender = _Sender()
     report = AutoClicker(DesktopSettings(autoclick_enabled=True, autoclick_dry_run=False,
-                                         autoclick_cooldown_ms=0, autoclick_skip_rounds=0),
+                                         autoclick_cooldown_ms=0, autoclick_skip_rounds=0,
+                                         three_x_enabled=False),
                          sender=sender).fire("r1", Decimal("10.00"))
     assert not report.clicked and report.reason == "target not found" and sender.calls == []
+
+
+def test_test_click_uses_the_bet_region_when_no_click_area_is_saved(no_detection):
+    sender = _Sender()
+    clicker = AutoClicker(DesktopSettings(autoclick_enabled=True, autoclick_delay_ms=0,
+                                          bet_region=Region(1, 369, 811, 640, 47)),
+                          sender=sender)
+    report = clicker.test()
+    assert report.clicked and report.reason == "clicked"
+    assert report.point == (689, 834) and sender.calls == [(689, 834, True)]
+
+
+def test_test_click_uses_the_yellow_bet_button_as_the_last_fallback(no_detection):
+    sender = _Sender()
+    clicker = AutoClicker(DesktopSettings(autoclick_enabled=True, autoclick_delay_ms=0,
+                                          bet_point_yellow=(902, 834)), sender=sender)
+    assert clicker.test().point == (902, 834)
+    assert sender.calls == [(902, 834, True)]
