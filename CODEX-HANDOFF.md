@@ -1,9 +1,52 @@
 # Crash Watcher — complete handoff brief for Codex
 
-Last updated: 2026-11-19 (بررسی هوشمند + ورود هوشمند). This file is the single source of truth for the current
-state of the project. Read it fully before touching code.
+Last updated: 2026-11-19 (تایمر جلسه + تم رنگی رابط + بیلد exe). This file is the single source of truth for the
+current state of the project. Read it fully before touching code.
 
 ---
+
+## 2026-11-19 (ب) — تایمر جلسه، تم رنگی رابط، بیلد exe (آخرین تغییر)
+
+### خلاصهٔ فارسی
+
+- **تایمر جلسه کامل شد** (قابلیت پایه بود، نمایش نداشت): نشان شمارش معکوس کنار عنوان پنجره
+  (`HH:MM:SS`، زیر ۵ دقیقه قرمز می‌شود)، نوار پیشرفت جلسه روی داشبورد («X از Y دقیقه»)، و
+  چهار دکمهٔ آمادهٔ «۳۰ دقیقه / ۱ ساعت / ۳ ساعت / بدون تایمر» که بدون رفتن به تب کالیبراسیون
+  کار می‌کنند. تایمر بر پایهٔ زمان واقعی است، پس در مکث هم می‌شمارد. پایان جلسه: گزارش
+  `logs/session-report.txt` و در صورت تیک، `shutdown /s /t 60`.
+- **تم رابط کاملاً عوض شد**: پالت شیشه‌ای سبز/کهربایی با گرادیان تیره، کارت‌های متریک
+  شیشه‌ای، تب‌های قرصی، دکمه‌های رنگی (شروع سبز، توقف سرخ، مکث کهربایی، ادامه آبی،
+  بازنشانی خاکستری). الهام از کامپوننت React «adjustable glass dashboard» که کاربر فرستاد؛
+  چون ربات PySide6 است، فقط زبان بصری‌اش در QSS پیاده شد — React/Tailwind/shadcn در این
+  پروژه نصب نمی‌شود و نباید نصب شود.
+- **ریسپانسیو**: گرید کارت‌ها با عرض پنجره ۴/۳/۲ ستون می‌شود، همهٔ صفحه‌ها داخل QScrollArea،
+  برچسب تب‌ها کوتاه + elide + tooltip تا در عرض کم بریده و ناخوانا نشوند.
+- **باگ خوانایی رفع شد**: فیلدهای X و Y در کالیبراسیون خالی دیده می‌شدند (PySide6 بعد از
+  `setRange` که مقدار را عوض نمی‌کند، متن line edit را به‌روز نمی‌کند).
+- **بیلد exe**: PyInstaller در venv نصب شد و خروجی onedir در
+  `F:\CRASH WATCHER\FINAL VERSION\repo 1\CrashWatcher` کپی شد (settings.json و logs کاربر
+  دست‌نخورده ماندند). exe با پلتفرم offscreen اجرا شد و سالم بالا آمد، بعد بسته شد.
+- تست‌ها: `197 passed`.
+
+### English technical state
+
+- `worker.py`: new `session_tick(int remaining, int total)` signal emitted only when the
+  remaining second changes (total `0` = no timer), plus module-level
+  `session_seconds_left(started, limit_minutes, now=None) -> int | None` (unit-tested).
+  The loop still sets `_session_limit_reached` and breaks at zero, so `session_finished`
+  fires and the clicker writes its report before any shutdown.
+- `ui.py`: `session_badge` (objectName `sessionBadge`, property `urgent=true` under five
+  minutes), `session_left`, `session_progress` (`QProgressBar#session`), preset buttons
+  (`#preset`), `_on_session_tick`, `_set_session_limit`, `_set_badge_urgent`,
+  `_relayout_metrics` (4/3/2 columns from the tab width), tab elide + tooltips, shortened
+  tab labels. Button object names: `start`, `stop`, `pause`, `resume`, `reset`.
+  The QSS `STYLE` block is the single place for colours; `_toggle_style()` keeps the header
+  toggles in the same palette.
+- `tests/test_desktop.py`: `test_session_seconds_left_counts_down_and_rounds_safely`.
+- Build: `build-windows.ps1` unchanged (`--onedir --windowed --collect-all rapidocr
+  --collect-all onnxruntime`); output is ~352 MB, exe ≈ 9 MB.
+- Not done / caveats: no click-through testing of the live game; the exe was only verified
+  to boot (offscreen), not to OCR a real screen.
 
 ## 2026-11-19 — بررسی هوشمند ضریب‌ها + ورود هوشمند به بازی (آخرین تغییر)
 

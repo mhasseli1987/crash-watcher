@@ -521,6 +521,14 @@ def test_an_old_timer_and_shutdown_default_is_switched_off_on_load(tmp_path):
     loaded = load_settings(path)
     assert loaded.session_minutes == 0 and loaded.shutdown_after_session is False
 
+def test_session_seconds_left_counts_down_and_rounds_safely():
+    from crash_watcher.desktop.worker import session_seconds_left
+    assert session_seconds_left(1000.0, 0, now=1000.0) is None
+    assert session_seconds_left(1000.0, 30, now=1000.0) == 30 * 60
+    assert session_seconds_left(1000.0, 30, now=1000.0 + 600) == 20 * 60
+    assert session_seconds_left(1000.0, 30, now=1000.0 + 5000) == 0
+    assert session_seconds_left(1000.0, -5, now=1000.0) is None
+
 def test_value_bets_reject_bad_entries():
     with pytest.raises(ValueError):
         _clicker(value_bets={"1.00": "BLUE"}).validate()

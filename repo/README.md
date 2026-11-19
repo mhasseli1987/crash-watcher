@@ -62,9 +62,13 @@ region 1 (history strip), 2 (current multiplier), 3 (the Trends colour grid) and
 Bet Red / Bet Green / Bet Moon buttons). Region 4 is split into three equal parts, so one
 selection is enough for all three bets. See [docs/regions.md](docs/regions.md).
 
-**Session length (off by default).** `session_minutes` defaults to 0, so monitoring runs
+**Session timer (off by default).** `session_minutes` defaults to 0, so monitoring runs
 until it is stopped by hand and then writes the report. Setting it to a number ends the
-session after that many minutes. `shutdown_after_session` is off by default; when it is on,
+session after that many minutes. The dashboard has the countdown: a badge next to the title
+shows `HH:MM:SS` left (it turns red under five minutes), a progress bar shows how much of the
+session has passed, and the presets *30 min / 1 h / 3 h / no timer* set the limit without
+opening the calibration tab. The timer measures wall-clock time, so it keeps running while
+monitoring is paused. `shutdown_after_session` is off by default; when it is on,
 `shutdown /s /t 60` runs on Windows, giving a minute to abort with `shutdown /a`, and the
 machine stays on otherwise.
 
