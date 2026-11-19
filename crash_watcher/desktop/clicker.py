@@ -15,7 +15,7 @@ from .config import DesktopSettings, PROJECT_ROOT
 from .color_grid import read_grid
 from .forecast import ColorForecaster
 from .signals import (next_dot_row, row_yellow_due, two_yellows_in_a_row,
-                      yellow_green_green_yellow, yellow_green_then_red)
+                      yellow_green_green_yellow)
 
 _DOWN = 0x0002
 _UP = 0x0004
@@ -88,10 +88,7 @@ RULE_LABELS = {"yellow-run": "صف ۷+۳ زرد", "yellow-pair": "جفت زرد"
                "yellow-burst": "۹ کلیک زرد", "row-signal": "سیگنال سطری",
                "streak-run": "روند هم‌رنگ ۷+", "value-bet": "ضریب ویژه",
                "pair-flip": "جفت رنگ", "smart": "کلیک هوشمند",
-               "yellow-pair-cycle": "جفت زرد ← زرد تکی",
-               "row-signal": "سیگنال سطری (تکرار زرد در سطر)",
-               "yellow-green-red": "زرد-سبز ← قرمز",
-               "yellow-red-double": "زرد+قرمز هم‌زمان"}
+               "smart-play": "ورود هوشمند (مدل)"}
 
 
 class AutoClicker:
@@ -105,7 +102,7 @@ class AutoClicker:
         self.summary_path = summary_path or PROJECT_ROOT / "logs" / "summary.txt"
         self.report_path = report_path or PROJECT_ROOT / "logs" / "session-report.txt"
         self._rule_stats: dict[str, list[int]] = {}
-        self._pending_rules: list[tuple[str, str]] = []
+        self._pending_rule: tuple[str, str] | None = None
         self._rounds_seen = 0
         self._started = datetime.now()
         self._backend = None
@@ -126,14 +123,9 @@ class AutoClicker:
         self._flip_color: str | None = None
         self._pattern_seen = False
         self._run_seen = False
-        self._prev_color: str | None = None
-        self._pair_ready = False
-        self._pair_cycles = 0
-        self._double_left = 0
-
-        self._yg_locked = False
         self.forecaster = ColorForecaster()
         self._pending_color: str | None = None
+        self._smart_play: tuple[str, ...] = ()
         self._window = {"rounds": 0, "clicks": 0, "skipped": 0,
                         "gated_correct": 0, "gated_total": 0}
         self._window_started = monotonic()
@@ -184,12 +176,6 @@ class AutoClicker:
                 return found
         elif self.settings.click_point is not None:
             return self.settings.click_point
-        if self.settings.bet_point_yellow is not None:
-            return self.settings.bet_point_yellow
-        bet_region = self.settings.bet_region
-        if bet_region is not None:
-            return (bet_region.x + bet_region.width * 5 // 6,
-                    bet_region.y + bet_region.height // 2)
         region = self.settings.click_region
         if region is not None:
             return (region.x + region.width // 2, region.y + region.height // 2)
@@ -271,6 +257,14 @@ class AutoClicker:
         self._wait_before_click()
         ok = self.sender(point[0], point[1], restore=self.settings.autoclick_restore_cursor)
         return ClickReport(True, "clicked" if ok else "click failed", point, self._clicks, self._armed)
+
+    def color(self, value: Decimal) -> str:
+        """رنگ ضریب — همین قاعدهٔ رنگ در بخش بررسی هوشمند هم استفاده می‌شود."""
+        return self._color(value)
+
+    def set_smart_play(self, bets) -> None:
+        """تصمیم آمادهٔ مدل برای دست بعد: یک یا دو رنگ."""
+        self._smart_play = tuple(color for color in (bets or ()) if color)
 
     def fire(self, round_id: str, value: Decimal) -> ClickReport:
         report = self._decide(round_id, value)
@@ -358,11 +352,11 @@ class AutoClicker:
         if round_id == self._last_id:
             return ClickReport(False, "same round", count=self._clicks, remaining=self._armed)
         color = self._color(value)
-        if self._pending_rules:
-            for target_color, rule in self._pending_rules:
-                if target_color and color == target_color:
-                    self._rule_stats.setdefault(rule, [0, 0])[0] += 1
-            self._pending_rules = []
+        if self._pending_rule is not None:
+            target_colors, rule = self._pending_rule
+            self._pending_rule = None
+            if target_colors and color in target_colors:
+                self._rule_stats.setdefault(rule, [0, 0])[0] += 1
         if self._pending_color is not None:
             # Score the forecast that was acted on against the round just finished.
             self._window["gated_total"] += 1
@@ -389,7 +383,7 @@ class AutoClicker:
             # a trend that keeps going, so the same colour is bet for ten rounds.
             self._streak_clicks = self.settings.streak_signal_clicks
             self._streak_target = color
-        burst_pending = self._yellow_burst_uses  # snapshot: a shape found now starts next round
+        burst_pending = self._yellow_burst_uses  # armed now? then it starts next round
         reading = self._chart_reading()
         pattern = self.settings.signal_rule_enabled and two_yellows_in_a_row(reading)
         if pattern and not self._pattern_seen and self._signal_uses <= 0:
@@ -402,17 +396,13 @@ class AutoClicker:
             self._yellow_burst_uses = self.settings.signal_burst_rounds
         self._run_seen = run_shape
         row_gap = self.settings.row_signal_gap
-        row_due = False
+        row_due = (self.settings.row_signal_enabled
+                   and row_yellow_due(reading, row_gap, self.settings.row_signal_rows,
+                                      self.settings.row_signal_recent_columns))
         row_cell = None
-        if self.settings.row_signal_enabled and reading is not None:
-            # One rule, two spacings the user has seen: four or five columns back.
-            for candidate in (row_gap, row_gap + 1):
-                if row_yellow_due(reading, candidate, self.settings.row_signal_rows,
-                                  self.settings.row_signal_recent_columns):
-                    row_due = True
-                    row = next_dot_row(reading)
-                    row_cell = (candidate, row) if row is not None else None
-                    break
+        if row_due:
+            row = next_dot_row(reading)
+            row_cell = (row, row_gap) if row is not None else None
         if (row_due and self._row_uses <= 0
                 and (row_cell is None or row_cell != self._row_cell)):
             # The row this round fills was yellow `gap` columns back, so the repeat
@@ -420,133 +410,126 @@ class AutoClicker:
             self._row_uses = self.settings.row_signal_clicks
         if row_cell is not None:
             self._row_cell = row_cell
-        # --- every rule keeps its own state and may fire in the same round as any
-        # other one; a round collects one bet per colour that wants it.
-        prev_color, self._prev_color = self._prev_color, color
-        bets: list[tuple[str, str]] = []
-        pair_click = color == "YELLOW" and prev_color != "YELLOW" and self._pair_ready
-        if color == "YELLOW" and self._pair_cycles < 2:
-            if prev_color == "YELLOW":
-                self._pair_ready = True  # a back-to-back yellow pair just closed
-            elif pair_click:
-                self._pair_ready = False
-                self._pair_cycles += 1
-        if pair_click and self.settings.pair_cycle_enabled:
-            bets.append(("YELLOW", "yellow-pair-cycle"))
-        if prev_color == "YELLOW" and color == "RED":
-            self._double_left = 4  # yellow then red: bet both colours for four rounds
-        if self._double_left > 0:
-            self._double_left -= 1
-            if self.settings.double_bet_enabled:
-                bets.append(("YELLOW", "yellow-red-double"))
-                bets.append(("RED", "yellow-red-double"))
-        shaped = (reading is not None and hasattr(reading, "color_at")
-                  and self.settings.row_signal_enabled)
-        yg_red_click = False
-        if shaped and not self._yg_locked:
-            yg_red_click = yellow_green_then_red(reading, self.settings.row_signal_gap + 1)
-        if color != "RED":
-            self._yg_locked = False
-        elif yg_red_click:
-            self._yg_locked = True
-        if yg_red_click:
-            bets.append(("YELLOW", "yellow-green-red"))
         threshold = Decimal(self.settings.autoclick_threshold)
-        armed_now = False
-        if self._waiting > 0:
-            # The 7+3 yellow run waits on its own counter; it never blocks a rule.
-            self._waiting -= 1
-        elif self._armed > 0:
-            bets.append(("YELLOW", "yellow-run"))
-            self._armed -= 1
-        elif value >= threshold:
+        follow_click = burst_pending > 0
+        if follow_click:
+            # The yellow-run signal: bet yellow on each of the next N rounds.
+            self._yellow_burst_uses -= 1
+            if self._waiting > 0:
+                self._waiting -= 1
+        signal_click = (not follow_click and self.settings.signal_rule_enabled
+                        and self._signal_uses > 0 and color == "YELLOW")
+        if signal_click:
+            # The two-yellows-in-a-row signal: click now, betting on the next round.
+            self._signal_uses -= 1
+        elif not follow_click and value >= threshold and self._armed <= 0 and self._waiting <= 0:
             # A yellow arms a run: skip autoclick_skip_rounds rounds, then click the
-            # next autoclick_max_clicks rounds whatever they close at.
+            # next autoclick_max_clicks rounds whatever they close at. A second
+            # yellow inside the run neither restarts the wait nor extends the burst.
             self._waiting = self.settings.autoclick_skip_rounds
             self._armed = self.settings.autoclick_max_clicks
             if self._waiting > 0:
-                armed_now = True
-            elif self._armed > 0:
-                bets.append(("YELLOW", "yellow-run"))
-                self._armed -= 1
-        if burst_pending > 0:
-            # The yellow-run signal: bet yellow on each of the next N rounds.
-            bets.append(("YELLOW", "yellow-burst"))
-            self._yellow_burst_uses -= 1
-        if self.settings.signal_rule_enabled and self._signal_uses > 0 and color == "YELLOW":
-            # The two-yellows-in-a-row signal: click now, betting on the next round.
-            bets.append(("YELLOW", "yellow-pair"))
-            self._signal_uses -= 1
-        if self._row_uses > 0:
-            bets.append(("YELLOW", "row-signal"))
-            self._row_uses -= 1
-        value_color = self._value_bet(value)
-        if value_color:
-            bets.append((value_color, "value-bet"))
-        if self._streak_clicks > 0 and self._streak_target is not None:
-            bets.append((self._streak_target, "streak-run"))
-            self._streak_clicks -= 1
-        if flip is not None:
-            bets.append((flip, "pair-flip"))
-        smart_gated = False
-        if not bets:
-            if armed_now:
                 return ClickReport(False, f"run armed: waiting {self._waiting} rounds before clicking",
                                    count=self._clicks, remaining=self._armed)
-            if self._waiting > 0:
+        row_click = self._row_uses > 0
+        if row_click:
+            self._row_uses -= 1
+        row_detail = (f"row {row_cell[0]} was yellow {row_gap} columns back"
+                      if row_click and row_cell else "")
+        value_color = (None if (signal_click or follow_click or row_click or self._armed > 0)
+                       else self._value_bet(value))
+        streak_click = (not (signal_click or follow_click or row_click)
+                        and self._armed <= 0 and value_color is None
+                        and self._streak_clicks > 0 and self._streak_target is not None)
+        if streak_click:
+            self._streak_clicks -= 1
+        target_color = ("YELLOW" if (signal_click or follow_click or row_click)
+                        else self._streak_target if streak_click else value_color)
+        rule = ("yellow-burst" if follow_click else "yellow-pair" if signal_click
+                else "row-signal" if row_click else "value-bet" if value_color
+                else "streak-run" if streak_click else "")
+        if not (signal_click or follow_click or row_click or streak_click):
+            if self._waiting > 0 and value_color is None:
+                self._waiting -= 1
                 return ClickReport(False, f"skip: {self._waiting} rounds before the click window",
                                    count=self._clicks, remaining=self._armed)
-            if not self.settings.smart_click_enabled:
-                return ClickReport(False, f"waiting for a round >= {threshold}",
-                                   count=self._clicks, remaining=0)
-            # Smart mode: only a colour the model can back with real confidence
-            # is worth a click; otherwise the round is skipped on purpose.
-            prediction = self.forecaster.forecast()
-            minimum = self.settings.prediction_min_confidence
-            if prediction.samples < self.forecaster.min_samples:
-                self._window["skipped"] += 1
-                return ClickReport(False, f"skip: only {prediction.samples} rounds seen",
-                                   count=self._clicks, remaining=0, forecast=prediction.label)
-            if prediction.probability < minimum:
-                self._window["skipped"] += 1
-                return ClickReport(False, f"skip: {prediction.color} "
-                                   f"{prediction.probability:.0%} < {minimum:.0%}",
-                                   count=self._clicks, remaining=0, forecast=prediction.label)
-            bets.append((prediction.color, "smart"))
-            smart_gated = True
+            if self._armed <= 0:
+                if value_color is not None:
+                    target_color = value_color
+                elif flip is not None:
+                    target_color = flip
+                    rule = "pair-flip"
+                elif self._smart_play:
+                    # تصمیم آمادهٔ مدل: یکی از قواعد بالا فعال نشده، پس نظر مدل
+                    # را اجرا کن — یک رنگ یا دو رنگ هم‌زمان.
+                    rule = "smart-play"
+                elif not self.settings.smart_click_enabled:
+                    return ClickReport(False, f"waiting for a round >= {threshold}",
+                                       count=self._clicks, remaining=0)
+                else:
+                    # Smart mode: only a colour the model can back with real confidence
+                    # is worth a click; otherwise the round is skipped on purpose.
+                    prediction = self.forecaster.forecast()
+                    minimum = self.settings.prediction_min_confidence
+                    if prediction.samples < self.forecaster.min_samples:
+                        self._window["skipped"] += 1
+                        return ClickReport(False, f"skip: only {prediction.samples} rounds seen",
+                                           count=self._clicks, remaining=0,
+                                           forecast=prediction.label)
+                    if prediction.probability < minimum:
+                        self._window["skipped"] += 1
+                        return ClickReport(False, f"skip: {prediction.color} "
+                                           f"{prediction.probability:.0%} < {minimum:.0%}",
+                                           count=self._clicks, remaining=0,
+                                           forecast=prediction.label)
+                    target_color = prediction.color
+                    rule = "smart"
         now = monotonic()
         if now - self._last_at < self.settings.autoclick_cooldown_ms / 1000:
             return ClickReport(False, "cooldown", count=self._clicks, remaining=self._armed)
-        chosen: list[tuple[str, str, tuple[int, int]]] = []
-        for target, rule in bets:
-            if any(target == taken for taken, _rule, _point in chosen):
-                continue  # one bet per colour; two rules on one colour share it
-            point = self._bet_point(target)
-            if point is not None:
-                chosen.append((target, rule, point))
-        if not chosen:
-            return ClickReport(False, "target not found", count=self._clicks,
-                               remaining=self._armed)
-        if smart_gated:
+        if self._armed > 0 and target_color is None:
+            target_color = "YELLOW"  # the run after a yellow is a yellow bet
+        if self._armed > 0 and not rule:
+            rule = "yellow-run"
+        if rule == "smart-play":
+            # حداکثر دو رنگ، هر کدام با همان قاعدهٔ یک ثانیه‌ای کلیک می‌شود.
+            targets: list[str | None] = list(dict.fromkeys(self._smart_play))
+            self._smart_play = ()
+        else:
+            targets = [target_color]
+        points = [(color, self._bet_point(color)) for color in targets]
+        points = [(color, point) for color, point in points if point is not None]
+        if not points:
+            return ClickReport(False, "target not found", count=self._clicks, remaining=self._armed)
+        gated = (not signal_click and not follow_click and not row_click
+                 and value_color is None and self._armed <= 0
+                 and self.settings.smart_click_enabled)
+        if gated:
             # Remember what was predicted so the next round can score it.
             self._pending_color = self.forecaster.forecast().color
         self._last_id, self._last_at = round_id, now
-        self._wait_before_click()
-        sent = 0
-        for index, (target, rule, point) in enumerate(chosen):
-            if index:
-                sleep(1.0)  # the game drops a second bet placed too soon after the first
-            if self.sender(point[0], point[1], restore=self.settings.autoclick_restore_cursor):
-                sent += 1
-            self._rule_stats.setdefault(rule, [0, 0])[1] += 1
-            self._pending_rules.append((target, rule))
-        self._clicks += sent
-        self._window["clicks"] += sent
-        names = "+".join(target for target, _rule, _point in chosen)
-        return ClickReport(sent > 0, "clicked" if sent == len(chosen) else "click failed",
-                           chosen[0][2], self._clicks, self._armed,
-                           forecast=self.forecaster.forecast().label,
-                           target=names, rule=chosen[0][1], detail=names)
+        self._clicks += 1
+        self._window["clicks"] += 1
+        if target_color or rule == "smart-play":
+            colors = tuple(color for color, _ in points if color)
+            self._pending_rule = (colors, rule or "unknown")
+            self._rule_stats.setdefault(rule or "unknown", [0, 0])[1] += 1
+        if self._armed > 0:
+            # Every clicked round of a run spends one, the trigger included, so a
+            # run is exactly autoclick_max_clicks clicks and then stops.
+            self._armed -= 1
+        ok = True
+        for _, point in points:
+            # Permanent rule: each click waits at most one second after the round.
+            self._wait_before_click()
+            # Every mode clicks: autoclick_dry_run only labels the report.
+            ok = self.sender(point[0], point[1],
+                             restore=self.settings.autoclick_restore_cursor) and ok
+        colors = tuple(color for color, _ in points if color)
+        return ClickReport(True, "clicked" if ok else "click failed", points[0][1], self._clicks,
+                           self._armed, forecast=self.forecaster.forecast().label,
+                           target="+".join(colors) or (target_color or ""),
+                           rule=rule, detail=row_detail)
 
     def close(self) -> None:
         self._write_session()

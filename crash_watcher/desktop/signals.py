@@ -55,19 +55,6 @@ def row_yellow_due(reading: GridReading | None, gap: int = 4, rows: int = 4,
     return reading.color_at(gap, row) == "YELLOW"
 
 
-def yellow_green_then_red(reading: GridReading | None, gap: int = 5) -> bool:
-    """Rule 3: yellow then green in a column, and `gap` columns later a red one.
-
-    The user reads that as "yellow is due on the next round" and clicks yellow.
-    """
-    if reading is None or gap < 1:
-        return False
-    if reading.color_at(0, 0) != "RED":
-        return False
-    return (reading.color_at(gap, 0) == "YELLOW"
-            and reading.color_at(gap, 1) == "GREEN")
-
-
 def two_yellows_in_a_row(reading: GridReading | None) -> bool:
     """True when two consecutive rounds (vertical neighbours) are both yellow.
 

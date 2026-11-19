@@ -46,6 +46,19 @@ class DesktopSettings:
     autoclick_restore_cursor: bool = True
     smart_click_enabled: bool = False
     prediction_min_confidence: float = 0.60
+    # «بررسی هوشمند ضریب‌ها»: پرسش از سرور محلی FreeLLMAPI (OpenAI-compatible).
+    smart_review_enabled: bool = False
+    smart_review_url: str = "http://127.0.0.1:31415/v1"
+    smart_review_key: str = ""
+    smart_review_model: str = "auto"
+    smart_review_timeout_s: int = 45
+    smart_review_every_rounds: int = 1
+    smart_review_rules: str = ""
+    # «ورود هوشمند به بازی»: اول یادگیری، بعد شرط‌بندی بر پایهٔ تصمیم آمادهٔ مدل.
+    smart_play_enabled: bool = False
+    smart_play_learning_minutes: int = 30
+    smart_play_min_confidence: float = 0.40
+    smart_play_two_colors: bool = True
     signal_rule_enabled: bool = True
     signal_repeat: int = 2
     signal_burst_rounds: int = 9
@@ -58,8 +71,6 @@ class DesktopSettings:
     streak_signal_enabled: bool = True
     streak_signal_length: int = 6
     streak_signal_clicks: int = 10
-    pair_cycle_enabled: bool = True
-    double_bet_enabled: bool = True
     value_bet_enabled: bool = True
     value_bets: dict[str, str] = field(default_factory=lambda: {
         "1.00": "GREEN", "1.11": "GREEN", "1.99": "GREEN", "2.08": "YELLOW"})
@@ -123,6 +134,30 @@ class DesktopSettings:
             raise ValueError("autoclick_skip_rounds must be a non-negative integer")
         if not 0.5 <= self.prediction_min_confidence <= 1:
             raise ValueError("prediction_min_confidence must be between 0.5 and 1")
+        if type(self.smart_review_enabled) is not bool:
+            raise ValueError("smart_review_enabled must be a boolean")
+        if (not isinstance(self.smart_review_url, str)
+                or not self.smart_review_url.strip().lower().startswith(("http://", "https://"))):
+            raise ValueError("smart_review_url must start with http:// or https://")
+        if not isinstance(self.smart_review_key, str) or not isinstance(self.smart_review_rules, str):
+            raise ValueError("smart review key and rules must be text")
+        if not isinstance(self.smart_review_model, str):
+            raise ValueError("smart_review_model must be text")
+        if (type(self.smart_review_timeout_s) is not int
+                or not 5 <= self.smart_review_timeout_s <= 300):
+            raise ValueError("smart_review_timeout_s must be an integer between 5 and 300")
+        if (type(self.smart_review_every_rounds) is not int
+                or not 1 <= self.smart_review_every_rounds <= 100):
+            raise ValueError("smart_review_every_rounds must be an integer between 1 and 100")
+        if type(self.smart_play_enabled) is not bool or type(self.smart_play_two_colors) is not bool:
+            raise ValueError("smart_play_enabled and smart_play_two_colors must be booleans")
+        if (type(self.smart_play_learning_minutes) is not int
+                or not 0 <= self.smart_play_learning_minutes <= 600):
+            raise ValueError("smart_play_learning_minutes must be an integer between 0 and 600")
+        if (not isinstance(self.smart_play_min_confidence, (int, float))
+                or isinstance(self.smart_play_min_confidence, bool)
+                or not 0.2 <= self.smart_play_min_confidence <= 1):
+            raise ValueError("smart_play_min_confidence must be a number between 0.2 and 1")
         if type(self.review_window_s) is not int or self.review_window_s < 60:
             raise ValueError("review_window_s must be an integer of at least 60")
         if (type(self.session_minutes) is not int or self.session_minutes < 0
@@ -157,6 +192,13 @@ def load_settings(path: Path = SETTINGS_PATH) -> DesktopSettings:
     if not path.exists():
         return DesktopSettings()
     data = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(data, dict):
+        return DesktopSettings()
+    # A settings file written by another build may still carry keys this version
+    # no longer has (for example "pair_cycle_enabled"). Drop them instead of
+    # letting the whole app fail to start.
+    known = {item.name for item in fields(DesktopSettings)}
+    data = {key: value for key, value in data.items() if key in known}
     for key in ("result_region", "history_region", "click_region", "chart_region", "bet_region"):
         if data.get(key):
             data[key] = Region(**data[key])
@@ -179,10 +221,6 @@ def load_settings(path: Path = SETTINGS_PATH) -> DesktopSettings:
         # keep clicking ten rounds; the run is now wait 7, click 3.
         data["autoclick_skip_rounds"] = 7
         data["autoclick_max_clicks"] = 3
-    known = {item.name for item in fields(DesktopSettings)}
-    # A file written by an older release can carry keys this build no longer has
-    # (a "version" tag, retired options): drop them instead of failing to start.
-    data = {key: value for key, value in data.items() if key in known}
     result = DesktopSettings(**data)
     result.validate()
     return result

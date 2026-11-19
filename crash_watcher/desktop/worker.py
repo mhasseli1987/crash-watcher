@@ -1,8 +1,9 @@
 """Qt worker: screenshots and OCR stay off the GUI thread."""
+from collections import deque
 from datetime import datetime, timezone
 import subprocess
 import sys
-from threading import Event
+from threading import Event, Thread
 from time import perf_counter, time
 import cv2
 import numpy as np
@@ -11,9 +12,21 @@ from crash_watcher import StrategyEngine
 from crash_watcher.core.enums import StrategyState
 from crash_watcher.vision.capture import ScreenCapture, ScreenUnavailable
 from crash_watcher.vision.recognition import RapidOCRReader, tesseract_reader
-from .config import DesktopSettings
+from .config import DesktopSettings, PROJECT_ROOT
 from .clicker import AutoClicker
+from .color_grid import read_grid
 from .final_result import BangDetector, BangRecognizer, parse_history_entry
+from .smart_play import SmartPlanner
+from .smart_review import SmartSnapshot, append_log, build_prompt, grid_columns, review
+
+
+def session_seconds_left(started: float, limit_minutes: int,
+                         now: float | None = None) -> int | None:
+    """Seconds until the session timer fires, or None when no timer is set."""
+    if type(limit_minutes) is not int or limit_minutes <= 0:
+        return None
+    moment = time() if now is None else now
+    return max(0, int(round(started + limit_minutes * 60 - moment)))
 
 class MonitorWorker(QThread):
     observation = Signal(object, object, object)
@@ -21,7 +34,9 @@ class MonitorWorker(QThread):
     history_observation = Signal(object, object, str)
     click_report = Signal(object)
     review_report = Signal(object)
+    smart_report = Signal(object)  # «بررسی هوشمند ضریب‌ها» verdict or error
     session_finished = Signal(str, bool)  # report path, shutdown requested
+    session_tick = Signal(int, int)  # seconds remaining, total seconds (0 = no timer)
     problem = Signal(str)
     status = Signal(str)
 
@@ -36,6 +51,12 @@ class MonitorWorker(QThread):
         self._resync_on_resume = Event()
         self.detector = BangDetector()
         self._clicker: AutoClicker | None = None
+        self._recent: deque[str] = deque(maxlen=30)
+        self._smart_seen = 0
+        self._smart_rounds = 0
+        self._smart_busy = False
+        self._planner: SmartPlanner | None = None
+        self._chart_backend = None
         self._session_started = time()
         self._session_limit_reached = False
 
@@ -44,6 +65,10 @@ class MonitorWorker(QThread):
         self.settings = settings
         if self._clicker is not None:
             self._clicker.update(settings)
+        if self._planner is not None:
+            self._planner.update(settings.smart_play_learning_minutes,
+                                settings.smart_play_min_confidence,
+                                settings.smart_play_two_colors)
 
     def stop(self) -> None:
         self._stop.set()
@@ -57,6 +82,10 @@ class MonitorWorker(QThread):
 
     def run(self) -> None:
         clicker = self._clicker = AutoClicker(self.settings)
+        # دورهٔ یادگیری از همین لحظهٔ شروع پایش شمرده می‌شود.
+        planner = self._planner = SmartPlanner(self.settings.smart_play_learning_minutes,
+                                               self.settings.smart_play_min_confidence,
+                                               self.settings.smart_play_two_colors)
         try:
             if self.settings.tesseract_path:
                 import pytesseract
@@ -90,11 +119,18 @@ class MonitorWorker(QThread):
                     history_previous = None
                     history_id = None
                     history_value = None
+                    last_tick = None
                     while not self._stop.is_set():
                         limit = self.settings.session_minutes
-                        if limit and time() - self._session_started >= limit * 60:
-                            # The overnight session is over: stop cleanly so the
-                            # clicker writes its report before the machine goes down.
+                        remaining = session_seconds_left(self._session_started, limit)
+                        if remaining != last_tick:
+                            # Countdown on the dashboard; the timer keeps running
+                            # through a pause because it measures wall-clock time.
+                            last_tick = remaining
+                            self.session_tick.emit(remaining or 0, limit * 60 if limit else 0)
+                        if limit and remaining is not None and remaining <= 0:
+                            # The session is over: stop cleanly so the clicker
+                            # writes its report before the machine goes down.
                             self._session_limit_reached = True
                             break
                         if self._resync_on_resume.is_set():
@@ -145,11 +181,26 @@ class MonitorWorker(QThread):
                                                if completed else None)
                             self.observation.emit(reading, completed, strategy_result)
                             if completed is not None:
+                                # اول نتیجهٔ دست تازه ثبت و پیش‌بینی قبلی سنجیده
+                                # می‌شود، بعد تصمیمِ آمادهٔ مدل برای دست بعد به
+                                # کلیکر داده می‌شود تا در پنجرهٔ کوتاه فقط کلیک کند.
+                                planner.observe(completed.round_id,
+                                                clicker.color(completed.multiplier))
+                                ready = (planner.take() if self._smart_play_active()
+                                         else None)
+                                clicker.set_smart_play(ready.bets if ready else ())
                                 self.click_report.emit(clicker.fire(completed.round_id,
                                                                     completed.multiplier))
                                 review = clicker.take_review()
                                 if review is not None:
                                     self.review_report.emit(review)
+                                self._recent.append(str(completed.multiplier))
+                                self._smart_seen += 1
+                                self._smart_rounds += 1
+                                if (self.settings.smart_review_enabled
+                                        and self._smart_rounds >= self.settings.smart_review_every_rounds):
+                                    self._smart_rounds = 0
+                                    self._start_smart_review(str(completed.multiplier))
                             self.preview.emit(frame.image.copy())
                         except Exception as exc:
                             self.detector.reset()
@@ -166,12 +217,83 @@ class MonitorWorker(QThread):
         finally:
             clicker.close()
             self._clicker = None
+            if self._chart_backend is not None:
+                self._chart_backend.close()
+                self._chart_backend = None
             self.status.emit("STOPPED")
             if self._session_limit_reached:
                 shutdown = self.settings.shutdown_after_session
                 self.session_finished.emit(str(clicker.report_path), shutdown)
                 if shutdown:
                     self._schedule_shutdown()
+
+    def _chart_grid(self) -> tuple[tuple[str, ...], ...]:
+        """Region 3 once, as letters; empty when the chart cannot be read."""
+        region = self.settings.chart_region
+        if region is None:
+            return ()
+        try:
+            import mss
+            if self._chart_backend is None:
+                self._chart_backend = mss.mss()
+            raw = self._chart_backend.grab({"left": region.x, "top": region.y,
+                                            "width": region.width, "height": region.height})
+            return grid_columns(read_grid(np.asarray(raw)[:, :, :3]))
+        except Exception:
+            return ()
+
+    def _smart_play_active(self) -> bool:
+        """ورود هوشمند فقط وقتی معنا دارد که بررسی هوشمند هم روشن باشد."""
+        return bool(self.settings.smart_review_enabled and self.settings.smart_play_enabled)
+
+    def _start_smart_review(self, current: str) -> None:
+        """Ask the local model in a side thread so the monitoring loop never waits."""
+        if self._smart_busy:
+            return
+        self._smart_busy = True
+        snapshot = SmartSnapshot(recent=tuple(self._recent), current=current,
+                                 grid_columns=self._chart_grid(), rounds_seen=self._smart_seen)
+        Thread(target=self._smart_review_thread, args=(snapshot, self.settings),
+               daemon=True).start()
+
+    def _smart_review_thread(self, snapshot: SmartSnapshot, settings: DesktopSettings) -> None:
+        started = perf_counter()
+        try:
+            verdict, raw, prompt = review(settings.smart_review_url, settings.smart_review_key,
+                                          settings.smart_review_model, snapshot,
+                                          settings.smart_review_timeout_s,
+                                          settings.autoclick_threshold, settings.smart_review_rules,
+                                          min_confidence=settings.smart_play_min_confidence,
+                                          allow_two=settings.smart_play_two_colors)
+        except Exception as exc:
+            self._smart_busy = False
+            append_log(PROJECT_ROOT / "logs" / "smart-review.jsonl",
+                       {"round": snapshot.current, "ok": False, "error": str(exc)})
+            self.smart_report.emit({"ok": False, "round": snapshot.current,
+                                    "error": str(exc),
+                                    **(self._planner.stats() if self._planner else {}),
+                                    "prompt": build_prompt(snapshot, settings.autoclick_threshold,
+                                                           settings.smart_review_rules,
+                                                           min_confidence=settings.smart_play_min_confidence,
+                                                           allow_two=settings.smart_play_two_colors)})
+            return
+        self._smart_busy = False
+        elapsed = perf_counter() - started
+        planner = self._planner
+        if planner is not None:
+            # تصمیم برای دست بعد آماده می‌شود، پیش از بسته‌شدن ضریب جاری.
+            planner.store(verdict, snapshot.current)
+        append_log(PROJECT_ROOT / "logs" / "smart-review.jsonl",
+                   {"round": snapshot.current, "ok": True, "bet": verdict.bet if verdict else None,
+                    "second": verdict.second if verdict else None,
+                    "confidence": verdict.confidence if verdict else None,
+                    "reason": verdict.reason if verdict else "", "raw": raw,
+                    "phase": planner.phase if planner else None,
+                    "seconds": round(elapsed, 2), "model": settings.smart_review_model})
+        self.smart_report.emit({"ok": True, "round": snapshot.current, "verdict": verdict,
+                                "raw": raw, "prompt": prompt, "seconds": elapsed,
+                                "bets": verdict.bets if verdict else (),
+                                **(planner.stats() if planner else {})})
 
     def _schedule_shutdown(self) -> None:
         """Ask Windows to power off shortly after the report is on disk."""

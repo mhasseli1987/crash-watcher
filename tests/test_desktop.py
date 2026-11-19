@@ -170,8 +170,7 @@ def test_clicker_waits_for_a_high_round_then_clicks_the_region_centre(no_detecti
 def test_yellow_waits_seven_rounds_then_clicks_eight_nine_ten(no_detection):
     sender = _Sender()
     clicker = AutoClicker(_clicker(autoclick_skip_rounds=7, autoclick_max_clicks=3,
-                                   streak_signal_enabled=False, double_bet_enabled=False,
-                                   pair_flip_enabled=False), sender=sender)
+                                   streak_signal_enabled=False), sender=sender)
     armed = clicker.fire("y", Decimal("10.40"))
     assert not armed.clicked and "waiting 7" in armed.reason and armed.remaining == 3
     for index in range(7):
@@ -186,9 +185,7 @@ def test_yellow_waits_seven_rounds_then_clicks_eight_nine_ten(no_detection):
 
 def test_yellow_inside_the_wait_does_not_restart_the_run(no_detection):
     sender = _Sender()
-    clicker = AutoClicker(_clicker(autoclick_skip_rounds=7, autoclick_max_clicks=3,
-                                   double_bet_enabled=False, pair_flip_enabled=False),
-                          sender=sender)
+    clicker = AutoClicker(_clicker(autoclick_skip_rounds=7, autoclick_max_clicks=3), sender=sender)
     clicker.fire("y", Decimal("19.00"))
     for index in range(3):
         assert not clicker.fire(f"w{index}", Decimal("1.50")).clicked
@@ -201,8 +198,7 @@ def test_yellow_inside_the_wait_does_not_restart_the_run(no_detection):
 
 def test_high_round_inside_the_run_does_not_reset_the_count(no_detection):
     sender = _Sender()
-    clicker = AutoClicker(_clicker(autoclick_max_clicks=3, double_bet_enabled=False),
-                          sender=sender)
+    clicker = AutoClicker(_clicker(autoclick_max_clicks=3), sender=sender)
     assert clicker.fire("a", Decimal("10.00")).remaining == 2
     inside = clicker.fire("b", Decimal("25.00"))
     assert inside.clicked and inside.remaining == 1
@@ -371,8 +367,8 @@ def test_yellow_green_green_yellow_shape():
 
 def test_signal_burst_clicks_the_next_nine_rounds(no_detection, monkeypatch):
     sender = _Sender()
-    clicker = AutoClicker(_clicker(autoclick_threshold="100", streak_signal_enabled=False,
-                                   pair_flip_enabled=False), sender=sender)
+    clicker = AutoClicker(_clicker(autoclick_threshold="100", streak_signal_enabled=False),
+                          sender=sender)
     monkeypatch.setattr(AutoClicker, "_chart_reading", lambda self: object())
     monkeypatch.setattr("crash_watcher.desktop.clicker.two_yellows_in_a_row", lambda reading: False)
     monkeypatch.setattr("crash_watcher.desktop.clicker.yellow_green_green_yellow", lambda reading: True)
@@ -525,6 +521,22 @@ def test_an_old_timer_and_shutdown_default_is_switched_off_on_load(tmp_path):
     loaded = load_settings(path)
     assert loaded.session_minutes == 0 and loaded.shutdown_after_session is False
 
+def test_settings_file_with_removed_keys_still_loads(tmp_path):
+    path = tmp_path / "settings.json"
+    path.write_text(json.dumps({"fixed_bet_amount": "12",
+                                "pair_cycle_enabled": True,
+                                "double_bet_enabled": False}), encoding="utf-8")
+    loaded = load_settings(path)
+    assert loaded.fixed_bet_amount == "12"
+
+def test_session_seconds_left_counts_down_and_rounds_safely():
+    from crash_watcher.desktop.worker import session_seconds_left
+    assert session_seconds_left(1000.0, 0, now=1000.0) is None
+    assert session_seconds_left(1000.0, 30, now=1000.0) == 30 * 60
+    assert session_seconds_left(1000.0, 30, now=1000.0 + 600) == 20 * 60
+    assert session_seconds_left(1000.0, 30, now=1000.0 + 5000) == 0
+    assert session_seconds_left(1000.0, -5, now=1000.0) is None
+
 def test_value_bets_reject_bad_entries():
     with pytest.raises(ValueError):
         _clicker(value_bets={"1.00": "BLUE"}).validate()
@@ -598,8 +610,7 @@ def test_smart_click_skips_low_confidence_and_clicks_high(no_detection):
 
 def test_high_round_still_clicks_inside_smart_mode(no_detection):
     sender = _Sender()
-    clicker = AutoClicker(_clicker(smart_click_enabled=True, autoclick_max_clicks=2,
-                                   double_bet_enabled=False), sender=sender)
+    clicker = AutoClicker(_clicker(smart_click_enabled=True, autoclick_max_clicks=2), sender=sender)
     clicker.forecaster = _FixedForecast(probability=0.10)
     assert clicker.fire("a", Decimal("12.00")).clicked
     assert clicker.fire("b", Decimal("1.10")).clicked
@@ -653,43 +664,3 @@ def test_clicker_without_target_sends_nothing(no_detection):
                                          autoclick_cooldown_ms=0, autoclick_skip_rounds=0),
                          sender=sender).fire("r1", Decimal("10.00"))
     assert not report.clicked and report.reason == "target not found" and sender.calls == []
-
-
-def _grid(cells, columns=8, rows=6):
-    from crash_watcher.desktop.color_grid import Dot, GridReading
-    dots = tuple(Dot(color, column, row, column * 10, row * 10)
-                 for color, column, row in cells)
-    return GridReading(dots, columns, rows, 10.0)
-
-
-def test_row_signal_reads_a_repeat_four_and_five_columns_back():
-    cells = [("RED", 0, 0), ("GREEN", 0, 1),
-             ("RED", 1, 0), ("RED", 2, 0), ("RED", 3, 0),
-             ("YELLOW", 4, 2), ("YELLOW", 5, 2)]
-    reading = _grid(cells)
-    assert row_yellow_due(reading, 4, 4, 4) is True
-    assert row_yellow_due(reading, 5, 4, 4) is True
-    assert row_yellow_due(reading, 6, 4, 4) is False
-
-
-def test_row_signal_stops_below_the_fourth_row():
-    # The next dot fills row five, where the user never bets a repeated yellow.
-    cells = [("RED", 0, 0), ("RED", 0, 1), ("RED", 0, 2), ("RED", 0, 3),
-             ("YELLOW", 4, 4)]
-    assert row_yellow_due(_grid(cells), 4, 4, 4) is False
-
-
-def test_row_signal_bets_one_shape_once(no_detection, monkeypatch):
-    sender = _Sender()
-    clicker = AutoClicker(_clicker(autoclick_threshold="100", row_signal_clicks=1,
-                                   pair_flip_enabled=False, streak_signal_enabled=False,
-                                   value_bet_enabled=False, signal_rule_enabled=False,
-                                   double_bet_enabled=False), sender=sender)
-    reading = _grid([("RED", 0, 0), ("GREEN", 0, 1),
-                     ("RED", 1, 0), ("RED", 2, 0), ("RED", 3, 0),
-                     ("YELLOW", 4, 2)])
-    monkeypatch.setattr(AutoClicker, "_chart_reading", lambda self: reading)
-    first = clicker.fire("r1", Decimal("1.50"))
-    assert first.clicked and first.rule == "row-signal" and first.target == "YELLOW"
-    again = clicker.fire("r2", Decimal("1.50"))
-    assert not again.clicked and len(sender.calls) == 1

@@ -11,5 +11,8 @@ if ($LASTEXITCODE -ne 0) { throw 'PyInstaller installation failed.' }
 if ($LASTEXITCODE -ne 0) { throw 'Tests failed; build stopped.' }
 & $python -m PyInstaller --noconfirm --clean --windowed --onedir --name CrashWatcher --icon 'assets\crash_watcher.ico' --collect-all rapidocr --collect-all onnxruntime --paths . desktop_app.py
 if ($LASTEXITCODE -ne 0) { throw 'Windows build failed.' }
-Copy-Item -LiteralPath (Join-Path $root 'settings.json') -Destination (Join-Path $root 'dist\CrashWatcher\settings.json') -Force
+$settings = Join-Path $root 'settings.json'
+if (Test-Path -LiteralPath $settings) {
+    Copy-Item -LiteralPath $settings -Destination (Join-Path $root 'dist\CrashWatcher\settings.json') -Force
+}
 Write-Host "Build: $root\dist\CrashWatcher\CrashWatcher.exe"
