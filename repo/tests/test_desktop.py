@@ -521,6 +521,14 @@ def test_an_old_timer_and_shutdown_default_is_switched_off_on_load(tmp_path):
     loaded = load_settings(path)
     assert loaded.session_minutes == 0 and loaded.shutdown_after_session is False
 
+def test_settings_file_with_removed_keys_still_loads(tmp_path):
+    path = tmp_path / "settings.json"
+    path.write_text(json.dumps({"fixed_bet_amount": "12",
+                                "pair_cycle_enabled": True,
+                                "double_bet_enabled": False}), encoding="utf-8")
+    loaded = load_settings(path)
+    assert loaded.fixed_bet_amount == "12"
+
 def test_session_seconds_left_counts_down_and_rounds_safely():
     from crash_watcher.desktop.worker import session_seconds_left
     assert session_seconds_left(1000.0, 0, now=1000.0) is None

@@ -1,5 +1,5 @@
 """Project-local validated desktop settings."""
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, fields
 from decimal import Decimal, InvalidOperation
 import json
 import sys
@@ -192,6 +192,13 @@ def load_settings(path: Path = SETTINGS_PATH) -> DesktopSettings:
     if not path.exists():
         return DesktopSettings()
     data = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(data, dict):
+        return DesktopSettings()
+    # A settings file written by another build may still carry keys this version
+    # no longer has (for example "pair_cycle_enabled"). Drop them instead of
+    # letting the whole app fail to start.
+    known = {item.name for item in fields(DesktopSettings)}
+    data = {key: value for key, value in data.items() if key in known}
     for key in ("result_region", "history_region", "click_region", "chart_region", "bet_region"):
         if data.get(key):
             data[key] = Region(**data[key])

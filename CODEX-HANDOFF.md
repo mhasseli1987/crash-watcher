@@ -1,7 +1,35 @@
 # Crash Watcher — complete handoff brief for Codex
 
-Last updated: 2026-11-19 (تایمر جلسه + تم رنگی رابط + بیلد exe). This file is the single source of truth for the
+Last updated: 2026-11-19 (فیکس کرش settings.json قدیمی + بیلد دوبارهٔ exe). This file is the single source of truth for the
 current state of the project. Read it fully before touching code.
+
+---
+
+## 2026-11-19 (ج) — فیکس کرش «unexpected keyword argument» هنگام اجرای exe (آخرین تغییر)
+
+### خلاصهٔ فارسی
+
+- کاربر exe را روی ویندوز اجرا کرد و پنجرهٔ خطا داد:
+  `DesktopSettings.__init__() got an unexpected keyword argument 'pair_cycle_enabled'`.
+- **علت**: خود exe سالم بود؛ فایل `settings.json` کنارش از یک نسخهٔ قدیمی‌تر مانده بود و
+  کلیدهای حذف‌شده (`pair_cycle_enabled`, `double_bet_enabled`) داشت. `load_settings`
+  همهٔ کلیدهای فایل را مستقیم به `DesktopSettings(**data)` می‌داد و همین باعث `TypeError`
+  می‌شد — یعنی هر settings.json قدیمی می‌توانست اپ را از کار بیندازد.
+- **رفع**: `load_settings` حالا کلیدهای ناشناس را حذف می‌کند (`fields(DesktopSettings)`)
+  و اگر فایل JSON دیکشنری نباشد، تنظیمات پیش‌فرض برمی‌گرداند. تست جدید:
+  `test_settings_file_with_removed_keys_still_loads` → **198 passed**.
+- exe با همین کد دوباره ساخته و در `F:\CRASH WATCHER\FINAL VERSION\repo 1\CrashWatcher`
+  جای‌گذاری شد (settings.json و logs کاربر دست‌نخورده)، و روی دسکتاپ واقعی اجرا شد
+  (PID زنده، بدون پنجرهٔ خطا).
+
+### English technical state
+
+- `config.py` `load_settings`: `data` is filtered against
+  `{item.name for item in dataclasses.fields(DesktopSettings)}` before
+  `DesktopSettings(**data)`; non-dict JSON returns `DesktopSettings()`. Later
+  migrations (delay clamp, skip-rounds defaults, timer/shutdown reset) still run on the
+  filtered dict, so old files keep getting the new defaults.
+- Build unchanged: PyInstaller onedir, same command as the previous entry.
 
 ---
 
