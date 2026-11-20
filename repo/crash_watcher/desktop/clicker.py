@@ -17,14 +17,13 @@ from .forecast import ColorForecaster
 from .signals import (next_dot_row, row_yellow_due, two_yellows_in_a_row,
                       yellow_green_green_yellow)
 from .smart_play import RESTART_AFTER_LOSSES
-from .smart_review import CASHOUT_LIMIT
+from .smart_review import CASHOUT_LIMIT, clamp_exit, default_exit
 from .three_x import ThreeXSession
 
 _DOWN = 0x0002
 # «کلیک کلاسیک»: ورود پیش از پایان ۶ ثانیه، خروج روی ضریبی زیر ۱٫۹۹.
 CASHOUT_CEILING = Decimal(str(CASHOUT_LIMIT))
 CLASSIC_ENTRY_WINDOW_S = 6.0
-DEFAULT_CASHOUT = Decimal("1.30")
 _UP = 0x0004
 try:
     _user32 = ctypes.windll.user32
@@ -136,6 +135,7 @@ class AutoClicker:
         self._smart_play: tuple[str, ...] = ()
         self._smart_play_active = False
         self._smart_cashout: Decimal | None = None
+        self._stake_steps = 0  # چند بار مبلغ پایه با x2 دو برابر شده است
         self._ai_bet: dict | None = None
         self._ai_losses = 0
         self._ai_relearn = False
@@ -445,6 +445,25 @@ class AutoClicker:
         requested, self._ai_relearn = self._ai_relearn, False
         return requested
 
+    def _stake(self, target: int) -> None:
+        """مبلغ شرط را با دکمه‌های x2 و /2 بازی روی تعداد مرحلهٔ خواسته‌شده ببر."""
+        if not self.settings.stake_martingale_enabled:
+            self._stake_steps = 0
+            return
+        target = max(0, min(int(target), int(self.settings.stake_double_steps)))
+        while self._stake_steps < target:
+            point = self.settings.stake_double_point
+            if point is None:
+                return
+            self.sender(point[0], point[1], restore=self.settings.autoclick_restore_cursor)
+            self._stake_steps += 1
+        while self._stake_steps > target:
+            point = self.settings.stake_half_point
+            if point is None:
+                return
+            self.sender(point[0], point[1], restore=self.settings.autoclick_restore_cursor)
+            self._stake_steps -= 1
+
     def _settle_ai_bet(self) -> None:
         """دست کلاسیکی که تمام شده را تسویه کن و باخت‌های متوالی را بشمار."""
         bet = self._ai_bet
@@ -453,15 +472,20 @@ class AutoClicker:
         self._ai_bet = None
         if bet["cashed"]:
             self._ai_losses = 0
+            self._stake(0)  # برد: مبلغ پایه به مقدار اول برمی‌گردد
             return
         # بدون خروج: ضریب پیش از رسیدن به هدف بسته شده است.
         self._ai_losses += 1
         if self._ai_losses >= RESTART_AFTER_LOSSES:
             self._ai_losses = 0
             self._ai_relearn = True
+        limit = int(self.settings.stake_double_steps)
+        # باخت: تا مرحلهٔ آخر مبلغ دو برابر می‌شود؛ بعد از آن دوباره از پایه.
+        self._stake(self._stake_steps + 1 if self._stake_steps < limit else 0)
 
     def _enter_classic(self, round_id: str, bets: tuple[str, ...],
-                       cashout: Decimal | None) -> ClickReport:
+                       cashout: Decimal | None,
+                       last: Decimal | None = None) -> ClickReport:
         """AI Analysis + کلیک کلاسیک: یک کلیک برای ورود، کلیک دوم برای خروج."""
         if self._ai_bet is not None:
             return ClickReport(False, "smart-play: شرط قبلی هنوز باز است",
@@ -473,10 +497,10 @@ class AutoClicker:
         if point is None:
             return ClickReport(False, "smart-play: محل کلیک کلاسیک کالیبره نشده است",
                                count=self._clicks)
-        target = cashout if cashout is not None else DEFAULT_CASHOUT
-        # زیر ۱٫۹۹ و به‌قدر کافی دور از ۱٫۰۰ تا «عدد قبلی روی صفحه» باعث
-        # کلیک زودهنگام نشود.
-        target = min(max(target, Decimal("1.10")), CASHOUT_CEILING - Decimal("0.01"))
+        # عدد خروج همیشه بین ۱٫۳۰ و ۱٫۸۵ است؛ اگر دست قبلی زیر ۱٫۱۰ بسته شده
+        # باشد سقف تا ۱٫۹۰ باز می‌شود و همیشه زیر ۱٫۹۹ می‌ماند.
+        target = Decimal(str(clamp_exit(cashout, last))) if cashout is not None \
+            else Decimal(str(default_exit(last)))
         if monotonic() - self._last_at < self.settings.autoclick_cooldown_ms / 1000:
             return ClickReport(False, "cooldown", count=self._clicks)
         self._last_id, self._last_at = round_id, monotonic()
@@ -491,10 +515,12 @@ class AutoClicker:
         if ok:
             self._ai_bet = {"target": target, "colors": bets, "entered": monotonic(),
                             "low": 0, "started": False, "cashed": False}
+        stake = (f" | مبلغ مرحله {self._stake_steps} (×{2 ** self._stake_steps})"
+                 if self.settings.stake_martingale_enabled and self._stake_steps else "")
         return ClickReport(True, "clicked" if ok else "click failed", point,
                            self._clicks, 0, target="+".join(bets),
                            rule="smart-play",
-                           detail=f"ورود کلاسیک — خروج زیر {target}")
+                           detail=f"ورود کلاسیک — خروج زیر {target:.2f}{stake}")
 
     def _decide_smart_play(self, round_id: str, value: Decimal) -> ClickReport:
         """AI Analysis: فقط تصمیم مدل اجرا می‌شود؛ هیچ قانونی از ربات اجرا نمی‌شود."""
@@ -512,7 +538,7 @@ class AutoClicker:
         self._smart_play = ()
         cashout, self._smart_cashout = self._smart_cashout, None
         if self.settings.smart_cashout_enabled:
-            return self._enter_classic(round_id, bets, cashout)
+            return self._enter_classic(round_id, bets, cashout, value)
         if not bets:
             return ClickReport(False, "smart-play: مدل برای این دست تصمیمی نداد",
                                count=self._clicks)

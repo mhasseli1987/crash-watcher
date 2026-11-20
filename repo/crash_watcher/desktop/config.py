@@ -34,6 +34,13 @@ class DesktopSettings:
     click_point: tuple[int, int] | None = None
     # «محل کلیک کلاسیک»: همان دکمهٔ بزرگ Bet / Cash Out بازی.
     classic_click_point: tuple[int, int] | None = None
+    # مارتینگل: بعد از هر باخت، دکمهٔ x2 مبلغ بازی زده می‌شود و مبلغ پایه تا این
+    # تعداد مرحله دو برابر می‌ماند؛ بعد از برد (یا پایان مرحلهٔ آخر) دکمهٔ /2 مبلغ
+    # را به پایه برمی‌گرداند.
+    stake_martingale_enabled: bool = True
+    stake_double_steps: int = 3
+    stake_double_point: tuple[int, int] | None = None
+    stake_half_point: tuple[int, int] | None = None
     bet_point_red: tuple[int, int] | None = None
     bet_point_green: tuple[int, int] | None = None
     bet_point_yellow: tuple[int, int] | None = None
@@ -130,7 +137,8 @@ class DesktopSettings:
             if not isinstance(region, Region):
                 raise ValueError(f"{name} must be a Region")
             region.capture(self.interval_ms)
-        for name in ("click_point", "classic_click_point", "bet_point_red",
+        for name in ("click_point", "classic_click_point", "stake_double_point",
+                     "stake_half_point", "bet_point_red",
                      "bet_point_green", "bet_point_yellow"):
             point = getattr(self, name)
             if point is None:
@@ -176,9 +184,12 @@ class DesktopSettings:
                 or not 1 <= self.smart_review_every_rounds <= 100):
             raise ValueError("smart_review_every_rounds must be an integer between 1 and 100")
         if (type(self.smart_play_enabled) is not bool or type(self.smart_play_two_colors) is not bool
-                or type(self.smart_cashout_enabled) is not bool):
-            raise ValueError("smart_play_enabled, smart_play_two_colors and "
-                             "smart_cashout_enabled must be booleans")
+                or type(self.smart_cashout_enabled) is not bool
+                or type(self.stake_martingale_enabled) is not bool):
+            raise ValueError("smart_play_enabled, smart_play_two_colors, "
+                             "smart_cashout_enabled and stake_martingale_enabled must be booleans")
+        if type(self.stake_double_steps) is not int or not 0 <= self.stake_double_steps <= 5:
+            raise ValueError("stake_double_steps must be an integer between 0 and 5")
         if (type(self.smart_play_learning_minutes) is not int
                 or not 0 <= self.smart_play_learning_minutes <= 600):
             raise ValueError("smart_play_learning_minutes must be an integer between 0 and 600")
@@ -258,7 +269,8 @@ def load_settings(path: Path = SETTINGS_PATH) -> DesktopSettings:
     for key in ("result_region", "history_region", "click_region", "chart_region", "bet_region"):
         if data.get(key):
             data[key] = Region(**data[key])
-    for key in ("click_point", "classic_click_point", "bet_point_red", "bet_point_green",
+    for key in ("click_point", "classic_click_point", "stake_double_point",
+                "stake_half_point", "bet_point_red", "bet_point_green",
                 "bet_point_yellow"):
         if data.get(key) is not None:
             data[key] = tuple(data[key])

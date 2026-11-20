@@ -49,9 +49,16 @@ With `smart_cashout_enabled` (the «کلیک کلاسیک» option in the AI tab
 game's big Bet / Cash Out button instead of the colour buttons. Calibrate «محل کلیک
 کلاسیک» in the Calibration tab to that button; inside the six-second window the clicker
 clicks it once to enter, reads the running multiplier from region 2, and clicks the same
-point again at the model's `exit` value, which is capped below 1.99 (for example 1.30 or
-1.85). A cash-out is never issued at or above 1.99. Eight classic bets lost in a row make
-the bot start another 30 minutes of analysis without betting.
+point again at the model's `exit` value. That value is always kept inside 1.30–1.85 and is
+chosen from the round before it; when that round closed below 1.10 (1.00–1.09) the ceiling
+opens to 1.90. A cash-out is never issued at or above 1.99. Eight classic bets lost in a
+row make the bot start another 30 minutes of analysis without betting.
+
+With `stake_martingale_enabled` (default on) every lost classic bet doubles the stake for
+the next hand through the game's `x2` button, up to `stake_double_steps` (default 3) times
+in a row; a win, or a loss on the last step, clicks `/2` back to the base amount. Calibrate
+«محل دکمهٔ x2 مبلغ» and «محل دکمهٔ /2 مبلغ» next to the classic point in the Calibration
+tab; without those points no stake clicks are sent.
 
 **Chart signal (on by default).** When two consecutive rounds are both yellow (two yellow
 dots stacked in one column) the clicker arms `signal_repeat` (default 2) follow-up clicks:

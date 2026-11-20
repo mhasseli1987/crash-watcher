@@ -10,6 +10,7 @@ from crash_watcher.desktop.color_grid import Dot, GridReading
 from crash_watcher.desktop.config import DesktopSettings, load_settings, save_settings
 from crash_watcher.desktop.smart_review import (SmartSnapshot, SmartVerdict, ask,
                                                 build_prompt, chat_completions_url,
+                                                clamp_exit, default_exit, exit_bounds,
                                                 grid_columns, parse_verdict,
                                                 probe_models, review)
 
@@ -81,16 +82,32 @@ def test_prompt_carries_no_fixed_betting_rules():
 def test_prompt_asks_for_a_cashout_exit_in_classic_mode():
     snapshot = SmartSnapshot(recent=("1.66",), current="1.20")
     prompt = build_prompt(snapshot, classic=True)
-    assert '"exit"' in prompt and "1.30" in prompt and "1.99" in prompt
+    for expected in ('"exit"', "1.30", "1.85", "1.90", "1.10"):
+        assert expected in prompt
     assert '"exit"' not in build_prompt(snapshot)
 
 
-def test_parse_verdict_reads_the_cashout_exit_below_the_limit():
-    verdict = parse_verdict('{"bet":"GREEN","exit":1.85,"confidence":0.6}')
+def test_parse_verdict_reads_the_cashout_exit_inside_the_range():
+    verdict = parse_verdict('{"bet":"GREEN","exit":1.85,"confidence":0.6}', "1.20")
     assert verdict is not None and verdict.exit_at == 1.85
-    capped = parse_verdict('{"bet":"GREEN","exit":2.4}')
-    assert capped is not None and capped.exit_at == 1.98
+    # مدل هر عددی بدهد، خروج داخل بازهٔ ۱٫۳۰..۱٫۸۵ می‌ماند.
+    assert parse_verdict('{"bet":"GREEN","exit":2.4}').exit_at == 1.85
+    assert parse_verdict('{"bet":"GREEN","exit":1.05}').exit_at == 1.30
+    # دست قبلی زیر ۱٫۱۰: تا ۱٫۹۰ مجاز است.
+    low_last = parse_verdict('{"bet":"GREEN","exit":1.9}', "1.07")
+    assert low_last is not None and low_last.exit_at == 1.90
+    assert parse_verdict('{"bet":"GREEN","exit":1.9}', "1.20").exit_at == 1.85
     assert parse_verdict('{"bet":"GREEN","exit":"soon"}').exit_at is None
+
+
+def test_exit_bounds_open_to_190_only_after_a_very_low_round():
+    assert exit_bounds("1.09") == (1.30, 1.90)
+    assert exit_bounds("1.00") == (1.30, 1.90)
+    assert exit_bounds("1.10") == (1.30, 1.85)
+    assert exit_bounds(None) == (1.30, 1.85)
+    assert clamp_exit(1.95, "1.05") == 1.90
+    assert default_exit("1.05") == 1.90
+    assert default_exit("4.20") == 1.30
 
 
 def test_parse_verdict_accepts_plain_fenced_and_persian_answers():

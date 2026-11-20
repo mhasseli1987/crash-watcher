@@ -152,11 +152,13 @@ class PointOverlay(QDialog):
     Used for «محل کلیک کلاسیک»: the game's big Bet / Cash Out button. The main
     window is hidden first, so the screenshot shows the live screen.
     """
-    def __init__(self, monitor: int, parent=None) -> None:
+    def __init__(self, monitor: int, parent=None, title: str = "محل کلیک کلاسیک",
+                 hint: str = "روی دکمهٔ کلاسیک (Bet / Cash Out) کلیک کنید — Esc برای انصراف") -> None:
         super().__init__(parent)
         self.monitor = monitor
         self.selected: tuple[int, int] | None = None
-        self.setWindowTitle("محل کلیک کلاسیک")
+        self._hint = hint
+        self.setWindowTitle(title)
         with mss.MSS() as backend:
             m = dict(backend.monitors[monitor])
             raw = backend.grab({"left": m["left"], "top": m["top"],
@@ -180,7 +182,7 @@ class PointOverlay(QDialog):
         painter.setPen(QColor("#f4f6fa"))
         painter.drawText(self.rect().adjusted(0, 24, 0, 0),
                          Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop,
-                         "روی دکمهٔ کلاسیک (Bet / Cash Out) کلیک کنید — Esc برای انصراف")
+                         self._hint)
         if self._hover is not None:
             painter.setPen(QPen(QColor("#7af0b8"), 2))
             x, y = self._hover.x(), self._hover.y()
@@ -640,13 +642,24 @@ class MainWindow(QMainWindow):
             button.clicked.connect(lambda _=False, t=target: self.select_region(t))
             regions.addWidget(button)
         layout.addLayout(regions)
+        points_row = QHBoxLayout()
+        for title, attr, hint in (
+                ("محل کلیک کلاسیک (Bet / Cash Out)", "classic_click_point",
+                 "روی دکمهٔ کلاسیک (Bet / Cash Out) کلیک کنید — Esc برای انصراف"),
+                ("محل دکمهٔ x2 مبلغ", "stake_double_point",
+                 "روی دکمهٔ x2 کنار مبلغ شرط کلیک کنید — Esc برای انصراف"),
+                ("محل دکمهٔ /2 مبلغ", "stake_half_point",
+                 "روی دکمهٔ /2 کنار مبلغ شرط کلیک کنید — Esc برای انصراف")):
+            button = QPushButton(title)
+            button.clicked.connect(
+                lambda _=False, a=attr, t=title, h=hint: self.select_point(a, t, h))
+            points_row.addWidget(button)
+        layout.addLayout(points_row)
         classic_row = QHBoxLayout()
-        self.classic_button = QPushButton("محل کلیک کلاسیک (دکمهٔ Bet / Cash Out)")
-        self.classic_button.clicked.connect(self.select_classic_point)
         self.classic_test = QPushButton("کلیک تست کلاسیک")
         self.classic_test.clicked.connect(self.test_classic_click)
-        classic_row.addWidget(self.classic_button)
         classic_row.addWidget(self.classic_test)
+        classic_row.addStretch()
         layout.addLayout(classic_row)
         controls = QHBoxLayout()
         for title, handler in (("ذخیره", self.save_ui_settings), ("آزمون OCR", self.calibrate),
@@ -702,6 +715,15 @@ class MainWindow(QMainWindow):
         self._refresh_smart_cashout_label()
         self.smart_cashout.toggled.connect(self._toggle_smart_cashout)
         layout.addWidget(self.smart_cashout)
+        self.stake_enabled = QCheckBox()
+        self.stake_enabled.setChecked(self.settings.stake_martingale_enabled)
+        self.stake_enabled.setToolTip(
+            "بعد از هر باخت، دکمهٔ x2 بازی مبلغ پایه را دو برابر می‌کند (تا مرحله‌های "
+            "مشخص‌شده) و بعد از برد یا پایان مرحلهٔ آخر، دکمهٔ /2 مبلغ را به پایه "
+            "برمی‌گرداند. محل این دو دکمه در زبانهٔ کالیبراسیون انتخاب می‌شود.")
+        self._refresh_stake_label()
+        self.stake_enabled.toggled.connect(self._toggle_stake)
+        layout.addWidget(self.stake_enabled)
         form = QFormLayout()
         self.smart_provider = QComboBox()
         for label, value in (("FreeLLMAPI (محلی)", "freellmapi"),
@@ -746,6 +768,13 @@ class MainWindow(QMainWindow):
         self.smart_two = QCheckBox("اجازهٔ کلیک هم‌زمان روی دو رنگ (پوشش ضرر)")
         self.smart_two.setChecked(self.settings.smart_play_two_colors)
         form.addRow("", self.smart_two)
+        self.stake_steps = QSpinBox()
+        self.stake_steps.setRange(0, 5)
+        self.stake_steps.setSuffix(" مرحله")
+        self.stake_steps.setValue(self.settings.stake_double_steps)
+        self.stake_steps.setToolTip("مبلغ پایه بعد از هر باخت تا این تعداد مرحله دو برابر می‌شود")
+        self.stake_steps.valueChanged.connect(lambda _=0: self._refresh_stake_label())
+        form.addRow("دو برابر کردن مبلغ پس از باخت", self.stake_steps)
         layout.addLayout(form)
         buttons = QHBoxLayout()
         connect_button = QPushButton("تست اتصال")
@@ -771,8 +800,11 @@ class MainWindow(QMainWindow):
         note = QLabel("در این زبانه هیچ‌کدام از قواعد ربات اجرا نمی‌شود؛ مدل خودش ترتیب ضرایب، "
                       "توالی رنگ‌ها و نمودار رنگی را تحلیل می‌کند و همان تصمیم کلیک می‌شود. "
                       "با «کلیک کلاسیک»، ربات قبل از پایان ۶ ثانیه وارد بازی می‌شود و روی "
-                      "ضریبی که خودش زیر ۱٫۹۹ انتخاب کرده شرط را می‌بندد؛ ۸ باخت متوالی هم "
-                      "دوباره ۳۰ دقیقه تحلیل بدون شرط را شروع می‌کند. برای فعال‌شدن باید "
+                      "عددی که خودش بین ۱٫۳۰ و ۱٫۸۵ انتخاب کرده (و اگر دست قبلی زیر ۱٫۱۰ "
+                      "بسته شده باشد تا ۱٫۹۰) شرط را می‌بندد؛ هرگز ۱٫۹۹ یا بیشتر. "
+                      "دو برابر کردن مبلغ با دکمهٔ x2 تا ۳ مرحله انجام می‌شود و بعد از برد "
+                      "یا پایان مرحلهٔ سوم با دکمهٔ /2 به مبلغ پایه برمی‌گردد؛ ۸ باخت متوالی "
+                      "هم دوباره ۳۰ دقیقه تحلیل بدون شرط را شروع می‌کند. برای فعال‌شدن باید "
                       "«AI Analysis» و «ورود هوشمند به بازی» هم روشن باشند. "
                       "رویدادها در logs/smart-review.jsonl ذخیره می‌شوند.")
         note.setWordWrap(True)
@@ -874,6 +906,8 @@ class MainWindow(QMainWindow):
                        smart_play_min_confidence=self.smart_min_conf.value() / 100,
                        smart_play_two_colors=self.smart_two.isChecked(),
                        smart_cashout_enabled=self.smart_cashout.isChecked(),
+                       stake_martingale_enabled=self.stake_enabled.isChecked(),
+                       stake_double_steps=self.stake_steps.value(),
                        review_window_s=self.review_minutes.value() * 60,
                        session_minutes=self.session_minutes.value(),
                        shutdown_after_session=self.shutdown_after.isChecked())
@@ -917,10 +951,25 @@ class MainWindow(QMainWindow):
         """وضعیت گزینهٔ «کلیک کلاسیک + Cash Out» را با متن و رنگ نشان بده."""
         on = self.smart_cashout.isChecked()
         self.smart_cashout.setText(
-            "کلیک کلاسیک + Cash Out زیر ۱٫۹۹: روشن" if on
-            else "کلیک کلاسیک + Cash Out زیر ۱٫۹۹: خاموش")
+            "کلیک کلاسیک + Cash Out بین ۱٫۳۰ و ۱٫۸۵: روشن" if on
+            else "کلیک کلاسیک + Cash Out بین ۱٫۳۰ و ۱٫۸۵: خاموش")
         color = "#6fe3ac" if on else "#95a5a6"
         self.smart_cashout.setStyleSheet(f"QCheckBox {{ color: {color}; font-weight: bold; }}")
+
+    def _refresh_stake_label(self) -> None:
+        """وضعیت گزینهٔ دو برابر کردن مبلغ را با متن و رنگ نشان بده."""
+        on = self.stake_enabled.isChecked()
+        field = getattr(self, "stake_steps", None)
+        steps = field.value() if field is not None else self.settings.stake_double_steps
+        self.stake_enabled.setText(
+            f"دو برابر کردن مبلغ بعد از باخت (تا {steps} مرحله): روشن" if on
+            else f"دو برابر کردن مبلغ بعد از باخت (تا {steps} مرحله): خاموش")
+        color = "#6fe3ac" if on else "#95a5a6"
+        self.stake_enabled.setStyleSheet(f"QCheckBox {{ color: {color}; font-weight: bold; }}")
+
+    def _toggle_stake(self, on: bool) -> None:
+        self._refresh_stake_label()
+        self.apply_settings(stake_martingale_enabled=bool(on))
 
     def _toggle_smart_cashout(self, on: bool) -> None:
         self._refresh_smart_cashout_label()
@@ -1036,9 +1085,11 @@ class MainWindow(QMainWindow):
                  f"{self._region_state(getattr(self.settings, name))}"
                  for number, name in ((1, "history_region"), (2, "result_region"),
                                       (3, "chart_region"), (4, "bet_region"))]
-        point = self.settings.classic_click_point
-        parts.append("محل کلیک کلاسیک: "
-                     + (f"{point[0]},{point[1]}" if point else "انتخاب نشده"))
+        for label, name in (("محل کلیک کلاسیک", "classic_click_point"),
+                            ("دکمهٔ x2 مبلغ", "stake_double_point"),
+                            ("دکمهٔ /2 مبلغ", "stake_half_point")):
+            point = getattr(self.settings, name)
+            parts.append(f"{label}: " + (f"{point[0]},{point[1]}" if point else "انتخاب نشده"))
         self.region_status.setText("  |  ".join(parts))
 
     def select_region(self, target: str = "result"):
@@ -1085,15 +1136,19 @@ class MainWindow(QMainWindow):
 
     def select_classic_point(self):
         """انتخاب تک‌نقطه‌ی «محل کلیک کلاسیک» روی صفحهٔ زنده."""
+        self.select_point("classic_click_point", "محل کلیک کلاسیک",
+                          "روی دکمهٔ کلاسیک (Bet / Cash Out) کلیک کنید — Esc برای انصراف")
+
+    def select_point(self, attr: str, title: str, hint: str):
+        """یک نقطهٔ تک‌کلیک (دکمهٔ کلاسیک، x2 یا /2 مبلغ) را روی صفحهٔ زنده بگیر."""
         error = None
         try:
             self.hide()
             QApplication.processEvents()
             sleep(0.3)  # let this window actually leave the screen before the capture
-            overlay = PointOverlay(self.monitor.currentData())
+            overlay = PointOverlay(self.monitor.currentData(), title=title, hint=hint)
             if overlay.exec() and overlay.selected:
-                self.settings = replace(self.settings,
-                                        classic_click_point=overlay.selected)
+                self.settings = replace(self.settings, **{attr: overlay.selected})
                 self.save_ui_settings()
                 self._update_region_status()
         except Exception as exc:
@@ -1104,7 +1159,7 @@ class MainWindow(QMainWindow):
             self.activateWindow()
             self.tabs.setCurrentIndex(1)
         if error is not None:
-            QMessageBox.warning(self, "محل کلیک کلاسیک", str(error))
+            QMessageBox.warning(self, title, str(error))
 
     def save_ui_settings(self):
         if self.worker and self.worker.isRunning():
@@ -1297,6 +1352,11 @@ class MainWindow(QMainWindow):
         self.smart_learning.setValue(self.settings.smart_play_learning_minutes)
         self.smart_min_conf.setValue(round(self.settings.smart_play_min_confidence * 100))
         self.smart_two.setChecked(self.settings.smart_play_two_colors)
+        self.stake_enabled.blockSignals(True)
+        self.stake_enabled.setChecked(self.settings.stake_martingale_enabled)
+        self.stake_enabled.blockSignals(False)
+        self._refresh_stake_label()
+        self.stake_steps.setValue(self.settings.stake_double_steps)
         self.smart_cashout.blockSignals(True)
         self.smart_cashout.setChecked(self.settings.smart_cashout_enabled)
         self.smart_cashout.blockSignals(False)
@@ -1501,9 +1561,13 @@ class MainWindow(QMainWindow):
         self.smart_cashout.blockSignals(True)
         self.smart_cashout.setChecked(candidate.smart_cashout_enabled)
         self.smart_cashout.blockSignals(False)
+        self.stake_enabled.blockSignals(True)
+        self.stake_enabled.setChecked(candidate.stake_martingale_enabled)
+        self.stake_enabled.blockSignals(False)
         self._refresh_smart_label()
         self._refresh_smart_play_label()
         self._refresh_smart_cashout_label()
+        self._refresh_stake_label()
         self._refresh_toggles()
         self._refresh()
 

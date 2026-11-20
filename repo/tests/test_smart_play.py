@@ -196,6 +196,76 @@ def test_classic_cashout_never_clicks_at_or_above_199(tmp_path):
     assert sent == [(50, 60)]
 
 
+def test_classic_exit_stays_inside_the_chosen_range(tmp_path):
+    """عدد خروج مدل همیشه بین ۱٫۳۰ و ۱٫۸۵ است، نه هر عددی که بدهد."""
+    sent = []
+    clicker = _clicker(tmp_path, sent, smart_cashout_enabled=True,
+                       classic_click_point=(50, 60))
+    clicker.set_smart_play(("GREEN",), active=True, cashout=1.95)
+    report = clicker.fire("1", Decimal("1.20"))
+    assert report.clicked and "1.85" in report.detail
+    clicker.set_smart_play(("GREEN",), active=True, cashout=1.60)
+    middle = clicker.fire("2", Decimal("1.40"))
+    assert middle.clicked and "1.60" in middle.detail
+    clicker.set_smart_play(("RED",), active=True, cashout=0.5)
+    floor = clicker.fire("3", Decimal("1.40"))
+    assert floor.clicked and "1.30" in floor.detail
+    clicker.set_smart_play(("RED",), active=True, cashout=1.90)
+    low_last = clicker.fire("4", Decimal("1.07"))
+    assert low_last.clicked and "1.90" in low_last.detail
+    assert sent  # فقط دکمهٔ کلاسیک، بدون دکمهٔ رنگ
+
+
+def _classic_play(clicker, round_id, cashout=1.30):
+    clicker.set_smart_play(("GREEN",), active=True, cashout=cashout)
+    return clicker.fire(round_id, Decimal("1.05"))
+
+
+def _classic_settle(clicker, round_id):
+    """دست باز را بدون کلیک خروج تسویه کن (باخت) یا نتیجهٔ دست قبل را ثبت کن."""
+    clicker.set_smart_play((), active=True)
+    return clicker.fire(round_id, Decimal("1.05"))
+
+
+def test_martingale_doubles_after_each_loss_up_to_the_limit(tmp_path):
+    sent = []
+    clicker = _clicker(tmp_path, sent, smart_cashout_enabled=True,
+                       classic_click_point=(50, 60), stake_martingale_enabled=True,
+                       stake_double_steps=3, stake_double_point=(70, 80),
+                       stake_half_point=(90, 100))
+    for index in range(3):
+        _classic_play(clicker, f"p{index}")
+        sent.clear()
+        _classic_settle(clicker, f"s{index}")
+        assert sent == [(70, 80)]  # هر باخت یک بار x2
+    assert clicker._stake_steps == 3
+    _classic_play(clicker, "p3")
+    sent.clear()
+    _classic_settle(clicker, "s3")  # باخت در مرحلهٔ سوم: برگشت به مبلغ پایه
+    assert sent == [(90, 100)] * 3
+    assert clicker._stake_steps == 0
+
+
+def test_martingale_returns_to_base_after_a_win(tmp_path):
+    sent = []
+    clicker = _clicker(tmp_path, sent, smart_cashout_enabled=True,
+                       classic_click_point=(50, 60), stake_martingale_enabled=True,
+                       stake_double_steps=3, stake_double_point=(70, 80),
+                       stake_half_point=(90, 100))
+    for index in range(2):
+        _classic_play(clicker, f"p{index}")
+        _classic_settle(clicker, f"s{index}")
+    assert clicker._stake_steps == 2
+    _classic_play(clicker, "win")
+    clicker.watch_live(Decimal("1.02"))
+    clicker.watch_live(Decimal("1.02"))
+    assert clicker.watch_live(Decimal("1.31")) is not None
+    sent.clear()
+    _classic_settle(clicker, "after-win")
+    assert sent == [(90, 100)] * 2  # دو بار /2 و برگشت به پایه
+    assert clicker._stake_steps == 0
+
+
 def test_eight_classic_losses_ask_for_a_relearn(tmp_path):
     """هشت باخت متوالی باید درخواست «دوباره نیم ساعت تحلیل» بدهد."""
     sent = []
@@ -226,7 +296,9 @@ def test_restart_learning_starts_thirty_minutes_again():
 def test_classic_cashout_settings_are_validated():
     DesktopSettings(smart_cashout_enabled=True, classic_click_point=(12, 34)).validate()
     for bad in ({"classic_click_point": (1,)}, {"classic_click_point": ("a", 2)},
-                {"smart_cashout_enabled": "yes"}):
+                {"smart_cashout_enabled": "yes"},
+                {"stake_martingale_enabled": "yes"}, {"stake_double_steps": 9},
+                {"stake_double_point": (1,)}):
         with pytest.raises(ValueError):
             DesktopSettings(**bad).validate()
 

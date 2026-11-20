@@ -30,6 +30,12 @@ OPENAI_MODEL = "gpt-4o-mini"
 DEFAULT_TIMEOUT = 120.0
 # «کلیک کلاسیک»: شرط باید همیشه زیر این ضریب بسته شود.
 CASHOUT_LIMIT = 1.99
+# عدد خروج کلاسیک همیشه داخل این بازه انتخاب می‌شود؛ ضریب قبلیِ زیر ۱٫۱۰
+# سقف را تا ۱٫۹۰ باز می‌کند (مثلاً دست قبلی ۱٫۰۷ بسته شده باشد).
+CASHOUT_MIN = 1.30
+CASHOUT_MAX = 1.85
+CASHOUT_MAX_LOW_LAST = 1.90
+CASHOUT_LOW_LAST = 1.10
 
 # Region 4 is the row of three buttons the user marked: red, green, moon.
 DEFAULT_BETS: tuple[tuple[str, str], ...] = (("RED", "2x"), ("GREEN", "2x"), ("YELLOW", "10x"))
@@ -72,6 +78,41 @@ def models_url(base_url: str) -> str:
 def _is_local(url: str) -> bool:
     host = url.split("//", 1)[-1].split("/", 1)[0].split(":", 1)[0].lower()
     return host in ("127.0.0.1", "localhost", "::1", "[::1]")
+
+
+def exit_bounds(last=None) -> tuple[float, float]:
+    """بازهٔ مجاز خروج کلاسیک؛ ضریب قبلیِ خیلی کم، سقف را تا ۱٫۹۰ باز می‌کند."""
+    upper = CASHOUT_MAX
+    try:
+        if last is not None and float(str(last).replace(",", "").strip()) < CASHOUT_LOW_LAST:
+            upper = CASHOUT_MAX_LOW_LAST
+    except (TypeError, ValueError):
+        pass
+    return CASHOUT_MIN, upper
+
+
+def clamp_exit(value, last=None) -> float:
+    """هر عدد خروج را داخل بازهٔ مجاز بیاور: ۱٫۳۰ تا ۱٫۸۵ (یا تا ۱٫۹۰)."""
+    low, high = exit_bounds(last)
+    try:
+        number = float(str(value).replace("%", "").replace(",", "").strip())
+        if number != number:  # NaN
+            number = low
+    except (TypeError, ValueError):
+        number = low
+    return round(min(max(number, low), high), 2)
+
+
+def default_exit(last=None) -> float:
+    """وقتی مدل عدد خروج نداد، عددی در همان بازه بر پایهٔ ضریب قبلی."""
+    low, high = exit_bounds(last)
+    try:
+        previous = float(str(last).replace(",", "").strip())
+    except (TypeError, ValueError):
+        return low
+    if previous < CASHOUT_LOW_LAST:
+        return high
+    return 1.50 if previous < 2.0 else low
 
 
 @dataclass(frozen=True)
@@ -163,8 +204,11 @@ def build_prompt(snapshot: SmartSnapshot, threshold: str = "10.00",
         lines.append(
             "- خروج کلاسیک: ربات پیش از پایان ۶ ثانیه با یک کلیک روی دکمهٔ big Bet / Cash Out "
             "وارد بازی می‌شود و بعد با کلیک دوباره خارج می‌شود. در فیلد exit عدد خروج را خودت "
-            f"انتخاب کن؛ هرچه ریسک را کمتر می‌بینی پایین‌تر (مثلاً 1.30) و هرچه مطمئن‌تری "
-            f"بالاتر (مثلاً 1.85)، ولی همیشه زیر {CASHOUT_LIMIT} (حداکثر 1.98).")
+            f"انتخاب کن؛ این عدد باید همیشه بین {CASHOUT_MIN:.2f} و {CASHOUT_MAX:.2f} باشد و "
+            "با توجه به ضریب دست قبلی (همان عدد بند ۲) انتخاب شود: هرچه ریسک را کمتر می‌بینی "
+            f"نزدیک {CASHOUT_MIN:.2f} و هرچه مطمئن‌تری نزدیک {CASHOUT_MAX:.2f}. فقط اگر ضریب "
+            f"دست قبلی زیر {CASHOUT_LOW_LAST:.2f} باشد (۱٫۰۰ تا ۱٫۰۹)، می‌توانی برای دست بعد تا "
+            f"{CASHOUT_MAX_LOW_LAST:.2f} صبر کنی و همان‌جا خارج شوی.")
     if extra_rules.strip():
         lines.append("- نکتهٔ اختیاری کاربر: " + extra_rules.strip() + " (اجباری نیست؛ داده بر آن مقدم است)")
     lines += ["", "برای دست بعد کدام رنگ بیشترین شانس را دارد؟ فقط JSON برگردان، بدون توضیح اضافه:"]
@@ -172,7 +216,7 @@ def build_prompt(snapshot: SmartSnapshot, threshold: str = "10.00",
     if allow_two:
         answer += '"second":"NONE|RED|GREEN|YELLOW",'
     if classic:
-        answer += '"exit":1.85,'
+        answer += '"exit":1.45,'
     answer += '"confidence":0.0,"reason":"یک جمله فارسی"}'
     lines.append(answer)
     return "\n".join(lines)
@@ -219,7 +263,7 @@ def _json_object(text: str) -> dict | None:
     return None
 
 
-def parse_verdict(text: str) -> SmartVerdict | None:
+def parse_verdict(text: str, last=None) -> SmartVerdict | None:
     """Read the model's JSON answer; None when it cannot be understood."""
     payload = _json_object(text)
     if payload is None:
@@ -239,11 +283,11 @@ def parse_verdict(text: str) -> SmartVerdict | None:
     confidence = min(1.0, max(0.0, confidence))
     reason = str(payload.get("reason", payload.get("why", ""))).strip()
     second = _second_color(payload, color)
-    return SmartVerdict(color, confidence, reason, second, _exit_target(payload))
+    return SmartVerdict(color, confidence, reason, second, _exit_target(payload, last))
 
 
-def _exit_target(payload: dict) -> float | None:
-    """ضریب خروجی که مدل برای «کلیک کلاسیک» انتخاب کرده؛ هرگز ۱٫۹۹ یا بیشتر."""
+def _exit_target(payload: dict, last=None) -> float | None:
+    """ضریب خروجی که مدل برای «کلیک کلاسیک» انتخاب کرده؛ داخل بازهٔ ۱٫۳۰..۱٫۸۵."""
     raw = payload.get("exit", payload.get("cashout", payload.get("cash_out", payload.get("target"))))
     if raw is None:
         return None
@@ -253,7 +297,7 @@ def _exit_target(payload: dict) -> float | None:
         return None
     if not 1.0 < value < 10.0:
         return None
-    return min(value, CASHOUT_LIMIT - 0.01)
+    return clamp_exit(value, last)
 
 
 def _second_color(payload: dict, first: str) -> str | None:
@@ -348,7 +392,7 @@ def review(base_url: str, api_key: str, model: str, snapshot: SmartSnapshot,
     prompt = build_prompt(snapshot, threshold, extra_rules, min_confidence=min_confidence,
                           allow_two=allow_two, classic=classic)
     raw = ask(base_url, api_key, model, prompt, timeout)
-    return parse_verdict(raw), raw, prompt
+    return parse_verdict(raw, snapshot.current), raw, prompt
 
 
 def probe_models(base_url: str, api_key: str, timeout: float = 15.0) -> list[str]:
