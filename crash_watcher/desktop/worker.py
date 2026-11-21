@@ -11,13 +11,25 @@ from PySide6.QtCore import QThread, Signal
 from crash_watcher import StrategyEngine
 from crash_watcher.core.enums import StrategyState
 from crash_watcher.vision.capture import ScreenCapture, ScreenUnavailable
-from crash_watcher.vision.recognition import RapidOCRReader, tesseract_reader
+from crash_watcher.vision.recognition import (RapidOCRReader, parse_multiplier, preprocess,
+                                              tesseract_reader)
 from .config import DesktopSettings, PROJECT_ROOT
 from .clicker import AutoClicker
 from .color_grid import read_grid
 from .final_result import BangDetector, BangRecognizer, parse_history_entry
 from .smart_play import SmartPlanner
 from .smart_review import SmartSnapshot, append_log, build_prompt, grid_columns, review
+
+
+def live_multiplier(reader, image, minimum: float = 0.55):
+    """Read the big running multiplier (region 2) while a bet is open."""
+    try:
+        text, confidence = reader(preprocess(image)[0])
+    except Exception:
+        return None
+    if not np.isfinite(confidence) or confidence < minimum:
+        return None
+    return parse_multiplier(text)
 
 
 def session_seconds_left(started: float, limit_minutes: int,
@@ -116,6 +128,7 @@ class MonitorWorker(QThread):
                     self.status.emit("MONITORING")
                     previous = None
                     previous_reading = None
+                    reading = None
                     history_previous = None
                     history_id = None
                     history_value = None
@@ -188,7 +201,8 @@ class MonitorWorker(QThread):
                                                 clicker.color(completed.multiplier))
                                 ready = (planner.take() if self._smart_play_active()
                                          else None)
-                                clicker.set_smart_play(ready.bets if ready else ())
+                                clicker.set_smart_play(ready.bets if ready else (),
+                                                       ready.cashout if ready else None)
                                 self.click_report.emit(clicker.fire(completed.round_id,
                                                                     completed.multiplier))
                                 review = clicker.take_review()
@@ -201,6 +215,13 @@ class MonitorWorker(QThread):
                                         and self._smart_rounds >= self.settings.smart_review_every_rounds):
                                     self._smart_rounds = 0
                                     self._start_smart_review(str(completed.multiplier))
+                            if clicker.wants_cashout():
+                                # ضریب زندهٔ ناحیهٔ ۲ (عدد در حال بالا رفتن) را جدا
+                                # بخوان؛ خوانش Bang فقط عدد پایان دست را می‌دهد و
+                                # باعث می‌شد خروج پس از پایان دست انجام شود.
+                                live = live_multiplier(reader, frame.image)
+                                if live is not None:
+                                    clicker.tick(live)
                             self.preview.emit(frame.image.copy())
                         except Exception as exc:
                             self.detector.reset()

@@ -432,6 +432,12 @@ class MainWindow(QMainWindow):
         self.click_delay.setSingleStep(100)
         self.click_delay.setValue(self.settings.autoclick_delay_ms)
         form.addRow("تأخیر کلیک (میلی‌ثانیه)", self.click_delay)
+        self.cashout = QCheckBox("کش‌اوت هوشمند: بعد از هر شرط، مدل تعیین می‌کند کجا خارج شوی")
+        self.cashout.setChecked(self.settings.cashout_enabled)
+        self.cashout.setToolTip(
+            "مدل بین 1.10 و 1.80 هدف خروج را انتخاب می‌کند؛ اگر دست قبلی زیر 1.10 بسته شده "
+            "باشد تا 1.89 صبر می‌شود. دیرترین خروج همیشه 1.90 است و کلیک روی همان دکمهٔ شرط زده می‌شود.")
+        form.addRow("کش‌اوت هوشمند", self.cashout)
         self.smart_click = QCheckBox("کلیک هوشمند: فقط وقتی پیش‌بینی رنگ به اطمینان برسد")
         self.smart_click.setChecked(self.settings.smart_click_enabled)
         form.addRow("کلیک هوشمند", self.smart_click)
@@ -689,6 +695,7 @@ class MainWindow(QMainWindow):
                        autoclick_delay_ms=self.click_delay.value(),
                        autoclick_skip_rounds=self.click_wait.value(),
                        autoclick_max_clicks=self.click_burst.value(),
+                       cashout_enabled=self.cashout.isChecked(),
                        signal_rule_enabled=self.signal_rule.isChecked(),
                        signal_repeat=self.signal_repeat.value(),
                        signal_burst_rounds=self.signal_burst.value(),
@@ -1145,7 +1152,12 @@ class MainWindow(QMainWindow):
             clicker.close()
         label = {"clicked": "کلیک شد", "dry-run": "آزمایشی", "click failed": "کلیک ناموفق"}.get(
             report.reason, "انجام نشد")
-        self.click_status.setText(f"کلیک تست: {label} — {report.reason} {report.point or ''}")
+        if report.point is None:
+            self.click_status.setText(
+                f"کلیک تست: انجام نشد — {report.reason}. "
+                "هدف کلیک تنظیم نشده: ناحیهٔ کلیک/نقطهٔ کلیک یا ناحیهٔ ۴ را انتخاب کن.")
+        else:
+            self.click_status.setText(f"کلیک تست: {label} — {report.reason} {report.point}")
 
     def _on_click(self, report):
         label = {"clicked": "کلیک شد", "click failed": "کلیک ناموفق"}.get(report.reason, "انجام نشد")

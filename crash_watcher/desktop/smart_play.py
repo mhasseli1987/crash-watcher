@@ -31,6 +31,7 @@ class SmartDecision:
     confidence: float
     reason: str = ""
     prepared_after: str | None = None  # round id the snapshot ended with
+    cashout: float | None = None  # ضریب خروج پیشنهادی مدل برای همین دست
 
     @property
     def target(self) -> str:
@@ -93,7 +94,8 @@ class SmartPlanner:
         if not bets:
             self._ready = None
             return
-        decision = SmartDecision(bets, verdict.confidence, verdict.reason, prepared_after)
+        decision = SmartDecision(bets, verdict.confidence, verdict.reason, prepared_after,
+                                 verdict.cashout)
         self._ready = decision
         self._prepared_at = len(self.rounds)
         self._latest = decision

@@ -35,6 +35,8 @@ class DesktopSettings:
     bet_point_red: tuple[int, int] | None = None
     bet_point_green: tuple[int, int] | None = None
     bet_point_yellow: tuple[int, int] | None = None
+    # کش‌اوت هوشمند: بعد از هر شرط، مدل تعیین می‌کند روی چه ضریبی خارج شود.
+    cashout_enabled: bool = False
     autoclick_enabled: bool = False
     autoclick_mode: str = "detect"
     autoclick_threshold: str = "10.00"

@@ -167,3 +167,10 @@ def test_smart_review_settings_are_validated_and_persisted(tmp_path: Path):
     assert loaded == settings
     assert load_settings(tmp_path / "absent.json").smart_review_url == \
         "http://127.0.0.1:31415/v1"
+
+
+def test_verdict_cashout_is_clamped_to_the_140_190_range():
+    assert parse_verdict('{"bet":"RED","cashout":1.20}').cashout == 1.40
+    assert parse_verdict('{"bet":"RED","cashout":2.50}').cashout == 1.90
+    assert parse_verdict('{"bet":"RED","cashout":1.65}').cashout == 1.65
+    assert parse_verdict('{"bet":"RED"}').cashout is None

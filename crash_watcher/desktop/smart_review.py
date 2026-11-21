@@ -105,6 +105,11 @@ def _grid_text(snapshot: SmartSnapshot) -> str:
     return "\n".join(lines)
 
 
+# خروج هوشمند: هدف همیشه بین ۱٫۴۰ و ۱٫۹۰ است و هیچ شرطی از ۱٫۹۰ جلوتر باز نمی‌ماند.
+EXIT_MIN = 1.40
+EXIT_MAX = 1.90
+
+
 def build_prompt(snapshot: SmartSnapshot, threshold: str = "10.00",
                  extra_rules: str = "", *, min_confidence: float = 0.40,
                  allow_two: bool = True) -> str:
@@ -122,6 +127,9 @@ def build_prompt(snapshot: SmartSnapshot, threshold: str = "10.00",
         "- ضرایب 1.00، 1.11 و 1.99 → سبز؛ 2.08 → زرد",
         f"- فقط وقتی شرط ببند که احتمالِ درست بودن پیش‌بینی‌ات {min_confidence:.0%} یا بیشتر باشد؛ در غیر این صورت bet را SKIP بگذار",
         "- لازم نیست هر دست بازی کنی؛ دست‌های بی‌اطمینان را رد کن",
+        "- کش‌اوت: اگر شرط بستی، ضریبی بین 1.40 و 1.90 انتخاب کن که روی آن از دست خارج شوی",
+        "- اگر آخرین ضریب بسته‌شده زیر 1.10 بود (مثلاً 1.08 یا 1.07) می‌توانی برای دست بعد تا 1.90 صبر کنی؛ "
+        "در هر حالتی دیرترین خروج 1.90 است، نه بیشتر",
     ]
     if allow_two:
         rules.append("- اگر بین دو رنگ شک داری می‌توانی هر دو را بزنی: رنگ دوم را در second بگذار. "
@@ -139,9 +147,9 @@ def build_prompt(snapshot: SmartSnapshot, threshold: str = "10.00",
         f"تعداد دورهای دیده‌شده در این جلسه: {snapshot.rounds_seen}\n\n"
         "قواعد کاربر:\n" + "\n".join(rules) + "\n\n"
         "برای دست بعد کدام رنگ بیشترین شانس را دارد؟ فقط JSON برگردان، بدون توضیح اضافه:\n"
-        + ('{"bet":"RED|GREEN|YELLOW|SKIP","second":"NONE|RED|GREEN|YELLOW",'
+        + ('{"bet":"RED|GREEN|YELLOW|SKIP","second":"NONE|RED|GREEN|YELLOW","cashout":1.45,'
            '"confidence":0.0,"reason":"یک جمله فارسی"}' if allow_two else
-           '{"bet":"RED|GREEN|YELLOW|SKIP","confidence":0.0,"reason":"یک جمله فارسی"}')
+           '{"bet":"RED|GREEN|YELLOW|SKIP","cashout":1.45,"confidence":0.0,"reason":"یک جمله فارسی"}')
     )
 
 
@@ -151,6 +159,7 @@ class SmartVerdict:
     confidence: float  # 0..1
     reason: str
     second: str | None = None  # رنگ دوم اختیاری (پوشش ضرر)
+    cashout: float | None = None  # ضریب خروج پیشنهادی مدل، بین 1.40 و 1.90
 
     @property
     def bets(self) -> tuple[str, ...]:
@@ -205,7 +214,17 @@ def parse_verdict(text: str) -> SmartVerdict | None:
     confidence = min(1.0, max(0.0, confidence))
     reason = str(payload.get("reason", payload.get("why", ""))).strip()
     second = _second_color(payload, color)
-    return SmartVerdict(color, confidence, reason, second)
+    cashout = payload.get("cashout", payload.get("cash_out", payload.get("exit")))
+    try:
+        cashout = float(str(cashout).replace("x", "").strip())
+        if not 1.0 < cashout < 10.0:
+            cashout = None
+    except (TypeError, ValueError):
+        cashout = None
+    if cashout is not None:
+        # هر عددی که مدل بدهد داخل بازهٔ خروج ۱٫۴۰ تا ۱٫۹۰ بسته می‌شود.
+        cashout = round(min(max(cashout, EXIT_MIN), EXIT_MAX), 2)
+    return SmartVerdict(color, confidence, reason, second, cashout)
 
 
 def _second_color(payload: dict, first: str) -> str | None:

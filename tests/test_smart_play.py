@@ -147,3 +147,29 @@ def test_smart_play_settings_are_validated():
                 {"smart_play_enabled": "yes"}):
         with pytest.raises(ValueError):
             DesktopSettings(**bad).validate()
+
+
+def test_smart_cashout_clicks_once_when_the_live_multiplier_reaches_the_target(tmp_path):
+    sent = []
+    clicker = _clicker(tmp_path, sent, cashout_enabled=True)
+    clicker.set_smart_play(("RED",), 1.55)
+    report = clicker.fire("7", Decimal("2.10"))
+    assert report.clicked and sent == [(10, 20)]
+    assert clicker.wants_cashout()
+    clicker.tick(Decimal("1.30"))
+    clicker.tick(Decimal("1.62"))
+    assert sent == [(10, 20), (10, 20)]
+    assert not clicker.wants_cashout()
+    clicker.tick(Decimal("1.80"))
+    assert sent == [(10, 20), (10, 20)]
+
+
+def test_smart_cashout_target_stays_between_140_and_190(tmp_path):
+    sent = []
+    clicker = _clicker(tmp_path, sent, cashout_enabled=True)
+    clicker.set_smart_play(("RED",), 0.9)
+    clicker.fire("1", Decimal("1.05"))
+    assert clicker._cashout_target == Decimal("1.40")
+    clicker.set_smart_play(("RED",), 3.5)
+    clicker.fire("2", Decimal("1.05"))
+    assert clicker._cashout_target == Decimal("1.90")

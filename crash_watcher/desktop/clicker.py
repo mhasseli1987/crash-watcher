@@ -18,6 +18,9 @@ from .signals import (next_dot_row, row_yellow_due, two_yellows_in_a_row,
                       yellow_green_green_yellow)
 
 _DOWN = 0x0002
+# خروج هوشمند: هدف همیشه بین ۱٫۴۰ و ۱٫۹۰ است؛ هیچ شرطی از ۱٫۹۰ جلوتر باز نمی‌ماند.
+CASHOUT_MIN_TARGET = Decimal("1.40")
+CASHOUT_MAX_TARGET = Decimal("1.90")
 _UP = 0x0004
 try:
     _user32 = ctypes.windll.user32
@@ -126,6 +129,10 @@ class AutoClicker:
         self.forecaster = ColorForecaster()
         self._pending_color: str | None = None
         self._smart_play: tuple[str, ...] = ()
+        self._smart_cashout: float | None = None
+        self._cashout_target: Decimal | None = None
+        self._cashout_points: list[tuple[int, int]] = []
+        self._cashout_prev: Decimal | None = None
         self._window = {"rounds": 0, "clicks": 0, "skipped": 0,
                         "gated_correct": 0, "gated_total": 0}
         self._window_started = monotonic()
@@ -253,6 +260,9 @@ class AutoClicker:
         """One manual attempt at the resolved target; does not use the click budget."""
         point = self._resolve()
         if point is None:
+            # ناحیهٔ کلیک تنظیم نشده: همان دکمهٔ شرط قرمز (ناحیهٔ ۴) را آزمایش کن.
+            point = self._bet_point("RED")
+        if point is None:
             return ClickReport(False, "target not found", count=self._clicks)
         self._wait_before_click()
         ok = self.sender(point[0], point[1], restore=self.settings.autoclick_restore_cursor)
@@ -262,9 +272,10 @@ class AutoClicker:
         """رنگ ضریب — همین قاعدهٔ رنگ در بخش بررسی هوشمند هم استفاده می‌شود."""
         return self._color(value)
 
-    def set_smart_play(self, bets) -> None:
-        """تصمیم آمادهٔ مدل برای دست بعد: یک یا دو رنگ."""
+    def set_smart_play(self, bets, cashout=None) -> None:
+        """تصمیم آمادهٔ مدل برای دست بعد: یک یا دو رنگ، به‌همراه ضریب خروج."""
         self._smart_play = tuple(color for color in (bets or ()) if color)
+        self._smart_cashout = cashout
 
     def fire(self, round_id: str, value: Decimal) -> ClickReport:
         report = self._decide(round_id, value)
@@ -347,6 +358,9 @@ class AutoClicker:
             pass
 
     def _decide(self, round_id: str, value: Decimal) -> ClickReport:
+        # دستِ در جریان بسته شد: پنجرهٔ کش‌اوتِ شرط قبلی تمام است.
+        self._cashout_points = []
+        self._cashout_prev = None
         if not self.settings.autoclick_enabled:
             return ClickReport(False, "disabled", count=self._clicks)
         if round_id == self._last_id:
@@ -525,11 +539,67 @@ class AutoClicker:
             # Every mode clicks: autoclick_dry_run only labels the report.
             ok = self.sender(point[0], point[1],
                              restore=self.settings.autoclick_restore_cursor) and ok
+        if self.settings.cashout_enabled:
+            # شرط ثبت شد: هدفِ خروج را مدل تعیین می‌کند و همیشه داخل ۱٫۴۰ تا ۱٫۹۰
+            # می‌ماند (دستِ زیر ۱٫۱۰ هم تا همان ۱٫۹۰ اجازهٔ صبر دارد). سقف ثابت
+            # ۱٫۹۰ است تا هیچ شرطی از این عدد جلوتر باز نماند.
+            try:
+                target = Decimal(str(self._smart_cashout))
+            except Exception:
+                target = Decimal("1.60")  # پاسخ مدل در دسترس نیست: میانهٔ محدوده
+            self._cashout_target = min(max(target, CASHOUT_MIN_TARGET), CASHOUT_MAX_TARGET)
+            self._cashout_points = [point for _, point in points]
+            self._cashout_prev = None
+        self._smart_cashout = None
         colors = tuple(color for color, _ in points if color)
         return ClickReport(True, "clicked" if ok else "click failed", points[0][1], self._clicks,
                            self._armed, forecast=self.forecaster.forecast().label,
                            target="+".join(colors) or (target_color or ""),
                            rule=rule, detail=row_detail)
+
+    def wants_cashout(self) -> bool:
+        """شرطی باز است و هنوز روی هدف خروج کلیک نشده؟"""
+        return bool(self.settings.cashout_enabled and self._cashout_points
+                    and self._cashout_target is not None)
+
+    def tick(self, live=None) -> None:
+        """کش‌اوت هوشمند: ضریب جاری که به هدفِ مدل رسید، روی همان دکمهٔ شرط کلیک کن.
+
+        `live` همان خوانش OCR ناحیهٔ ۲ در این لحظه است. کلیک فقط وقتی انجام
+        می‌شود که ضریب واقعاً در حال بالارفتن باشد؛ صفحهٔ پایان (ضریب ثابت)
+        یا شمارش معکوس هرگز باعث کلیک نمی‌شود.
+        """
+        if not (self.settings.cashout_enabled and self._cashout_points
+                and self._cashout_target is not None) or live is None:
+            return
+        try:
+            value = live if isinstance(live, Decimal) else Decimal(str(live))
+        except Exception:
+            return
+        prev = self._cashout_prev
+        if prev is not None and value < prev * Decimal("0.8"):
+            # افت بزرگ یعنی صفحهٔ پایان/شمارش معکوس گذشته و پرواز تازه از ۱.۰۰ شروع شده.
+            prev = None
+        self._cashout_prev = value
+        if prev is None or value <= prev or value < self._cashout_target:
+            return
+        target, self._cashout_target = self._cashout_target, None
+        points, self._cashout_points = self._cashout_points, []
+        ok = True
+        for point in points:
+            ok = self.sender(point[0], point[1],
+                             restore=self.settings.autoclick_restore_cursor) and ok
+        try:
+            self.log_path.parent.mkdir(parents=True, exist_ok=True)
+            entry = {"time": datetime.now().isoformat(timespec="seconds"),
+                     "round": self._last_id, "value": str(value), "clicked": bool(ok),
+                     "reason": f"smart cashout target {target} on the bet button",
+                     "points": [list(point) for point in points],
+                     "clicks": self._clicks}
+            with self.log_path.open("a", encoding="utf-8") as file:
+                file.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        except Exception:
+            pass  # logging must never break a click decision
 
     def close(self) -> None:
         self._write_session()
