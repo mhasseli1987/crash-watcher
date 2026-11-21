@@ -12,7 +12,7 @@ from PySide6.QtGui import (QColor, QFont, QImage, QLinearGradient, QPainter, QPa
                            QPen, QPixmap, QRadialGradient)
 from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog, QFileDialog, QFormLayout,
     QFrame, QGridLayout, QGroupBox, QHBoxLayout, QLabel, QLineEdit, QMainWindow,
-    QMessageBox, QPlainTextEdit, QProgressBar, QPushButton, QScrollArea, QSizeGrip, QSizePolicy,
+    QMessageBox, QPlainTextEdit, QPushButton, QScrollArea, QSizeGrip, QSizePolicy,
     QSpinBox, QDoubleSpinBox, QTableWidget, QTableWidgetItem, QTabWidget, QVBoxLayout, QWidget)
 from crash_watcher import StrategyEngine
 from crash_watcher.core.enums import BetOutcome, CycleOutcome, StrategyState
@@ -69,10 +69,6 @@ QFrame#metric { background:qlineargradient(x1:0,y1:0,x2:1,y2:1, stop:0 rgba(38,8
 QFrame#metric:hover { border:1px solid rgba(150,245,200,150); }
 QLabel#modeChip { background:rgba(10,26,20,200); border:1px solid rgba(110,210,165,80); border-radius:11px; color:#bcd8ca; font-weight:700; padding:5px 10px; font-size:12px; }
 QLabel#modeChip[turnbal="true"] { background:qlineargradient(x1:0,y1:0,x2:0,y2:1, stop:0 #f0dfa6, stop:1 #b8912f); color:#231a04; border:1px solid #ffe9b8; }
-QLabel#sessionBadge { background:qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 rgba(120,90,20,225), stop:1 rgba(60,46,10,225)); border:1px solid rgba(245,200,107,160); border-radius:14px; color:#ffe9b5; font-weight:700; padding:9px 16px; }
-QLabel#sessionBadge[urgent="true"] { background:qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 rgba(160,40,60,235), stop:1 rgba(80,16,28,235)); border:1px solid #ff9db0; color:#ffd9e0; }
-QProgressBar#session { background:rgba(10,26,21,220); border:1px solid rgba(110,210,165,60); border-radius:8px; min-height:16px; max-height:16px; text-align:center; color:#d8f5e7; font-size:11px; font-weight:700; }
-QProgressBar#session::chunk { border-radius:7px; background:qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 #38c98d, stop:0.6 #6fe3ac, stop:1 #f5c86b); }
 QCheckBox { spacing:10px; padding:4px 0; }
 QCheckBox::indicator { width:20px; height:20px; border-radius:6px; border:1px solid rgba(120,220,175,110); background:rgba(8,22,18,220); }
 QCheckBox::indicator:hover { border:1px solid #8bffd0; }
@@ -311,18 +307,13 @@ class MainWindow(QMainWindow):
         title = QLabel("CRASH WATCHER")
         title.setStyleSheet("font-size:25px;font-weight:800;letter-spacing:2px;"
                             "color:#f2fff8;background:transparent")
-        subtitle = QLabel("داشبورد هوشمند — پایش، کلیک و تایمر جلسه")
+        subtitle = QLabel("داشبورد هوشمند — پایش و کلیک")
         subtitle.setStyleSheet("font-size:12px;color:#7fa694;background:transparent")
         subtitle.setWordWrap(True)
         titles.addWidget(title)
         titles.addWidget(subtitle)
         header.addLayout(titles)
         header.addStretch()
-        self.session_badge = QLabel("بدون تایمر")
-        self.session_badge.setObjectName("sessionBadge")
-        self.session_badge.setWordWrap(True)
-        self.session_badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.session_badge.setToolTip("زمان باقی‌ماندهٔ جلسه؛ از دکمه‌های زیر داشبورد قابل تغییر است")
         mode_column = QVBoxLayout()
         mode_column.setSpacing(4)
         self.bell = BellToggle(self.settings.bot_mode == "turnbal")
@@ -334,7 +325,6 @@ class MainWindow(QMainWindow):
         mode_column.addWidget(self.bell, 0, Qt.AlignmentFlag.AlignHCenter)
         mode_column.addWidget(self.mode_chip)
         header.addLayout(mode_column)
-        header.addWidget(self.session_badge, 0, Qt.AlignmentFlag.AlignTop)
         outer.addLayout(header)
         toggles = QHBoxLayout()
         toggles.setSpacing(12)
@@ -420,38 +410,6 @@ class MainWindow(QMainWindow):
                        for i, name in enumerate(labels)}
         self._metric_columns = 4
         layout.addLayout(metrics)
-        session = QVBoxLayout()
-        session.setSpacing(6)
-        session_line = QHBoxLayout()
-        session_line.setSpacing(10)
-        self.session_left = QLabel("بدون تایمر")
-        self.session_left.setStyleSheet("color:#f5c86b;font-weight:700;font-size:13px;"
-                                        "background:transparent")
-        self.session_left.setMinimumWidth(130)
-        self.session_progress = QProgressBar()
-        self.session_progress.setObjectName("session")
-        self.session_progress.setRange(0, 100)
-        self.session_progress.setValue(0)
-        self.session_progress.setTextVisible(True)
-        self.session_progress.setFormat("بدون محدودیت")
-        self.session_progress.setToolTip("اگر «مدت جلسه» را عددی بگذارید، پیشرفت جلسه اینجا نشان داده می‌شود")
-        session_line.addWidget(self.session_left)
-        session_line.addWidget(self.session_progress, 1)
-        session.addLayout(session_line)
-        presets = QHBoxLayout()
-        presets.setSpacing(6)
-        for text, minutes in (("۳۰ دقیقه", 30), ("۱ ساعت", 60), ("۳ ساعت", 180),
-                              ("بدون تایمر", 0)):
-            preset = QPushButton(text)
-            preset.setObjectName("preset")
-            preset.setCursor(Qt.CursorShape.PointingHandCursor)
-            preset.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed)
-            preset.setToolTip(f"مدت جلسه را {text} کن" if minutes else "تایمر جلسه را بردار")
-            preset.clicked.connect(lambda _=False, m=minutes: self._set_session_limit(m))
-            presets.addWidget(preset)
-        presets.addStretch()
-        session.addLayout(presets)
-        layout.addLayout(session)
         controls = QHBoxLayout()
         self.start_button = QPushButton("شروع پایش")
         self.start_button.setObjectName("start")
@@ -555,16 +513,6 @@ class MainWindow(QMainWindow):
         self.review_minutes.setSuffix(" دقیقه")
         self.review_minutes.setValue(max(1, self.settings.review_window_s // 60))
         form.addRow("بازبینی خودکار هر", self.review_minutes)
-        self.session_minutes = QSpinBox()
-        self.session_minutes.setRange(0, 1440)
-        self.session_minutes.setSuffix(" دقیقه")
-        self.session_minutes.setSingleStep(30)
-        self.session_minutes.setSpecialValueText("بدون محدودیت")
-        self.session_minutes.setValue(self.settings.session_minutes)
-        form.addRow("مدت جلسه", self.session_minutes)
-        self.shutdown_after = QCheckBox("خاموش‌کردن ویندوز در پایان جلسه (۶۰ ثانیه فرصت، لغو: shutdown /a)")
-        self.shutdown_after.setChecked(self.settings.shutdown_after_session)
-        form.addRow("پایان جلسه", self.shutdown_after)
         self.click_wait = QSpinBox()
         self.click_wait.setRange(0, 20)
         self.click_wait.setSuffix(" دست")
@@ -575,19 +523,6 @@ class MainWindow(QMainWindow):
         self.click_burst.setSuffix(" کلیک")
         self.click_burst.setValue(self.settings.autoclick_max_clicks)
         form.addRow("کلیک‌های بعد از انتظار", self.click_burst)
-        self.signal_rule = QCheckBox("سیگنال شبکه: دو زرد پشت‌سرهم ← کلیک زرد بعدی")
-        self.signal_rule.setChecked(self.settings.signal_rule_enabled)
-        form.addRow("قانون سیگنال", self.signal_rule)
-        self.signal_repeat = QSpinBox()
-        self.signal_repeat.setRange(1, 10)
-        self.signal_repeat.setSuffix(" بار")
-        self.signal_repeat.setValue(self.settings.signal_repeat)
-        form.addRow("تکرار سیگنال", self.signal_repeat)
-        self.signal_burst = QSpinBox()
-        self.signal_burst.setRange(1, 30)
-        self.signal_burst.setSuffix(" دست")
-        self.signal_burst.setValue(self.settings.signal_burst_rounds)
-        form.addRow("کلیک پشت‌سرهم سیگنال", self.signal_burst)
         self.pair_flip = QCheckBox("جفت سبز یا جفت قرمز ← کلیک روی رنگ مخالف")
         self.pair_flip.setChecked(self.settings.pair_flip_enabled)
         form.addRow("قانون جفت رنگ", self.pair_flip)
@@ -949,9 +884,6 @@ class MainWindow(QMainWindow):
                        autoclick_skip_rounds=self.click_wait.value(),
                        autoclick_max_clicks=self.click_burst.value(),
                        cashout_enabled=self.cashout.isChecked(),
-                       signal_rule_enabled=self.signal_rule.isChecked(),
-                       signal_repeat=self.signal_repeat.value(),
-                       signal_burst_rounds=self.signal_burst.value(),
                        pair_flip_enabled=self.pair_flip.isChecked(),
                        row_signal_enabled=self.row_signal.isChecked(),
                        row_signal_gap=self.row_gap.value(),
@@ -989,9 +921,7 @@ class MainWindow(QMainWindow):
                        turnbal_min_cycle_win=self.tb_cycle_win.value() / 100,
                        turnbal_max_streak=self.tb_streak.value(),
                        turnbal_min_gap=self.tb_gap.value(),
-                       review_window_s=self.review_minutes.value() * 60,
-                       session_minutes=self.session_minutes.value(),
-                       shutdown_after_session=self.shutdown_after.isChecked())
+                       review_window_s=self.review_minutes.value() * 60)
 
     def _refresh_autoclick_label(self) -> None:
         """Make the on/off state of autoclick obvious: text and colour both change."""
@@ -1252,8 +1182,6 @@ class MainWindow(QMainWindow):
         self.worker.click_report.connect(self._on_click)
         self.worker.review_report.connect(self._on_review)
         self.worker.smart_report.connect(self._on_smart)
-        self.worker.session_finished.connect(self._on_session_finished)
-        self.worker.session_tick.connect(self._on_session_tick)
         self.worker.start()
         self._refresh()
 
@@ -1305,9 +1233,6 @@ class MainWindow(QMainWindow):
         self.click_delay.setValue(self.settings.autoclick_delay_ms)
         self.click_wait.setValue(self.settings.autoclick_skip_rounds)
         self.click_burst.setValue(self.settings.autoclick_max_clicks)
-        self.signal_rule.setChecked(self.settings.signal_rule_enabled)
-        self.signal_repeat.setValue(self.settings.signal_repeat)
-        self.signal_burst.setValue(self.settings.signal_burst_rounds)
         self.pair_flip.setChecked(self.settings.pair_flip_enabled)
         self.row_signal.setChecked(self.settings.row_signal_enabled)
         self.row_gap.setValue(self.settings.row_signal_gap)
@@ -1353,8 +1278,6 @@ class MainWindow(QMainWindow):
         self._refresh_bot_mode()
         self.prediction_confidence.setValue(round(self.settings.prediction_min_confidence * 100))
         self.review_minutes.setValue(max(1, self.settings.review_window_s // 60))
-        self.session_minutes.setValue(self.settings.session_minutes)
-        self.shutdown_after.setChecked(self.settings.shutdown_after_session)
         self._refresh_toggles()
 
     def _on_status(self, status):
@@ -1362,69 +1285,6 @@ class MainWindow(QMainWindow):
         if status == "STOPPED":
             self.report_status.setText(f"گزارش پایان جلسه آماده است: {PROJECT_ROOT / 'logs' / 'session-report.txt'}")
         self._refresh()
-
-    def _set_badge_urgent(self, urgent: bool) -> None:
-        """نشان تایمر را وقتی کمتر از پنج دقیقه مانده قرمز کن."""
-        if bool(self.session_badge.property("urgent")) == urgent:
-            return
-        self.session_badge.setProperty("urgent", urgent)
-        self.session_badge.style().unpolish(self.session_badge)
-        self.session_badge.style().polish(self.session_badge)
-
-    def _on_session_tick(self, remaining: int, total: int) -> None:
-        """شمارش معکوس جلسه را روی نشان بالای پنجره و نوار داشبورد بنویس."""
-        if total <= 0:
-            self.session_badge.setText("بدون تایمر")
-            self._set_badge_urgent(False)
-            self.session_left.setText("بدون تایمر")
-            self.session_left.setStyleSheet("color:#f5c86b;font-weight:700;font-size:13px;"
-                                            "background:transparent")
-            self.session_progress.setValue(0)
-            self.session_progress.setFormat("بدون محدودیت")
-            return
-        remaining = max(0, int(remaining))
-        hours, rest = divmod(remaining, 3600)
-        minutes, seconds = divmod(rest, 60)
-        clock = (f"{hours:02d}:{minutes:02d}:{seconds:02d}" if hours
-                 else f"{minutes:02d}:{seconds:02d}")
-        elapsed = max(0, total - remaining)
-        percent = int(round(elapsed * 100 / total)) if total else 0
-        urgent = remaining <= 300
-        self.session_badge.setText("زمان باقی‌ماندهٔ جلسه: " + clock)
-        self._set_badge_urgent(urgent)
-        self.session_left.setText("پایان جلسه در " + clock if remaining else "جلسه تمام شد")
-        self.session_left.setStyleSheet(
-            "color:#ff9db0;font-weight:800;font-size:13px;background:transparent" if urgent
-            else "color:#f5c86b;font-weight:700;font-size:13px;background:transparent")
-        self.session_progress.setValue(percent)
-        self.session_progress.setFormat(f"{elapsed // 60} از {total // 60} دقیقه")
-
-    def _set_session_limit(self, minutes: int) -> None:
-        """تایمر جلسه را از داشبورد (بدون رفتن به کالیبراسیون) عوض کن."""
-        self.session_minutes.setValue(minutes)
-        self.apply_settings(session_minutes=int(minutes))
-        if not minutes:
-            self._on_session_tick(0, 0)
-        elif self.worker is None or not self.worker.isRunning():
-            self.session_badge.setText(f"تایمر {minutes} دقیقه — با شروع پایش شمرده می‌شود")
-            self.session_left.setText("آمادهٔ شروع")
-            self.session_progress.setValue(0)
-            self.session_progress.setFormat(f"0 از {minutes} دقیقه")
-
-    def _on_session_finished(self, report_path, shutdown):
-        self.session_badge.setText("جلسه تمام شد")
-        self.session_left.setText("جلسه تمام شد")
-        self.session_left.setStyleSheet("color:#ff9db0;font-weight:800;font-size:13px;"
-                                        "background:transparent")
-        self.session_progress.setValue(100)
-        self.session_progress.setFormat("پایان جلسه")
-        self.report_status.setText(
-            f"جلسه تمام شد — گزارش: {report_path}"
-            + ("  |  ویندوز تا ۶۰ ثانیه دیگر خاموش می‌شود (لغو: shutdown /a)" if shutdown else ""))
-        QMessageBox.information(
-            self, "پایان جلسه",
-            "گزارش پایان جلسه نوشته شد:\n" + report_path
-            + ("\n\nویندوز تا ۶۰ ثانیه دیگر خاموش می‌شود.\nبرای لغو: shutdown /a" if shutdown else ""))
 
     def _on_problem(self, message):
         self.note.setText("خطا/هشدار: " + message)

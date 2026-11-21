@@ -14,8 +14,7 @@ import numpy as np
 from .config import DesktopSettings, PROJECT_ROOT
 from .color_grid import read_grid
 from .forecast import ColorForecaster
-from .signals import (next_dot_row, row_yellow_due, two_yellows_in_a_row,
-                      yellow_green_green_yellow)
+from .signals import next_dot_row, row_yellow_due
 
 _DOWN = 0x0002
 # خروج هوشمند: هدف همیشه بین ۱٫۴۰ و ۱٫۹۰ است؛ هیچ شرطی از ۱٫۹۰ جلوتر باز نمی‌ماند.
@@ -90,8 +89,8 @@ class ClickReport:
     detail: str = ""
 
 
-RULE_LABELS = {"yellow-run": "صف ۷+۳ زرد", "yellow-pair": "جفت زرد",
-               "yellow-burst": "۹ کلیک زرد", "row-signal": "سیگنال سطری",
+RULE_LABELS = {"yellow-run": "صف ۷+۳ زرد",
+               "row-signal": "سیگنال سطری",
                "streak-run": "روند هم‌رنگ ۷+", "value-bet": "ضریب ویژه",
                "pair-flip": "جفت رنگ", "smart": "کلیک هوشمند",
                "smart-play": "ورود هوشمند (مدل)"}
@@ -118,8 +117,6 @@ class AutoClicker:
         self._clicks = 0
         self._armed = 0
         self._waiting = 0
-        self._signal_uses = 0
-        self._yellow_burst_uses = 0
         self._row_uses = 0
         self._row_cell: tuple[int, int] | None = None
         self._streak_color: str | None = None
@@ -127,8 +124,6 @@ class AutoClicker:
         self._streak_clicks = 0
         self._streak_target: str | None = None
         self._flip_color: str | None = None
-        self._pattern_seen = False
-        self._run_seen = False
         self.forecaster = ColorForecaster()
         self._pending_color: str | None = None
         self._smart_play: tuple[str, ...] = ()
@@ -400,18 +395,7 @@ class AutoClicker:
             # a trend that keeps going, so the same colour is bet for ten rounds.
             self._streak_clicks = self.settings.streak_signal_clicks
             self._streak_target = color
-        burst_pending = self._yellow_burst_uses  # armed now? then it starts next round
         reading = self._chart_reading()
-        pattern = self.settings.signal_rule_enabled and two_yellows_in_a_row(reading)
-        if pattern and not self._pattern_seen and self._signal_uses <= 0:
-            # Rising edge only: the same shape still on screen must not keep re-arming.
-            self._signal_uses = self.settings.signal_repeat
-        self._pattern_seen = pattern
-        run_shape = self.settings.signal_rule_enabled and yellow_green_green_yellow(reading)
-        if run_shape and not self._run_seen and self._yellow_burst_uses <= 0:
-            # Yellow-green-green-yellow in one column: yellows are "on the way".
-            self._yellow_burst_uses = self.settings.signal_burst_rounds
-        self._run_seen = run_shape
         row_gap = self.settings.row_signal_gap
         row_due = (self.settings.row_signal_enabled
                    and row_yellow_due(reading, row_gap, self.settings.row_signal_rows,
@@ -428,18 +412,7 @@ class AutoClicker:
         if row_cell is not None:
             self._row_cell = row_cell
         threshold = Decimal(self.settings.autoclick_threshold)
-        follow_click = burst_pending > 0
-        if follow_click:
-            # The yellow-run signal: bet yellow on each of the next N rounds.
-            self._yellow_burst_uses -= 1
-            if self._waiting > 0:
-                self._waiting -= 1
-        signal_click = (not follow_click and self.settings.signal_rule_enabled
-                        and self._signal_uses > 0 and color == "YELLOW")
-        if signal_click:
-            # The two-yellows-in-a-row signal: click now, betting on the next round.
-            self._signal_uses -= 1
-        elif not follow_click and value >= threshold and self._armed <= 0 and self._waiting <= 0:
+        if value >= threshold and self._armed <= 0 and self._waiting <= 0:
             # A yellow arms a run: skip autoclick_skip_rounds rounds, then click the
             # next autoclick_max_clicks rounds whatever they close at. A second
             # yellow inside the run neither restarts the wait nor extends the burst.
@@ -453,19 +426,18 @@ class AutoClicker:
             self._row_uses -= 1
         row_detail = (f"row {row_cell[0]} was yellow {row_gap} columns back"
                       if row_click and row_cell else "")
-        value_color = (None if (signal_click or follow_click or row_click or self._armed > 0)
+        value_color = (None if (row_click or self._armed > 0)
                        else self._value_bet(value))
-        streak_click = (not (signal_click or follow_click or row_click)
+        streak_click = (not row_click
                         and self._armed <= 0 and value_color is None
                         and self._streak_clicks > 0 and self._streak_target is not None)
         if streak_click:
             self._streak_clicks -= 1
-        target_color = ("YELLOW" if (signal_click or follow_click or row_click)
+        target_color = ("YELLOW" if row_click
                         else self._streak_target if streak_click else value_color)
-        rule = ("yellow-burst" if follow_click else "yellow-pair" if signal_click
-                else "row-signal" if row_click else "value-bet" if value_color
+        rule = ("row-signal" if row_click else "value-bet" if value_color
                 else "streak-run" if streak_click else "")
-        if not (signal_click or follow_click or row_click or streak_click):
+        if not (row_click or streak_click):
             if self._waiting > 0 and value_color is None:
                 self._waiting -= 1
                 return ClickReport(False, f"skip: {self._waiting} rounds before the click window",
@@ -518,7 +490,7 @@ class AutoClicker:
         points = [(color, point) for color, point in points if point is not None]
         if not points:
             return ClickReport(False, "target not found", count=self._clicks, remaining=self._armed)
-        gated = (not signal_click and not follow_click and not row_click
+        gated = (not row_click
                  and value_color is None and self._armed <= 0
                  and self.settings.smart_click_enabled)
         if gated:

@@ -79,9 +79,6 @@ class DesktopSettings:
     turnbal_max_streak: int = 3
     turnbal_min_gap: int = 2
     turnbal_emergency_exit: float = 1.40
-    signal_rule_enabled: bool = True
-    signal_repeat: int = 2
-    signal_burst_rounds: int = 9
     pair_flip_enabled: bool = True
     row_signal_enabled: bool = True
     row_signal_gap: int = 4
@@ -95,8 +92,6 @@ class DesktopSettings:
     value_bets: dict[str, str] = field(default_factory=lambda: {
         "1.00": "GREEN", "1.11": "GREEN", "1.99": "GREEN", "2.08": "YELLOW"})
     review_window_s: int = 1800
-    session_minutes: int = 0
-    shutdown_after_session: bool = False
     fixed_bet_amount: str = "10"
     max_attempts: int = 8
     yellow_threshold: str = "10.00"
@@ -209,15 +204,6 @@ class DesktopSettings:
             raise ValueError("smart_play_min_confidence must be a number between 0.2 and 1")
         if type(self.review_window_s) is not int or self.review_window_s < 60:
             raise ValueError("review_window_s must be an integer of at least 60")
-        if (type(self.session_minutes) is not int or self.session_minutes < 0
-                or self.session_minutes > 1440):
-            raise ValueError("session_minutes must be an integer between 0 and 1440")
-        if type(self.shutdown_after_session) is not bool:
-            raise ValueError("shutdown_after_session must be a boolean")
-        if type(self.signal_repeat) is not int or self.signal_repeat < 1:
-            raise ValueError("signal_repeat must be a positive integer")
-        if type(self.signal_burst_rounds) is not int or self.signal_burst_rounds < 1:
-            raise ValueError("signal_burst_rounds must be a positive integer")
         if type(self.row_signal_gap) is not int or self.row_signal_gap < 1:
             raise ValueError("row_signal_gap must be a positive integer")
         if type(self.row_signal_clicks) is not int or self.row_signal_clicks < 1:
@@ -260,11 +246,6 @@ def load_settings(path: Path = SETTINGS_PATH) -> DesktopSettings:
         data["autoclick_delay_ms"] = MAX_CLICK_DELAY_MS
     elif delay > MAX_CLICK_DELAY_MS:
         data["autoclick_delay_ms"] = MAX_CLICK_DELAY_MS
-    if data.get("session_minutes") == 360 and data.get("shutdown_after_session") is True:
-        # The timer and the shutdown were the old defaults; the user stops the
-        # session by hand now, so an old file must not shut the machine down.
-        data["session_minutes"] = 0
-        data["shutdown_after_session"] = False
     if "autoclick_skip_rounds" not in data:
         # Files written for the old "ten clicks right after the yellow" rule must not
         # keep clicking ten rounds; the run is now wait 7, click 3.

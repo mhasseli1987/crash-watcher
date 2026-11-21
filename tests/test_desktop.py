@@ -12,8 +12,7 @@ from crash_watcher.desktop.final_result import (BangDetector, BangRecognizer, Fi
                                                  parse_bang, parse_history_entry)
 from crash_watcher.desktop.forecast import ColorForecaster, Forecast
 from crash_watcher.desktop.color_grid import read_grid
-from crash_watcher.desktop.signals import (row_yellow_due, two_yellows_in_a_row,
-                                            yellow_green_green_yellow)
+from crash_watcher.desktop.signals import row_yellow_due
 from crash_watcher.vision.recognition import RapidOCRReader
 
 @pytest.mark.parametrize("text,value", [("Bang @1.46x", "1.46"), ("Bang@7.50x", "7.50"),
@@ -318,67 +317,10 @@ def test_grid_reader_returns_the_sites_column_major_order():
     assert reading.color_at(0, 0) == "GREEN" and reading.color_at(2, 1) == "YELLOW"
     assert reading.color_at(1, 1) is None
 
-def test_two_yellows_in_a_row_signal():
-    reading = read_grid(_grid_image([["GREEN"], ["YELLOW", "YELLOW"], ["RED"]]))
-    assert reading is not None and two_yellows_in_a_row(reading)
-    separated = read_grid(_grid_image([["YELLOW"], ["GREEN"], ["YELLOW"]]))
-    assert separated is not None and not two_yellows_in_a_row(separated)
-    assert two_yellows_in_a_row(None) is False
-
-def test_signal_clicks_after_each_yellow_up_to_the_repeat_limit(no_detection, monkeypatch):
-    sender = _Sender()
-    clicker = AutoClicker(_clicker(autoclick_threshold="100", signal_repeat=2), sender=sender)
-    monkeypatch.setattr(AutoClicker, "_chart_reading", lambda self: object())
-    monkeypatch.setattr("crash_watcher.desktop.clicker.two_yellows_in_a_row", lambda reading: True)
-    monkeypatch.setattr("crash_watcher.desktop.clicker.yellow_green_green_yellow", lambda reading: False)
-    monkeypatch.setattr("crash_watcher.desktop.clicker.row_yellow_due",
-                        lambda reading, gap=4, rows=4, recent_columns=4: False)
-    assert clicker.fire("a", Decimal("12.00")).clicked
-    assert clicker.fire("b", Decimal("11.00")).clicked
-    third = clicker.fire("c", Decimal("10.50"))
-    assert not third.clicked
-    assert len(sender.calls) == 2
-
-def test_signal_needs_a_rising_edge_to_arm_again(no_detection, monkeypatch):
-    sender = _Sender()
-    clicker = AutoClicker(_clicker(autoclick_threshold="100", signal_repeat=1), sender=sender)
-    pattern = {"value": False}
-    monkeypatch.setattr(AutoClicker, "_chart_reading", lambda self: object())
-    monkeypatch.setattr("crash_watcher.desktop.clicker.yellow_green_green_yellow", lambda reading: False)
-    monkeypatch.setattr("crash_watcher.desktop.clicker.row_yellow_due",
-                        lambda reading, gap=4, rows=4, recent_columns=4: False)
-    monkeypatch.setattr("crash_watcher.desktop.clicker.two_yellows_in_a_row",
-                        lambda reading: pattern["value"])
-    assert not clicker.fire("a", Decimal("12.00")).clicked
-    pattern["value"] = True
-    assert clicker.fire("b", Decimal("12.00")).clicked
-    pattern["value"] = False
-    assert not clicker.fire("c", Decimal("12.00")).clicked
-    pattern["value"] = True
-    assert clicker.fire("d", Decimal("12.00")).clicked
 
 
-def test_yellow_green_green_yellow_shape():
-    reading = read_grid(_grid_image([["YELLOW", "GREEN", "GREEN", "YELLOW"], ["RED"]]))
-    assert reading is not None and yellow_green_green_yellow(reading)
-    wrong = read_grid(_grid_image([["YELLOW", "GREEN", "RED", "YELLOW"]]))
-    assert wrong is not None and not yellow_green_green_yellow(wrong)
-    assert yellow_green_green_yellow(None) is False
 
-def test_signal_burst_clicks_the_next_nine_rounds(no_detection, monkeypatch):
-    sender = _Sender()
-    clicker = AutoClicker(_clicker(autoclick_threshold="100", streak_signal_enabled=False),
-                          sender=sender)
-    monkeypatch.setattr(AutoClicker, "_chart_reading", lambda self: object())
-    monkeypatch.setattr("crash_watcher.desktop.clicker.two_yellows_in_a_row", lambda reading: False)
-    monkeypatch.setattr("crash_watcher.desktop.clicker.yellow_green_green_yellow", lambda reading: True)
-    monkeypatch.setattr("crash_watcher.desktop.clicker.row_yellow_due",
-                        lambda reading, gap=4, rows=4, recent_columns=4: False)
-    assert not clicker.fire("a", Decimal("1.20")).clicked
-    for index in range(9):
-        assert clicker.fire(f"c{index}", Decimal("1.10")).clicked
-    assert not clicker.fire("after", Decimal("1.30")).clicked
-    assert len(sender.calls) == 9
+
 
 def test_pair_flip_clicks_the_opposite_color(no_detection):
     sender = _Sender()
@@ -433,8 +375,6 @@ def test_row_signal_clicks_yellow_on_the_round_that_fills_the_row(no_detection, 
     clicker = AutoClicker(_clicker(autoclick_threshold="100", pair_flip_enabled=False,
                                    bet_point_yellow=(51, 52)), sender=sender)
     monkeypatch.setattr(AutoClicker, "_chart_reading", lambda self: object())
-    monkeypatch.setattr("crash_watcher.desktop.clicker.two_yellows_in_a_row", lambda reading: False)
-    monkeypatch.setattr("crash_watcher.desktop.clicker.yellow_green_green_yellow", lambda reading: False)
     due = {"value": True}
     monkeypatch.setattr("crash_watcher.desktop.clicker.row_yellow_due",
                         lambda reading, gap=4, rows=4, recent_columns=4: due["value"])
@@ -500,26 +440,8 @@ def test_bet_region_splits_its_row_into_three_buttons(no_detection):
     assert clicker._bet_point("GREEN") == (350, 220)
     assert clicker._bet_point("YELLOW") == (516, 220)
 
-def test_session_length_and_shutdown_flag_are_validated():
-    _clicker(session_minutes=0).validate()
-    _clicker(session_minutes=360).validate()
-    for bad in (-1, 1441):
-        with pytest.raises(ValueError):
-            _clicker(session_minutes=bad).validate()
-    with pytest.raises(ValueError):
-        _clicker(shutdown_after_session="yes").validate()
 
-def test_session_settings_round_trip(tmp_path):
-    path = tmp_path / "settings.json"
-    save_settings(DesktopSettings(session_minutes=180, shutdown_after_session=False), path)
-    loaded = load_settings(path)
-    assert loaded.session_minutes == 180 and loaded.shutdown_after_session is False
 
-def test_an_old_timer_and_shutdown_default_is_switched_off_on_load(tmp_path):
-    path = tmp_path / "settings.json"
-    save_settings(DesktopSettings(session_minutes=360, shutdown_after_session=True), path)
-    loaded = load_settings(path)
-    assert loaded.session_minutes == 0 and loaded.shutdown_after_session is False
 
 def test_settings_file_with_removed_keys_still_loads(tmp_path):
     path = tmp_path / "settings.json"
@@ -529,13 +451,6 @@ def test_settings_file_with_removed_keys_still_loads(tmp_path):
     loaded = load_settings(path)
     assert loaded.fixed_bet_amount == "12"
 
-def test_session_seconds_left_counts_down_and_rounds_safely():
-    from crash_watcher.desktop.worker import session_seconds_left
-    assert session_seconds_left(1000.0, 0, now=1000.0) is None
-    assert session_seconds_left(1000.0, 30, now=1000.0) == 30 * 60
-    assert session_seconds_left(1000.0, 30, now=1000.0 + 600) == 20 * 60
-    assert session_seconds_left(1000.0, 30, now=1000.0 + 5000) == 0
-    assert session_seconds_left(1000.0, -5, now=1000.0) is None
 
 def test_value_bets_reject_bad_entries():
     with pytest.raises(ValueError):
