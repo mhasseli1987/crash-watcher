@@ -19,6 +19,8 @@ from .color_grid import read_grid
 from .final_result import BangDetector, BangRecognizer, parse_history_entry
 from .smart_play import SmartPlanner
 from .smart_review import SmartSnapshot, append_log, build_prompt, grid_columns, review
+from .turnbal import TurnbalCalibration, build_prompt as build_turnbal_prompt
+from .turnbal import review as review_turnbal
 
 
 def live_multiplier(reader, image, minimum: float = 0.55):
@@ -78,8 +80,10 @@ class MonitorWorker(QThread):
         if self._clicker is not None:
             self._clicker.update(settings)
         if self._planner is not None:
-            self._planner.update(settings.smart_play_learning_minutes,
-                                settings.smart_play_min_confidence,
+            # در حالت ترنبال آستانهٔ احتمال هر رنگ جدا در کالیبراسیون سنجیده
+            # می‌شود؛ پس آستانهٔ عمومی نباید دوباره جلوی تصمیم را بگیرد.
+            threshold = 0.0 if settings.bot_mode == "turnbal" else settings.smart_play_min_confidence
+            self._planner.update(settings.smart_play_learning_minutes, threshold,
                                 settings.smart_play_two_colors)
 
     def stop(self) -> None:
@@ -95,9 +99,10 @@ class MonitorWorker(QThread):
     def run(self) -> None:
         clicker = self._clicker = AutoClicker(self.settings)
         # دورهٔ یادگیری از همین لحظهٔ شروع پایش شمرده می‌شود.
-        planner = self._planner = SmartPlanner(self.settings.smart_play_learning_minutes,
-                                               self.settings.smart_play_min_confidence,
-                                               self.settings.smart_play_two_colors)
+        planner = self._planner = SmartPlanner(
+            self.settings.smart_play_learning_minutes,
+            0.0 if self.settings.bot_mode == "turnbal" else self.settings.smart_play_min_confidence,
+            self.settings.smart_play_two_colors)
         try:
             if self.settings.tesseract_path:
                 import pytesseract
@@ -266,6 +271,8 @@ class MonitorWorker(QThread):
 
     def _smart_play_active(self) -> bool:
         """ورود هوشمند فقط وقتی معنا دارد که بررسی هوشمند هم روشن باشد."""
+        if self.settings.bot_mode == "turnbal":
+            return bool(self.settings.smart_review_enabled)
         return bool(self.settings.smart_review_enabled and self.settings.smart_play_enabled)
 
     def _start_smart_review(self, current: str) -> None:
@@ -280,24 +287,49 @@ class MonitorWorker(QThread):
 
     def _smart_review_thread(self, snapshot: SmartSnapshot, settings: DesktopSettings) -> None:
         started = perf_counter()
+        turnbal = settings.bot_mode == "turnbal"
+        calibration = TurnbalCalibration.from_settings(settings)
         try:
-            verdict, raw, prompt = review(settings.smart_review_url, settings.smart_review_key,
-                                          settings.smart_review_model, snapshot,
-                                          settings.smart_review_timeout_s,
-                                          settings.autoclick_threshold, settings.smart_review_rules,
-                                          min_confidence=settings.smart_play_min_confidence,
-                                          allow_two=settings.smart_play_two_colors)
+            if turnbal:
+                # تصمیم مدل پیش از دیدنِ آستانه‌های رنگ گرفته و بعد با همان
+                # کالیبراسیون سه‌رنگ تطبیق داده می‌شود.
+                printed = build_turnbal_prompt(snapshot, calibration,
+                                               settings.autoclick_threshold,
+                                               settings.smart_review_rules,
+                                               allow_two=settings.smart_play_two_colors)
+                verdict, raw, prompt = review_turnbal(
+                    settings.smart_review_url, settings.smart_review_key,
+                    settings.smart_review_model, snapshot, calibration,
+                    settings.smart_review_timeout_s, settings.autoclick_threshold,
+                    settings.smart_review_rules,
+                    allow_two=settings.smart_play_two_colors)
+                prompt = prompt or printed
+            else:
+                verdict, raw, prompt = review(settings.smart_review_url, settings.smart_review_key,
+                                              settings.smart_review_model, snapshot,
+                                              settings.smart_review_timeout_s,
+                                              settings.autoclick_threshold, settings.smart_review_rules,
+                                              min_confidence=settings.smart_play_min_confidence,
+                                              allow_two=settings.smart_play_two_colors)
         except Exception as exc:
             self._smart_busy = False
-            append_log(PROJECT_ROOT / "logs" / "smart-review.jsonl",
-                       {"round": snapshot.current, "ok": False, "error": str(exc)})
+            append_log(PROJECT_ROOT / "logs" / ("turnbal-review.jsonl" if turnbal
+                                                 else "smart-review.jsonl"),
+                       {"round": snapshot.current, "ok": False, "mode": settings.bot_mode,
+                        "error": str(exc)})
+            fallback = (build_turnbal_prompt(snapshot, calibration, settings.autoclick_threshold,
+                                             settings.smart_review_rules,
+                                             allow_two=settings.smart_play_two_colors)
+                        if turnbal else
+                        build_prompt(snapshot, settings.autoclick_threshold,
+                                     settings.smart_review_rules,
+                                     min_confidence=settings.smart_play_min_confidence,
+                                     allow_two=settings.smart_play_two_colors))
             self.smart_report.emit({"ok": False, "round": snapshot.current,
+                                    "mode": settings.bot_mode,
                                     "error": str(exc),
                                     **(self._planner.stats() if self._planner else {}),
-                                    "prompt": build_prompt(snapshot, settings.autoclick_threshold,
-                                                           settings.smart_review_rules,
-                                                           min_confidence=settings.smart_play_min_confidence,
-                                                           allow_two=settings.smart_play_two_colors)})
+                                    "prompt": fallback})
             return
         self._smart_busy = False
         elapsed = perf_counter() - started
@@ -305,14 +337,17 @@ class MonitorWorker(QThread):
         if planner is not None:
             # تصمیم برای دست بعد آماده می‌شود، پیش از بسته‌شدن ضریب جاری.
             planner.store(verdict, snapshot.current)
-        append_log(PROJECT_ROOT / "logs" / "smart-review.jsonl",
-                   {"round": snapshot.current, "ok": True, "bet": verdict.bet if verdict else None,
+        append_log(PROJECT_ROOT / "logs" / ("turnbal-review.jsonl" if turnbal
+                                             else "smart-review.jsonl"),
+                   {"round": snapshot.current, "ok": True, "mode": settings.bot_mode,
+                    "bet": verdict.bet if verdict else None,
                     "second": verdict.second if verdict else None,
                     "confidence": verdict.confidence if verdict else None,
                     "reason": verdict.reason if verdict else "", "raw": raw,
                     "phase": planner.phase if planner else None,
                     "seconds": round(elapsed, 2), "model": settings.smart_review_model})
         self.smart_report.emit({"ok": True, "round": snapshot.current, "verdict": verdict,
+                                "mode": settings.bot_mode,
                                 "raw": raw, "prompt": prompt, "seconds": elapsed,
                                 "bets": verdict.bets if verdict else (),
                                 **(planner.stats() if planner else {})})

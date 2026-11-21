@@ -61,6 +61,24 @@ class DesktopSettings:
     smart_play_learning_minutes: int = 30
     smart_play_min_confidence: float = 0.40
     smart_play_two_colors: bool = True
+    # حالت ربات: "classic" (قواعد فعلی) یا "turnbal" (تصمیم هوش مصنوعی + شرط سه‌رنگ)
+    bot_mode: str = "classic"
+    # «حالت ترنبال»: کالیبراسیون شرط سه‌رنگ؛ هر رنگ جدا سنجیده می‌شود
+    turnbal_red_enabled: bool = True
+    turnbal_green_enabled: bool = True
+    turnbal_yellow_enabled: bool = False
+    turnbal_red_min_conf: float = 0.55
+    turnbal_green_min_conf: float = 0.60
+    turnbal_yellow_min_conf: float = 0.75
+    turnbal_red_attempts: int = 4
+    turnbal_green_attempts: int = 6
+    turnbal_yellow_attempts: int = 2
+    turnbal_cashout_min: float = 1.40
+    turnbal_cashout_max: float = 1.90
+    turnbal_min_cycle_win: float = 0.50
+    turnbal_max_streak: int = 3
+    turnbal_min_gap: int = 2
+    turnbal_emergency_exit: float = 1.40
     signal_rule_enabled: bool = True
     signal_repeat: int = 2
     signal_burst_rounds: int = 9
@@ -153,6 +171,35 @@ class DesktopSettings:
             raise ValueError("smart_review_every_rounds must be an integer between 1 and 100")
         if type(self.smart_play_enabled) is not bool or type(self.smart_play_two_colors) is not bool:
             raise ValueError("smart_play_enabled and smart_play_two_colors must be booleans")
+        if self.bot_mode not in ("classic", "turnbal"):
+            raise ValueError("bot_mode must be 'classic' or 'turnbal'")
+        for name in ("turnbal_red_enabled", "turnbal_green_enabled", "turnbal_yellow_enabled"):
+            if type(getattr(self, name)) is not bool:
+                raise ValueError(f"{name} must be a boolean")
+        for name in ("turnbal_red_min_conf", "turnbal_green_min_conf", "turnbal_yellow_min_conf"):
+            value = getattr(self, name)
+            if (not isinstance(value, (int, float)) or isinstance(value, bool)
+                    or not 0.2 <= value <= 1):
+                raise ValueError(f"{name} must be a number between 0.2 and 1")
+        for name in ("turnbal_red_attempts", "turnbal_green_attempts", "turnbal_yellow_attempts"):
+            value = getattr(self, name)
+            if type(value) is not int or not 1 <= value <= 20:
+                raise ValueError(f"{name} must be an integer between 1 and 20")
+        for name in ("turnbal_cashout_min", "turnbal_cashout_max", "turnbal_emergency_exit"):
+            value = getattr(self, name)
+            if (not isinstance(value, (int, float)) or isinstance(value, bool)
+                    or not 1.4 <= value <= 1.9):
+                raise ValueError(f"{name} must be between 1.40 and 1.90")
+        if self.turnbal_cashout_min > self.turnbal_cashout_max:
+            raise ValueError("turnbal_cashout_min must not exceed turnbal_cashout_max")
+        if (not isinstance(self.turnbal_min_cycle_win, (int, float))
+                or isinstance(self.turnbal_min_cycle_win, bool)
+                or not 0 <= self.turnbal_min_cycle_win <= 1):
+            raise ValueError("turnbal_min_cycle_win must be between 0 and 1")
+        if type(self.turnbal_max_streak) is not int or not 1 <= self.turnbal_max_streak <= 50:
+            raise ValueError("turnbal_max_streak must be an integer between 1 and 50")
+        if type(self.turnbal_min_gap) is not int or not 0 <= self.turnbal_min_gap <= 50:
+            raise ValueError("turnbal_min_gap must be an integer between 0 and 50")
         if (type(self.smart_play_learning_minutes) is not int
                 or not 0 <= self.smart_play_learning_minutes <= 600):
             raise ValueError("smart_play_learning_minutes must be an integer between 0 and 600")

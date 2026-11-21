@@ -7,8 +7,9 @@ import csv
 import cv2
 import mss
 import numpy as np
-from PySide6.QtCore import QPoint, QRect, Qt, QThread, Signal
-from PySide6.QtGui import QColor, QFont, QImage, QPainter, QPen, QPixmap
+from PySide6.QtCore import QPoint, QPointF, QRect, QRectF, Qt, QThread, QTimer, Signal
+from PySide6.QtGui import (QColor, QFont, QImage, QLinearGradient, QPainter, QPainterPath,
+                           QPen, QPixmap, QRadialGradient)
 from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog, QFileDialog, QFormLayout,
     QFrame, QGridLayout, QGroupBox, QHBoxLayout, QLabel, QLineEdit, QMainWindow,
     QMessageBox, QPlainTextEdit, QProgressBar, QPushButton, QScrollArea, QSizeGrip, QSizePolicy,
@@ -66,6 +67,8 @@ QTableWidget::item:selected { background:rgba(60,201,148,90); color:#f2fff8; }
 QHeaderView::section { background:qlineargradient(x1:0,y1:0,x2:0,y2:1, stop:0 #235242, stop:1 #17342a); color:#a8f0cd; padding:8px; border:0; border-right:1px solid rgba(110,210,165,45); font-weight:700; }
 QFrame#metric { background:qlineargradient(x1:0,y1:0,x2:1,y2:1, stop:0 rgba(38,80,64,235), stop:1 rgba(16,36,29,235)); border:1px solid rgba(110,210,165,70); border-radius:16px; }
 QFrame#metric:hover { border:1px solid rgba(150,245,200,150); }
+QLabel#modeChip { background:rgba(10,26,20,200); border:1px solid rgba(110,210,165,80); border-radius:11px; color:#bcd8ca; font-weight:700; padding:5px 10px; font-size:12px; }
+QLabel#modeChip[turnbal="true"] { background:qlineargradient(x1:0,y1:0,x2:0,y2:1, stop:0 #f0dfa6, stop:1 #b8912f); color:#231a04; border:1px solid #ffe9b8; }
 QLabel#sessionBadge { background:qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 rgba(120,90,20,225), stop:1 rgba(60,46,10,225)); border:1px solid rgba(245,200,107,160); border-radius:14px; color:#ffe9b5; font-weight:700; padding:9px 16px; }
 QLabel#sessionBadge[urgent="true"] { background:qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 rgba(160,40,60,235), stop:1 rgba(80,16,28,235)); border:1px solid #ff9db0; color:#ffd9e0; }
 QProgressBar#session { background:rgba(10,26,21,220); border:1px solid rgba(110,210,165,60); border-radius:8px; min-height:16px; max-height:16px; text-align:center; color:#d8f5e7; font-size:11px; font-weight:700; }
@@ -82,6 +85,95 @@ QScrollBar:horizontal { background:transparent; height:10px; margin:2px; }
 QScrollBar::handle:horizontal { background:rgba(110,210,165,110); border-radius:5px; min-width:30px; }
 QToolTip { background:#12241e; color:#e9fbf1; border:1px solid #3cc994; border-radius:8px; padding:6px 8px; }
 """
+
+class BellToggle(QWidget):
+    """زنگِ بالای پنجره: کلیک روی آن حالت ربات را کلاسیک ↔ ترنبال می‌کند.
+
+    در حالت کلاسیک نقره‌ای و ساکن است؛ در ترنبال طلایی می‌شود، هاله می‌گیرد
+    و آرام تاب می‌خورد تا حالت فعال از یک نگاه معلوم باشد.
+    """
+    toggled = Signal()
+
+    def __init__(self, on: bool = False, parent=None) -> None:
+        super().__init__(parent)
+        self._on = bool(on)
+        self._angle = 0.0
+        self._step = 1.1
+        self.setFixedSize(92, 92)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setToolTip("کلیک: تغییر حالت ربات بین کلاسیک و ترنبال")
+        self._timer = QTimer(self)
+        self._timer.timeout.connect(self._swing)
+        self._timer.start(45)
+
+    def is_on(self) -> bool:
+        return self._on
+
+    def set_on(self, on: bool) -> None:
+        self._on = bool(on)
+        self.update()
+
+    def _swing(self) -> None:
+        if not self._on:
+            if abs(self._angle) > 0.2:
+                self._angle *= 0.55
+                self.update()
+            elif self._angle:
+                self._angle = 0.0
+                self.update()
+            return
+        self._angle += self._step
+        if abs(self._angle) >= 6.0:
+            self._step = -self._step
+        self.update()
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.toggled.emit()
+        super().mousePressEvent(event)
+
+    def paintEvent(self, _):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        width, height = self.width(), self.height()
+        if self._on:
+            glow = QRadialGradient(QPointF(width / 2, height * 0.58), width * 0.52)
+            glow.setColorAt(0.0, QColor(255, 218, 140, 125))
+            glow.setColorAt(0.55, QColor(255, 194, 94, 45))
+            glow.setColorAt(1.0, QColor(255, 194, 94, 0))
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(glow)
+            painter.drawEllipse(int(width * 0.05), int(height * 0.14),
+                                int(width * 0.90), int(height * 0.76))
+        painter.save()
+        painter.translate(width / 2, 10)
+        painter.rotate(self._angle)
+        painter.translate(-width / 2, -10)
+        base = QColor("#e9d9a8" if self._on else "#b7b5b4")
+        gradient = QLinearGradient(0, height * 0.18, 0, height * 0.82)
+        gradient.setColorAt(0.0, base.lighter(120))
+        gradient.setColorAt(0.55, base)
+        gradient.setColorAt(1.0, base.darker(175))
+        left, right = width * 0.27, width * 0.73
+        top, hip, skirt = height * 0.20, height * 0.52, height * 0.66
+        path = QPainterPath()
+        path.moveTo(left, hip)
+        path.cubicTo(left, top + height * 0.04, width * 0.37, top, width / 2, top)
+        path.cubicTo(width * 0.63, top, right, top + height * 0.04, right, hip)
+        path.quadTo(right, skirt, width * 0.79, skirt + height * 0.05)
+        path.lineTo(width * 0.21, skirt + height * 0.05)
+        path.quadTo(left, skirt, left, hip)
+        path.closeSubpath()
+        painter.setPen(QPen(QColor(255, 255, 255, 80), 1))
+        painter.setBrush(gradient)
+        painter.drawPath(path)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(base.darker(140))
+        painter.drawRoundedRect(QRectF(width / 2 - 5, top - 9, 10, 10), 4, 4)
+        painter.setBrush(QColor("#7a6a44") if self._on else QColor("#5f5b56"))
+        painter.drawEllipse(QPointF(width / 2, skirt + height * 0.115), 5.0, 5.0)
+        painter.restore()
+
 
 class RegionOverlay(QDialog):
     """Drag a rectangle on a screenshot of the chosen display.
@@ -231,6 +323,17 @@ class MainWindow(QMainWindow):
         self.session_badge.setWordWrap(True)
         self.session_badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.session_badge.setToolTip("زمان باقی‌ماندهٔ جلسه؛ از دکمه‌های زیر داشبورد قابل تغییر است")
+        mode_column = QVBoxLayout()
+        mode_column.setSpacing(4)
+        self.bell = BellToggle(self.settings.bot_mode == "turnbal")
+        self.bell.toggled.connect(self.toggle_bot_mode)
+        self.mode_chip = QLabel("حالت: کلاسیک")
+        self.mode_chip.setObjectName("modeChip")
+        self.mode_chip.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.mode_chip.setToolTip("کلیک روی زنگ: تغییر حالت کلاسیک ↔ ترنبال")
+        mode_column.addWidget(self.bell, 0, Qt.AlignmentFlag.AlignHCenter)
+        mode_column.addWidget(self.mode_chip)
+        header.addLayout(mode_column)
         header.addWidget(self.session_badge, 0, Qt.AlignmentFlag.AlignTop)
         outer.addLayout(header)
         toggles = QHBoxLayout()
@@ -254,6 +357,7 @@ class MainWindow(QMainWindow):
         self._build_calibration()
         self._build_history()
         self._build_smart_review()
+        self._build_turnbal()
         grip_row = QHBoxLayout()
         grip = QSizeGrip(root)
         grip.setFixedSize(18, 18)
@@ -576,8 +680,9 @@ class MainWindow(QMainWindow):
         form = QFormLayout()
         self.smart_url = QLineEdit(self.settings.smart_review_url or DEFAULT_BASE_URL)
         self.smart_url.setPlaceholderText(DEFAULT_BASE_URL)
-        self.smart_url.setToolTip("آدرس سرور محلی FreeLLMAPI؛ مثلاً http://127.0.0.1:31415/v1")
-        form.addRow("آدرس FreeLLMAPI", self.smart_url)
+        self.smart_url.setToolTip("آدرس هر پرووایدر سازگار با OpenAI — FreeLLMAPI، 9router، "
+                                  "OmniRouter یا هر API دیگری؛ مثلاً http://127.0.0.1:31415/v1")
+        form.addRow("Custom Provider", self.smart_url)
         self.smart_key = QLineEdit(self.settings.smart_review_key)
         self.smart_key.setEchoMode(QLineEdit.EchoMode.Password)
         self.smart_key.setPlaceholderText("کلید یکپارچهٔ داشبورد FreeLLMAPI")
@@ -643,6 +748,154 @@ class MainWindow(QMainWindow):
         layout.addStretch()
         self.tabs.addTab(self._scrollable(page), "بررسی هوشمند")
         self.tabs.setTabToolTip(3, "بررسی هوشمند ضریب‌ها — اتصال به FreeLLMAPI")
+
+    def _build_turnbal(self):
+        """تب ترنبال: تصمیم هوش مصنوعی و کالیبراسیون شرط سه‌رنگ."""
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setSpacing(12)
+        self.turnbal_status = QLabel("این تب فقط در حالت ترنبال اثر دارد.")
+        self.turnbal_status.setWordWrap(True)
+        self.turnbal_status.setStyleSheet("color:#c7d0dc;")
+        layout.addWidget(self.turnbal_status)
+
+        ai_group = QGroupBox("بررسی هوشمند ترنبال")
+        ai_layout = QVBoxLayout(ai_group)
+        ai_layout.setSpacing(8)
+        hint = QLabel("مدل زبانی ضریب‌ها، رنگ‌ها و شبکهٔ نمودار را تحلیل می‌کند و برای دست بعد "
+                      "قرمز، سبز یا زرد پیشنهاد می‌دهد؛ پیشنهاد پیش از کلیک با کالیبراسیون "
+                      "سه‌رنگ پایین تطبیق داده می‌شود.")
+        hint.setWordWrap(True)
+        hint.setStyleSheet("color:#9fc4b1;")
+        ai_layout.addWidget(hint)
+        self.turnbal_ai = QCheckBox()
+        self.turnbal_ai.setChecked(self.settings.smart_review_enabled)
+        self.turnbal_ai.toggled.connect(self._toggle_smart_review)
+        ai_layout.addWidget(self.turnbal_ai)
+        self.turnbal_play = QCheckBox()
+        self.turnbal_play.setChecked(self.settings.smart_play_enabled)
+        self.turnbal_play.setToolTip("در حالت ترنبال، پس از دورهٔ یادگیری فقط تصمیم مدل شرط می‌بندد")
+        self.turnbal_play.toggled.connect(self._toggle_smart_play)
+        ai_layout.addWidget(self.turnbal_play)
+        self.turnbal_ai_status = QLabel("دورهٔ یادگیری از لحظهٔ شروع پایش شمرده می‌شود.")
+        self.turnbal_ai_status.setWordWrap(True)
+        self.turnbal_ai_status.setStyleSheet("color:#8ff0c0;")
+        ai_layout.addWidget(self.turnbal_ai_status)
+        provider = QLabel("آدرس، کلید و مدل از تب «بررسی هوشمند» (برچسب Custom Provider) خوانده "
+                          "می‌شود؛ هر API سازگار با OpenAI کار می‌کند: FreeLLMAPI، 9router، "
+                          "OmniRouter یا هر پرووایدر دیگر.")
+        provider.setWordWrap(True)
+        provider.setStyleSheet("color:#7fa694;font-size:12px")
+        ai_layout.addWidget(provider)
+        layout.addWidget(ai_group)
+
+        calib_group = QGroupBox("کالیبراسیون شرط سه‌رنگ")
+        grid = QGridLayout(calib_group)
+        grid.setHorizontalSpacing(10)
+        grid.setVerticalSpacing(8)
+        for column, text in enumerate(("رنگ", "فعال", "بازهٔ ضریب", "حداقل احتمال مدل",
+                                        "حداکثر تلاش")):
+            label = QLabel(text)
+            label.setStyleSheet("color:#8ff0c0;font-weight:700;")
+            grid.addWidget(label, 0, column)
+        rows = (("red", "قرمز", "#e05a5a", "کمتر از آستانهٔ قرمز"),
+                ("green", "سبز", "#2ecc71", "از آستانهٔ قرمز تا زرد"),
+                ("yellow", "زرد (مون)", "#f0ca52", "آستانهٔ زرد و بالاتر"))
+        for row, (key, name, color, caption) in enumerate(rows, 1):
+            chip = QLabel(name)
+            chip.setStyleSheet(f"color:{color};font-weight:800;")
+            grid.addWidget(chip, row, 0)
+            check = QCheckBox()
+            check.setChecked(getattr(self.settings, f"turnbal_{key}_enabled"))
+            setattr(self, f"tb_{key}_on", check)
+            grid.addWidget(check, row, 1)
+            span = QLabel(caption)
+            span.setStyleSheet("color:#9fc4b1;font-size:12px")
+            grid.addWidget(span, row, 2)
+            conf = QSpinBox()
+            conf.setRange(20, 100)
+            conf.setSuffix(" %")
+            conf.setValue(round(getattr(self.settings, f"turnbal_{key}_min_conf") * 100))
+            setattr(self, f"tb_{key}_conf", conf)
+            grid.addWidget(conf, row, 3)
+            tries = QSpinBox()
+            tries.setRange(1, 20)
+            tries.setValue(getattr(self.settings, f"turnbal_{key}_attempts"))
+            setattr(self, f"tb_{key}_tries", tries)
+            grid.addWidget(tries, row, 4)
+        layout.addWidget(calib_group)
+
+        risk_group = QGroupBox("کش‌اوت و ریسک")
+        risk_form = QFormLayout(risk_group)
+        self.tb_cashout_min = QDoubleSpinBox()
+        self.tb_cashout_min.setRange(1.40, 1.90)
+        self.tb_cashout_min.setSingleStep(0.05)
+        self.tb_cashout_min.setDecimals(2)
+        self.tb_cashout_min.setValue(self.settings.turnbal_cashout_min)
+        risk_form.addRow("حداقل کش‌اوت", self.tb_cashout_min)
+        self.tb_cashout_max = QDoubleSpinBox()
+        self.tb_cashout_max.setRange(1.40, 1.90)
+        self.tb_cashout_max.setSingleStep(0.05)
+        self.tb_cashout_max.setDecimals(2)
+        self.tb_cashout_max.setValue(self.settings.turnbal_cashout_max)
+        risk_form.addRow("حداکثر کش‌اوت", self.tb_cashout_max)
+        self.tb_emergency = QDoubleSpinBox()
+        self.tb_emergency.setRange(1.40, 1.90)
+        self.tb_emergency.setSingleStep(0.05)
+        self.tb_emergency.setDecimals(2)
+        self.tb_emergency.setValue(self.settings.turnbal_emergency_exit)
+        risk_form.addRow("خروج اضطراری", self.tb_emergency)
+        self.tb_cycle_win = QSpinBox()
+        self.tb_cycle_win.setRange(0, 100)
+        self.tb_cycle_win.setSuffix(" %")
+        self.tb_cycle_win.setValue(round(self.settings.turnbal_min_cycle_win * 100))
+        risk_form.addRow("حداقل برد چرخه برای بازی", self.tb_cycle_win)
+        self.tb_streak = QSpinBox()
+        self.tb_streak.setRange(1, 50)
+        self.tb_streak.setSuffix(" دست")
+        self.tb_streak.setValue(self.settings.turnbal_max_streak)
+        risk_form.addRow("سقف دست پشت‌سرهم", self.tb_streak)
+        self.tb_gap = QSpinBox()
+        self.tb_gap.setRange(0, 50)
+        self.tb_gap.setSuffix(" دست")
+        self.tb_gap.setValue(self.settings.turnbal_min_gap)
+        risk_form.addRow("حداقل فاصلهٔ دو شرط", self.tb_gap)
+        layout.addWidget(risk_group)
+
+        buttons = QHBoxLayout()
+        save_button = QPushButton("ذخیره")
+        save_button.clicked.connect(self.save_ui_settings)
+        defaults_button = QPushButton("بازگشت به پیش‌فرض‌ها")
+        defaults_button.setObjectName("reset")
+        defaults_button.clicked.connect(self.reset_turnbal_defaults)
+        buttons.addWidget(save_button)
+        buttons.addWidget(defaults_button)
+        buttons.addStretch()
+        layout.addLayout(buttons)
+        note = QLabel("در حالت کلاسیک همین تنظیمات ذخیره می‌مانند ولی اثر ندارند؛ کلیک‌ها همان "
+                      "قواعد فعلی ربات را دنبال می‌کنند. تصمیم‌های ترنبال در "
+                      "logs/turnbal-review.jsonl ثبت می‌شوند.")
+        note.setWordWrap(True)
+        note.setStyleSheet("color:#aeb8c5")
+        layout.addWidget(note)
+        layout.addStretch()
+        self.tabs.addTab(self._scrollable(page), "ترنبال")
+        self.tabs.setTabToolTip(4, "ترنبال: تصمیم هوش مصنوعی + کالیبراسیون شرط سه‌رنگ")
+
+    def reset_turnbal_defaults(self):
+        """کالیبراسیون سه‌رنگ را به مقدارهای پیش‌فرض برگردان و ذخیره کن."""
+        defaults = DesktopSettings()
+        for key in ("red", "green", "yellow"):
+            getattr(self, f"tb_{key}_on").setChecked(getattr(defaults, f"turnbal_{key}_enabled"))
+            getattr(self, f"tb_{key}_conf").setValue(round(getattr(defaults, f"turnbal_{key}_min_conf") * 100))
+            getattr(self, f"tb_{key}_tries").setValue(getattr(defaults, f"turnbal_{key}_attempts"))
+        self.tb_cashout_min.setValue(defaults.turnbal_cashout_min)
+        self.tb_cashout_max.setValue(defaults.turnbal_cashout_max)
+        self.tb_emergency.setValue(defaults.turnbal_emergency_exit)
+        self.tb_cycle_win.setValue(round(defaults.turnbal_min_cycle_win * 100))
+        self.tb_streak.setValue(defaults.turnbal_max_streak)
+        self.tb_gap.setValue(defaults.turnbal_min_gap)
+        self.save_ui_settings()
 
     def _build_history(self):
         page = QWidget()
@@ -720,6 +973,22 @@ class MainWindow(QMainWindow):
                        smart_play_learning_minutes=self.smart_learning.value(),
                        smart_play_min_confidence=self.smart_min_conf.value() / 100,
                        smart_play_two_colors=self.smart_two.isChecked(),
+                       bot_mode=self.settings.bot_mode,
+                       turnbal_red_enabled=self.tb_red_on.isChecked(),
+                       turnbal_green_enabled=self.tb_green_on.isChecked(),
+                       turnbal_yellow_enabled=self.tb_yellow_on.isChecked(),
+                       turnbal_red_min_conf=self.tb_red_conf.value() / 100,
+                       turnbal_green_min_conf=self.tb_green_conf.value() / 100,
+                       turnbal_yellow_min_conf=self.tb_yellow_conf.value() / 100,
+                       turnbal_red_attempts=self.tb_red_tries.value(),
+                       turnbal_green_attempts=self.tb_green_tries.value(),
+                       turnbal_yellow_attempts=self.tb_yellow_tries.value(),
+                       turnbal_cashout_min=round(self.tb_cashout_min.value(), 2),
+                       turnbal_cashout_max=round(self.tb_cashout_max.value(), 2),
+                       turnbal_emergency_exit=round(self.tb_emergency.value(), 2),
+                       turnbal_min_cycle_win=self.tb_cycle_win.value() / 100,
+                       turnbal_max_streak=self.tb_streak.value(),
+                       turnbal_min_gap=self.tb_gap.value(),
                        review_window_s=self.review_minutes.value() * 60,
                        session_minutes=self.session_minutes.value(),
                        shutdown_after_session=self.shutdown_after.isChecked())
@@ -738,6 +1007,7 @@ class MainWindow(QMainWindow):
                                   else "بررسی هوشمند ضریب‌ها: خاموش")
         color = "#6fe3ac" if on else "#95a5a6"
         self.smart_enabled.setStyleSheet(f"QCheckBox {{ color: {color}; font-weight: bold; }}")
+        self._refresh_turnbal_labels()
 
     def _refresh_smart_play_label(self) -> None:
         """وضعیت روشن/خاموش «ورود هوشمند به بازی» را واضح نشان بده."""
@@ -746,6 +1016,7 @@ class MainWindow(QMainWindow):
                                else "ورود هوشمند به بازی: خاموش")
         color = "#6fe3ac" if on else "#95a5a6"
         self.smart_play.setStyleSheet(f"QCheckBox {{ color: {color}; font-weight: bold; }}")
+        self._refresh_turnbal_labels()
 
     def _toggle_smart_play(self, on: bool) -> None:
         self._refresh_smart_play_label()
@@ -793,7 +1064,7 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             QMessageBox.warning(self, "آدرس نامعتبر", str(exc))
             return
-        self.smart_probe_status.setText("در حال اتصال به FreeLLMAPI…")
+        self.smart_probe_status.setText("در حال اتصال به پرووایدر…")
         self.smart_probe = SmartProbeWorker(self.smart_url.text(), self.smart_key.text(),
                                             min(15, self.smart_timeout.value()))
         self.smart_probe.done.connect(self._smart_probe_done)
@@ -1064,6 +1335,22 @@ class MainWindow(QMainWindow):
         self.smart_learning.setValue(self.settings.smart_play_learning_minutes)
         self.smart_min_conf.setValue(round(self.settings.smart_play_min_confidence * 100))
         self.smart_two.setChecked(self.settings.smart_play_two_colors)
+        self.tb_red_on.setChecked(self.settings.turnbal_red_enabled)
+        self.tb_green_on.setChecked(self.settings.turnbal_green_enabled)
+        self.tb_yellow_on.setChecked(self.settings.turnbal_yellow_enabled)
+        self.tb_red_conf.setValue(round(self.settings.turnbal_red_min_conf * 100))
+        self.tb_green_conf.setValue(round(self.settings.turnbal_green_min_conf * 100))
+        self.tb_yellow_conf.setValue(round(self.settings.turnbal_yellow_min_conf * 100))
+        self.tb_red_tries.setValue(self.settings.turnbal_red_attempts)
+        self.tb_green_tries.setValue(self.settings.turnbal_green_attempts)
+        self.tb_yellow_tries.setValue(self.settings.turnbal_yellow_attempts)
+        self.tb_cashout_min.setValue(self.settings.turnbal_cashout_min)
+        self.tb_cashout_max.setValue(self.settings.turnbal_cashout_max)
+        self.tb_emergency.setValue(self.settings.turnbal_emergency_exit)
+        self.tb_cycle_win.setValue(round(self.settings.turnbal_min_cycle_win * 100))
+        self.tb_streak.setValue(self.settings.turnbal_max_streak)
+        self.tb_gap.setValue(self.settings.turnbal_min_gap)
+        self._refresh_bot_mode()
         self.prediction_confidence.setValue(round(self.settings.prediction_min_confidence * 100))
         self.review_minutes.setValue(max(1, self.settings.review_window_s // 60))
         self.session_minutes.setValue(self.settings.session_minutes)
@@ -1239,6 +1526,7 @@ class MainWindow(QMainWindow):
         self.autoclick_button.setToolTip("کلیک خودکار را روشن یا خاموش می‌کند")
         self.autoclick_button.setStyleSheet(self._toggle_style(on))
         self.setWindowTitle("Crash Watcher · REAL" if real else "Crash Watcher · SIMULATED")
+        self._refresh_bot_mode()
 
     def apply_settings(self, **changes):
         """Save a header-toggle change and push it into a running monitor."""
@@ -1262,7 +1550,49 @@ class MainWindow(QMainWindow):
         self._refresh_smart_label()
         self._refresh_smart_play_label()
         self._refresh_toggles()
+        self._refresh_bot_mode()
         self._refresh()
+
+    def toggle_bot_mode(self):
+        """کلیک روی زنگ: کلاسیک ↔ ترنبال؛ انتخاب در settings.json می‌ماند."""
+        new_mode = "classic" if self.settings.bot_mode == "turnbal" else "turnbal"
+        self.apply_settings(bot_mode=new_mode)
+        self._refresh_bot_mode()
+
+    def _refresh_bot_mode(self):
+        """زنگ، برچسب حالت و متن راهنمای تب ترنبال را با حالت فعلی همگام کن."""
+        turnbal = self.settings.bot_mode == "turnbal"
+        if hasattr(self, "bell"):
+            self.bell.set_on(turnbal)
+            self.mode_chip.setText("حالت: ترنبال" if turnbal else "حالت: کلاسیک")
+            self.mode_chip.setProperty("turnbal", turnbal)
+            self.mode_chip.style().unpolish(self.mode_chip)
+            self.mode_chip.style().polish(self.mode_chip)
+        if hasattr(self, "turnbal_status"):
+            self.turnbal_status.setText(
+                "حالت ترنبال فعال است: مدل رنگ دست بعد را تحلیل می‌کند و ربات فقط "
+                "رنگ‌های مجاز کالیبراسیون را با همان احتمالی که مدل داده شرط می‌بندد."
+                if turnbal else
+                "حالت کلاسیک فعال است: ربات با قواعد خودش کار می‌کند؛ این تب برای تنظیم "
+                "کالیبراسیون ترنبال است و در حالت کلاسیک اثری ندارد.")
+        self._refresh_turnbal_labels()
+
+    def _refresh_turnbal_labels(self):
+        """برچسب‌های روشن/خاموش تب ترنبال را با دو کلید بررسی هوشمند همگام کن."""
+        if not hasattr(self, "turnbal_ai"):
+            return
+        for box, source, on_text, off_text in (
+                (self.turnbal_ai, self.smart_enabled, "تحلیل با هوش مصنوعی: روشن",
+                 "تحلیل با هوش مصنوعی: خاموش"),
+                (self.turnbal_play, self.smart_play, "ورود خودکار به بازی: روشن",
+                 "ورود خودکار به بازی: خاموش")):
+            on = source.isChecked()
+            box.blockSignals(True)
+            box.setChecked(on)
+            box.blockSignals(False)
+            box.setText(on_text if on else off_text)
+            box.setStyleSheet("QCheckBox { color: %s; font-weight: bold; }"
+                              % ("#6fe3ac" if on else "#95a5a6"))
 
     def toggle_mode(self):
         self.apply_settings(autoclick_dry_run=not self.settings.autoclick_dry_run)
@@ -1302,6 +1632,10 @@ class MainWindow(QMainWindow):
                               f"{self.settings.autoclick_delay_ms} میلی‌ثانیه انجام می‌شود")
         else:
             self.note.setText("کلیک خودکار خاموش است؛ هیچ کلیکی روی بازی انجام نمی‌شود.")
+        if self.settings.bot_mode == "turnbal":
+            self.note.setText("حالت ترنبال: مدل رنگ دست بعد را تحلیل می‌کند و ربات فقط "
+                              "داخل کالیبراسیون سه‌رنگ شرط می‌بندد؛ تصمیم‌ها در "
+                              "logs/turnbal-review.jsonl ثبت می‌شوند.")
 
     def _add_history(self, row):
         self.history.append(row)
