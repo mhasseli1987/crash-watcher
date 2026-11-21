@@ -173,3 +173,48 @@ def test_smart_cashout_target_stays_between_140_and_190(tmp_path):
     clicker.set_smart_play(("RED",), 3.5)
     clicker.fire("2", Decimal("1.05"))
     assert clicker._cashout_target == Decimal("1.90")
+
+
+def test_cashout_never_clicks_on_the_final_bang_screen(tmp_path):
+    """خوانش دیرِ صفحهٔ پایان نباید روی دکمهٔ شرط کلیک کند (شرط تازه باز می‌شد)."""
+    sent = []
+    clicker = _clicker(tmp_path, sent, cashout_enabled=True)
+    clicker.set_smart_play(("RED",), 1.55)
+    clicker.fire("7", Decimal("2.10"))
+    assert clicker.wants_cashout()
+    clicker.tick(Decimal("1.42"))
+    clicker.tick(Decimal("5.71"), ended=True)  # Bang @ 5.71
+    assert sent == [(10, 20)]  # فقط کلیک ثبت شرط
+    assert not clicker.wants_cashout()
+    clicker.tick(Decimal("5.71"))
+    clicker.tick(Decimal("5.90"))
+    assert sent == [(10, 20)]
+
+
+def test_cashout_ignores_a_late_bang_number_even_without_the_ended_flag(tmp_path):
+    """جهش بزرگ بین دو نمونه عدد زنده نیست؛ پنجرهٔ خروج بسته می‌شود."""
+    sent = []
+    clicker = _clicker(tmp_path, sent, cashout_enabled=True)
+    clicker.set_smart_play(("RED",), 1.50)
+    clicker.fire("3", Decimal("1.05"))
+    clicker.tick(Decimal("1.45"))
+    clicker.tick(Decimal("5.71"))
+    assert sent == [(10, 20)]
+    assert not clicker.wants_cashout()
+    clicker.tick(Decimal("1.02"))  # دست تازه شروع شده
+    clicker.tick(Decimal("1.55"))
+    assert sent == [(10, 20)]
+
+
+def test_cashout_needs_a_rising_live_number_not_a_repeated_one(tmp_path):
+    sent = []
+    clicker = _clicker(tmp_path, sent, cashout_enabled=True)
+    clicker.set_smart_play(("RED",), 1.50)
+    clicker.fire("4", Decimal("1.05"))
+    clicker.tick(Decimal("1.62"))  # اولین خوانش بالای هدف؛ هنوز بالا رفتن ثابت نشده
+    assert sent == [(10, 20)]
+    clicker.tick(Decimal("1.62"))  # عدد ثابت: ضریب زندهٔ در حال بالا رفتن نیست
+    assert sent == [(10, 20)]
+    clicker.tick(Decimal("1.70"))
+    assert sent == [(10, 20), (10, 20)]
+    assert not clicker.wants_cashout()

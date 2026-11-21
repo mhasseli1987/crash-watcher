@@ -21,6 +21,9 @@ _DOWN = 0x0002
 # خروج هوشمند: هدف همیشه بین ۱٫۴۰ و ۱٫۹۰ است؛ هیچ شرطی از ۱٫۹۰ جلوتر باز نمی‌ماند.
 CASHOUT_MIN_TARGET = Decimal("1.40")
 CASHOUT_MAX_TARGET = Decimal("1.90")
+# ضریب زندهٔ واقعی بین دو نمونهٔ پشت‌سرهم حداکثر دو برابر می‌شود؛ جهش بزرگ‌تر
+# عدد ثابتِ پایان دست (Bang) است که دیر خوانده شده.
+CASHOUT_MAX_STEP = Decimal("2.00")
 _UP = 0x0004
 try:
     _user32 = ctypes.windll.user32
@@ -562,15 +565,22 @@ class AutoClicker:
         return bool(self.settings.cashout_enabled and self._cashout_points
                     and self._cashout_target is not None)
 
-    def tick(self, live=None) -> None:
+    def tick(self, live=None, ended: bool = False) -> None:
         """کش‌اوت هوشمند: ضریب جاری که به هدفِ مدل رسید، روی همان دکمهٔ شرط کلیک کن.
 
-        `live` همان خوانش OCR ناحیهٔ ۲ در این لحظه است. کلیک فقط وقتی انجام
-        می‌شود که ضریب واقعاً در حال بالارفتن باشد؛ صفحهٔ پایان (ضریب ثابت)
-        یا شمارش معکوس هرگز باعث کلیک نمی‌شود.
+        `live` همان خوانش OCR ناحیهٔ ۲ در این لحظه است و `ended` یعنی همین حالا
+        صفحهٔ پایان دست (Bang) دیده شد. کلیک فقط وقتی انجام می‌شود که عدد واقعاً
+        ضریب زندهٔ در حال بالارفتن باشد؛ عدد ثابتِ پایان دست هرگز کلیک نمی‌شود،
+        چون آن کلیک به‌جای خروج، یک شرط تازه باز می‌کند.
         """
         if not (self.settings.cashout_enabled and self._cashout_points
-                and self._cashout_target is not None) or live is None:
+                and self._cashout_target is not None):
+            return
+        if ended:
+            # دست پیش از رسیدن به هدف بسته شد: پنجرهٔ خروجِ این شرط تمام است.
+            self._close_cashout("cashout skipped: round ended before the target")
+            return
+        if live is None:
             return
         try:
             value = live if isinstance(live, Decimal) else Decimal(str(live))
@@ -580,26 +590,44 @@ class AutoClicker:
         if prev is not None and value < prev * Decimal("0.8"):
             # افت بزرگ یعنی صفحهٔ پایان/شمارش معکوس گذشته و پرواز تازه از ۱.۰۰ شروع شده.
             prev = None
+        if prev is not None and value > prev * CASHOUT_MAX_STEP:
+            # جهش بزرگ بین دو نمونهٔ پشت‌سرهم عدد زنده نیست؛ عدد ثابتِ Bang است
+            # که دیر رسیده. کلیک روی دکمهٔ شرط اینجا شرط تازه باز می‌کرد.
+            self._close_cashout(f"cashout skipped: {value} is not a live reading")
+            return
         self._cashout_prev = value
         if prev is None or value <= prev or value < self._cashout_target:
             return
         target, self._cashout_target = self._cashout_target, None
         points, self._cashout_points = self._cashout_points, []
+        self._cashout_prev = None
         ok = True
         for point in points:
             ok = self.sender(point[0], point[1],
                              restore=self.settings.autoclick_restore_cursor) and ok
+        self._log_cashout(value, ok,
+                          f"smart cashout target {target} on the bet button", points)
+
+    def _log_cashout(self, value, clicked: bool, reason: str, points=()) -> None:
+        """ثبت هر تصمیم خروج؛ لاگ هرگز نباید تصمیم کلیک را خراب کند."""
         try:
             self.log_path.parent.mkdir(parents=True, exist_ok=True)
             entry = {"time": datetime.now().isoformat(timespec="seconds"),
-                     "round": self._last_id, "value": str(value), "clicked": bool(ok),
-                     "reason": f"smart cashout target {target} on the bet button",
+                     "round": self._last_id, "value": str(value), "clicked": bool(clicked),
+                     "reason": reason,
                      "points": [list(point) for point in points],
                      "clicks": self._clicks}
             with self.log_path.open("a", encoding="utf-8") as file:
                 file.write(json.dumps(entry, ensure_ascii=False) + "\n")
         except Exception:
-            pass  # logging must never break a click decision
+            pass
+
+    def _close_cashout(self, reason: str, value="") -> None:
+        """پنجرهٔ خروج را بدون کلیک ببند تا شرط تازه‌ای باز نشود."""
+        target, self._cashout_target = self._cashout_target, None
+        points, self._cashout_points = self._cashout_points, []
+        self._cashout_prev = None
+        self._log_cashout(value or target, False, reason, points)
 
     def close(self) -> None:
         self._write_session()

@@ -217,11 +217,12 @@ class MonitorWorker(QThread):
                                     self._start_smart_review(str(completed.multiplier))
                             if clicker.wants_cashout():
                                 # ضریب زندهٔ ناحیهٔ ۲ (عدد در حال بالا رفتن) را جدا
-                                # بخوان؛ خوانش Bang فقط عدد پایان دست را می‌دهد و
-                                # باعث می‌شد خروج پس از پایان دست انجام شود.
-                                live = live_multiplier(reader, frame.image)
-                                if live is not None:
-                                    clicker.tick(live)
+                                # بخوان؛ خوانش Bang فقط عدد پایان دست را می‌دهد.
+                                # اگر همین فریم Bang بود، دست تمام شده و کلیک روی
+                                # دکمهٔ شرط فقط یک شرط تازه باز می‌کند: هرگز نزن.
+                                ended = reading.value is not None
+                                live = None if ended else live_multiplier(reader, frame.image)
+                                clicker.tick(live, ended=ended)
                             self.preview.emit(frame.image.copy())
                         except Exception as exc:
                             self.detector.reset()
