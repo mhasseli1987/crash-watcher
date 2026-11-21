@@ -637,7 +637,8 @@ class MainWindow(QMainWindow):
         for title, target in (("ناحیه ۱ — تاریخچه", "history"),
                               ("ناحیه ۲ — ضریب فعلی", "result"),
                               ("ناحیه ۳ — شبکهٔ رنگ", "chart"),
-                              ("ناحیه ۴ — دکمه‌های شرط", "bet")):
+                              ("ناحیه ۴ — دکمه‌های شرط", "bet"),
+                              ("ناحیه ۵ — دکمه‌های ترنبال", "trenball_bet")):
             button = QPushButton(title)
             button.clicked.connect(lambda _=False, t=target: self.select_region(t))
             regions.addWidget(button)
@@ -646,6 +647,8 @@ class MainWindow(QMainWindow):
         for title, attr, hint in (
                 ("محل کلیک کلاسیک (Bet / Cash Out)", "classic_click_point",
                  "روی دکمهٔ کلاسیک (Bet / Cash Out) کلیک کنید — Esc برای انصراف"),
+                ("محل کلید Classic/Trenball", "trenball_toggle_point",
+                 "روی کلید Classic / Trenball بالای صفحه کلیک کنید — Esc برای انصراف"),
                 ("محل دکمهٔ x2 مبلغ", "stake_double_point",
                  "روی دکمهٔ x2 کنار مبلغ شرط کلیک کنید — Esc برای انصراف"),
                 ("محل دکمهٔ /2 مبلغ", "stake_half_point",
@@ -655,6 +658,32 @@ class MainWindow(QMainWindow):
                 lambda _=False, a=attr, t=title, h=hint: self.select_point(a, t, h))
             points_row.addWidget(button)
         layout.addLayout(points_row)
+        trenball_row = QHBoxLayout()
+        self.trenball = QCheckBox()
+        self.trenball.setChecked(self.settings.trenball_enabled)
+        self.trenball.setToolTip(
+            "وقتی یک رنگ چند دست پشت سر هم می‌آید، ربات با کلیک روی کلید "
+            "Classic/Trenball به صفحهٔ ترنبال می‌رود، روی همان رنگ شرط می‌بندد و "
+            "تا ۳ مرحله مبلغ را بعد از باخت دو برابر می‌کند؛ با پایان روند به کلاسیک برمی‌گردد.")
+        self.trenball.toggled.connect(self._toggle_trenball)
+        trenball_row.addWidget(self.trenball)
+        trenball_row.addWidget(QLabel("طول روند"))
+        self.trenball_streak = QSpinBox()
+        self.trenball_streak.setRange(2, 10)
+        self.trenball_streak.setSuffix(" دست")
+        self.trenball_streak.setValue(self.settings.trenball_streak_length)
+        self.trenball_streak.valueChanged.connect(self._on_trenball_tuning)
+        trenball_row.addWidget(self.trenball_streak)
+        trenball_row.addWidget(QLabel("مرحلهٔ دوبل در ترنبال"))
+        self.trenball_steps = QSpinBox()
+        self.trenball_steps.setRange(0, 5)
+        self.trenball_steps.setSuffix(" مرحله")
+        self.trenball_steps.setValue(self.settings.trenball_stake_double_steps)
+        self.trenball_steps.valueChanged.connect(self._on_trenball_tuning)
+        trenball_row.addWidget(self.trenball_steps)
+        trenball_row.addStretch()
+        layout.addLayout(trenball_row)
+        self._refresh_trenball_label()
         classic_row = QHBoxLayout()
         self.classic_test = QPushButton("کلیک تست کلاسیک")
         self.classic_test.clicked.connect(self.test_classic_click)
@@ -908,6 +937,9 @@ class MainWindow(QMainWindow):
                        smart_cashout_enabled=self.smart_cashout.isChecked(),
                        stake_martingale_enabled=self.stake_enabled.isChecked(),
                        stake_double_steps=self.stake_steps.value(),
+                       trenball_enabled=self.trenball.isChecked(),
+                       trenball_streak_length=self.trenball_streak.value(),
+                       trenball_stake_double_steps=self.trenball_steps.value(),
                        review_window_s=self.review_minutes.value() * 60,
                        session_minutes=self.session_minutes.value(),
                        shutdown_after_session=self.shutdown_after.isChecked())
@@ -955,6 +987,29 @@ class MainWindow(QMainWindow):
             else "کلیک کلاسیک + Cash Out بین ۱٫۳۰ و ۱٫۸۵: خاموش")
         color = "#6fe3ac" if on else "#95a5a6"
         self.smart_cashout.setStyleSheet(f"QCheckBox {{ color: {color}; font-weight: bold; }}")
+
+    def _refresh_trenball_label(self) -> None:
+        """وضعیت روشن/خاموش شیفت خودکار به ترنبال را نشان بده."""
+        on = self.trenball.isChecked()
+        self.trenball.setText("شیفت به Trenball در روند هم‌رنگ: روشن" if on
+                              else "شیفت به Trenball در روند هم‌رنگ: خاموش")
+        color = "#6fe3ac" if on else "#95a5a6"
+        self.trenball.setStyleSheet(f"QCheckBox {{ color: {color}; font-weight: bold; }}")
+
+    def _toggle_trenball(self, on: bool) -> None:
+        self._refresh_trenball_label()
+        self.apply_settings(trenball_enabled=bool(on),
+                            trenball_streak_length=self.trenball_streak.value(),
+                            trenball_stake_double_steps=self.trenball_steps.value())
+        step = getattr(self, "calibration_status", None)
+        if on and self.settings.trenball_toggle_point is None and step is not None:
+            step.setText("برای شیفت به ترنبال، «محل کلید Classic/Trenball» و "
+                         "«ناحیه ۵ — دکمه‌های ترنبال» را کالیبره کنید.")
+
+    def _on_trenball_tuning(self, _value: int) -> None:
+        """تغییر طول روند یا مرحله‌های دوبل را همان لحظه ذخیره کن."""
+        self.apply_settings(trenball_streak_length=self.trenball_streak.value(),
+                            trenball_stake_double_steps=self.trenball_steps.value())
 
     def _refresh_stake_label(self) -> None:
         """وضعیت گزینهٔ دو برابر کردن مبلغ را با متن و رنگ نشان بده."""
@@ -1086,10 +1141,13 @@ class MainWindow(QMainWindow):
                  for number, name in ((1, "history_region"), (2, "result_region"),
                                       (3, "chart_region"), (4, "bet_region"))]
         for label, name in (("محل کلیک کلاسیک", "classic_click_point"),
+                            ("کلید Classic/Trenball", "trenball_toggle_point"),
                             ("دکمهٔ x2 مبلغ", "stake_double_point"),
                             ("دکمهٔ /2 مبلغ", "stake_half_point")):
             point = getattr(self.settings, name)
             parts.append(f"{label}: " + (f"{point[0]},{point[1]}" if point else "انتخاب نشده"))
+        parts.append("دکمه‌های ترنبال: "
+                     f"{self._region_state(self.settings.trenball_bet_region)}")
         self.region_status.setText("  |  ".join(parts))
 
     def select_region(self, target: str = "result"):
@@ -1110,6 +1168,8 @@ class MainWindow(QMainWindow):
                         bet_point_red=self._third_point(chosen, 1),
                         bet_point_green=self._third_point(chosen, 3),
                         bet_point_yellow=self._third_point(chosen, 5))
+                elif target == "trenball_bet":
+                    self.settings = replace(self.settings, trenball_bet_region=overlay.selected)
                 elif target == "click":
                     self.settings = replace(self.settings, click_region=overlay.selected)
                 elif target == "chart":
@@ -1357,6 +1417,12 @@ class MainWindow(QMainWindow):
         self.stake_enabled.blockSignals(False)
         self._refresh_stake_label()
         self.stake_steps.setValue(self.settings.stake_double_steps)
+        self.trenball.blockSignals(True)
+        self.trenball.setChecked(self.settings.trenball_enabled)
+        self.trenball.blockSignals(False)
+        self._refresh_trenball_label()
+        self.trenball_streak.setValue(self.settings.trenball_streak_length)
+        self.trenball_steps.setValue(self.settings.trenball_stake_double_steps)
         self.smart_cashout.blockSignals(True)
         self.smart_cashout.setChecked(self.settings.smart_cashout_enabled)
         self.smart_cashout.blockSignals(False)

@@ -24,6 +24,9 @@ _DOWN = 0x0002
 # «کلیک کلاسیک»: ورود پیش از پایان ۶ ثانیه، خروج روی ضریبی زیر ۱٫۹۹.
 CASHOUT_CEILING = Decimal(str(CASHOUT_LIMIT))
 CLASSIC_ENTRY_WINDOW_S = 6.0
+# بعد از کلیک روی کلید Classic/Trenball چند لحظه صبر می‌کنیم تا صفحه عوض شود؛
+# شرط هم فقط از دور بعد زده می‌شود (نه در همان دورِ تعویض صفحه).
+PAGE_SWITCH_PAUSE_S = 0.6
 _UP = 0x0004
 try:
     _user32 = ctypes.windll.user32
@@ -94,7 +97,8 @@ RULE_LABELS = {"yellow-run": "صف ۷+۳ زرد", "yellow-pair": "جفت زرد"
                "yellow-burst": "۹ کلیک زرد", "row-signal": "سیگنال سطری",
                "streak-run": "روند هم‌رنگ ۷+", "value-bet": "ضریب ویژه",
                "pair-flip": "جفت رنگ", "smart": "کلیک هوشمند",
-               "smart-play": "ورود هوشمند (مدل)", "three-x": "ورود ۳x"}
+               "smart-play": "ورود هوشمند (مدل)", "three-x": "ورود ۳x",
+               "trenball": "شرط ترنبال"}
 
 
 class AutoClicker:
@@ -137,6 +141,9 @@ class AutoClicker:
         self._smart_cashout: Decimal | None = None
         self._stake_steps = 0  # چند بار مبلغ پایه با x2 دو برابر شده است
         self._ai_bet: dict | None = None
+        self._page = "classic"  # صفحهٔ بازی که همین حالا باز است: classic یا trenball
+        self._page_switched_round: str | None = None  # دوری که در آن صفحه عوض شد
+        self._trenball_bet: dict | None = None
         self._ai_losses = 0
         self._ai_relearn = False
         self._window = {"rounds": 0, "clicks": 0, "skipped": 0,
@@ -205,6 +212,14 @@ class AutoClicker:
             return (region.x + region.width // 2, region.y + region.height // 2)
         return self.settings.bet_point_yellow
 
+    def _trenball_point(self, color: str | None):
+        """دکمهٔ رنگی ترنبال: RED چپ، GREEN وسط، YELLOW (ماه) راست."""
+        region = self.settings.trenball_bet_region
+        if region is None or not color:
+            return None
+        sixth = {"RED": 1, "GREEN": 3, "YELLOW": 5}.get(color, 3)
+        return (region.x + region.width * sixth // 6, region.y + region.height // 2)
+
     def _chart_reading(self):
         """Read the chart region once per round; None when no chart is usable."""
         region = self.settings.chart_region
@@ -234,6 +249,10 @@ class AutoClicker:
 
     def _bet_point(self, color: str | None):
         """The saved button for one colour, else the normal click target."""
+        if self._page == "trenball":
+            point = self._trenball_point(color)
+            if point is not None:
+                return point
         if color:
             point = getattr(self.settings, f"bet_point_{color.lower()}", None)
             if point is not None:
@@ -321,7 +340,7 @@ class AutoClicker:
         try:
             self.log_path.parent.mkdir(parents=True, exist_ok=True)
             entry = {"time": datetime.now().isoformat(timespec="seconds"), "round": round_id,
-                     "value": str(value), "color": self._color(value),
+                     "value": str(value), "color": self._color(value), "page": self._page,
                      "clicked": report.clicked, "reason": report.reason,
                      "forecast": report.forecast, "target": report.target,
                      "rule": report.rule, "detail": report.detail,
@@ -445,12 +464,19 @@ class AutoClicker:
         requested, self._ai_relearn = self._ai_relearn, False
         return requested
 
+    @property
+    def _stake_limit(self) -> int:
+        """سقف مرحله‌های دو برابر کردن مبلغ در صفحهٔ فعلی (ترنبال ۳ مرحله)."""
+        if self._page == "trenball":
+            return int(self.settings.trenball_stake_double_steps)
+        return int(self.settings.stake_double_steps)
+
     def _stake(self, target: int) -> None:
         """مبلغ شرط را با دکمه‌های x2 و /2 بازی روی تعداد مرحلهٔ خواسته‌شده ببر."""
         if not self.settings.stake_martingale_enabled:
             self._stake_steps = 0
             return
-        target = max(0, min(int(target), int(self.settings.stake_double_steps)))
+        target = max(0, min(int(target), self._stake_limit))
         while self._stake_steps < target:
             point = self.settings.stake_double_point
             if point is None:
@@ -463,6 +489,81 @@ class AutoClicker:
                 return
             self.sender(point[0], point[1], restore=self.settings.autoclick_restore_cursor)
             self._stake_steps -= 1
+
+    def _switch_page(self, page: str, round_id: str | None = None) -> bool:
+        """با یک کلیک روی کلید Classic/Trenball، صفحهٔ بازی را عوض کن."""
+        point = self.settings.trenball_toggle_point
+        if point is None or page == self._page:
+            return False
+        ok = self.sender(point[0], point[1], restore=self.settings.autoclick_restore_cursor)
+        if ok:
+            # مکث کوتاه پیش از هر کلیک بعدی تا صفحهٔ تازه بالا بیاید؛ شرط این دور
+            # زده نمی‌شود و به دور بعد می‌افتد.
+            sleep(PAGE_SWITCH_PAUSE_S)
+            self._page_switched_round = round_id
+            self._page = page
+            # مبلغ در صفحهٔ تازه از همان مرحلهٔ مجاز ادامه پیدا می‌کند؛ اگر مرحلهٔ
+            # کلاسیک از سقف ترنبال بیشتر باشد، دکمهٔ /2 خودکار مبلغ را پایین می‌آورد.
+            self._stake(self._stake_steps)
+        return ok
+
+    def _sync_page(self, round_id: str | None = None) -> bool:
+        """صفحه را با روند رنگ هماهنگ کن: رنگ تکراری → ترنبال، پایان روند → کلاسیک."""
+        if self.settings.trenball_toggle_point is None or self.settings.trenball_bet_region is None:
+            return False
+        streak = (self._streak_color in ("RED", "GREEN")
+                  and self._streak >= int(self.settings.trenball_streak_length))
+        want = "trenball" if (self.settings.trenball_enabled and streak) else "classic"
+        if want == self._page:
+            return False
+        if self.wants_live():
+            return False  # با شرط کلاسیکِ باز، صفحه عوض نمی‌شود
+        return self._switch_page(want, round_id)
+
+    def _settle_trenball(self, color: str) -> ClickReport | None:
+        """دست ترنبال تمام‌شده: برد → مبلغ پایه، باخت → یک مرحله بالاتر (تا ۳ مرحله)."""
+        bet, self._trenball_bet = self._trenball_bet, None
+        if bet is None:
+            return None
+        if bet["color"] == color:
+            self._stake(0)
+        else:
+            self._stake(self._stake_steps + 1 if self._stake_steps < self._stake_limit else 0)
+        return None
+
+    def _decide_trenball(self, round_id: str, color: str) -> ClickReport:
+        """ترنبال: روی همان رنگِ روند یک کلیک شرط می‌بندد؛ خروجی زنده ندارد."""
+        if self._pending_rule is not None:
+            target_colors, rule = self._pending_rule
+            self._pending_rule = None
+            if target_colors and color in target_colors:
+                self._rule_stats.setdefault(rule, [0, 0])[0] += 1
+        self.forecaster.observe(color)
+        self._window["rounds"] += 1
+        self._rounds_seen += 1
+        play = self._streak_color
+        if play not in ("RED", "GREEN"):
+            return ClickReport(False, "trenball: رنگ روند مشخص نیست", count=self._clicks)
+        point = self._trenball_point(play)
+        if point is None:
+            return ClickReport(False, "trenball: ناحیهٔ دکمه‌های ترنبال کالیبره نشده است",
+                               count=self._clicks)
+        if monotonic() - self._last_at < self.settings.autoclick_cooldown_ms / 1000:
+            return ClickReport(False, "cooldown", count=self._clicks)
+        self._last_id, self._last_at = round_id, monotonic()
+        self._clicks += 1
+        self._window["clicks"] += 1
+        self._pending_rule = ((play,), "trenball")
+        self._rule_stats.setdefault("trenball", [0, 0])[1] += 1
+        self._wait_before_click()
+        ok = self.sender(point[0], point[1], restore=self.settings.autoclick_restore_cursor)
+        if ok:
+            self._trenball_bet = {"color": play}
+        stage = self._stake_steps + 1
+        return ClickReport(True, "clicked" if ok else "click failed", point,
+                           self._clicks, 0, target=play, rule="trenball",
+                           detail=f"ترنبال روی {play} — مرحلهٔ {stage} از "
+                                  f"{self._stake_limit}")
 
     def _settle_ai_bet(self) -> None:
         """دست کلاسیکی که تمام شده را تسویه کن و باخت‌های متوالی را بشمار."""
@@ -479,9 +580,8 @@ class AutoClicker:
         if self._ai_losses >= RESTART_AFTER_LOSSES:
             self._ai_losses = 0
             self._ai_relearn = True
-        limit = int(self.settings.stake_double_steps)
         # باخت: تا مرحلهٔ آخر مبلغ دو برابر می‌شود؛ بعد از آن دوباره از پایه.
-        self._stake(self._stake_steps + 1 if self._stake_steps < limit else 0)
+        self._stake(self._stake_steps + 1 if self._stake_steps < self._stake_limit else 0)
 
     def _enter_classic(self, round_id: str, bets: tuple[str, ...],
                        cashout: Decimal | None,
@@ -571,12 +671,26 @@ class AutoClicker:
             return ClickReport(False, "disabled", count=self._clicks)
         if round_id == self._last_id:
             return ClickReport(False, "same round", count=self._clicks, remaining=self._armed)
+        color = self._color(value)
+        if color == self._streak_color:
+            self._streak += 1
+        else:
+            self._streak_color, self._streak = color, 1
+        # تسویهٔ دست ترنبال و انتخاب صفحه، پیش از هر تصمیمی برای همین دور.
+        self._settle_trenball(color)
+        self._sync_page(round_id)
+        if self._page_switched_round == round_id:
+            # همین دور صفحه عوض شد: کلیک شرط به دور بعد موکول می‌شود تا اگر
+            # صفحه جا نیفتاد، کلیک روی جای اشتباه نرود.
+            return ClickReport(False, "page switch: betting starts next round",
+                               count=self._clicks)
+        if self._page == "trenball":
+            return self._decide_trenball(round_id, color)
         if self._smart_play_active:
             # AI Analysis روشن است: مغز ربات مدل است، نه قواعد قبلی.
             return self._decide_smart_play(round_id, value)
         if self.settings.three_x_enabled:
             return self._decide_three_x(round_id, value, confidence)
-        color = self._color(value)
         if self._pending_rule is not None:
             target_colors, rule = self._pending_rule
             self._pending_rule = None
@@ -593,10 +707,6 @@ class AutoClicker:
         self._rounds_seen += 1
         flip = self._flip_color  # decided on the previous round, so it applies here only
         self._flip_color = None
-        if color == self._streak_color:
-            self._streak += 1
-        else:
-            self._streak_color, self._streak = color, 1
         if (self.settings.pair_flip_enabled and self._streak == 2
                 and color in ("RED", "GREEN")):
             # Two reds or two greens in a row: the user expects the opposite colour next.

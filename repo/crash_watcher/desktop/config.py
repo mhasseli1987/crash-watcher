@@ -34,6 +34,15 @@ class DesktopSettings:
     click_point: tuple[int, int] | None = None
     # «محل کلیک کلاسیک»: همان دکمهٔ بزرگ Bet / Cash Out بازی.
     classic_click_point: tuple[int, int] | None = None
+    # «کلید Classic/Trenball»: با کلیک روی همین نقطه صفحهٔ بازی عوض می‌شود.
+    trenball_toggle_point: tuple[int, int] | None = None
+    # ناحیهٔ سه دکمهٔ شرط ترنبال: Bet Red / Bet Green / Bet Moon.
+    trenball_bet_region: Region | None = None
+    # شیفت خودکار به ترنبال وقتی یک رنگ پشت سر هم تکرار می‌شود.
+    trenball_enabled: bool = False
+    trenball_streak_length: int = 3
+    # در ترنبال فقط تا این تعداد مرحله مبلغ بعد از باخت دو برابر می‌شود.
+    trenball_stake_double_steps: int = 3
     # مارتینگل: بعد از هر باخت، دکمهٔ x2 مبلغ بازی زده می‌شود و مبلغ پایه تا این
     # تعداد مرحله دو برابر می‌ماند؛ بعد از برد (یا پایان مرحلهٔ آخر) دکمهٔ /2 مبلغ
     # را به پایه برمی‌گرداند.
@@ -130,15 +139,15 @@ class DesktopSettings:
         if type(self.interval_ms) is not int or self.interval_ms < 20:
             raise ValueError("interval_ms must be an integer of at least 20")
         for name in ("result_region", "history_region", "click_region", "chart_region",
-                     "bet_region"):
+                     "bet_region", "trenball_bet_region"):
             region = getattr(self, name)
             if region is None:
                 continue
             if not isinstance(region, Region):
                 raise ValueError(f"{name} must be a Region")
             region.capture(self.interval_ms)
-        for name in ("click_point", "classic_click_point", "stake_double_point",
-                     "stake_half_point", "bet_point_red",
+        for name in ("click_point", "classic_click_point", "trenball_toggle_point",
+                     "stake_double_point", "stake_half_point", "bet_point_red",
                      "bet_point_green", "bet_point_yellow"):
             point = getattr(self, name)
             if point is None:
@@ -190,6 +199,14 @@ class DesktopSettings:
                              "smart_cashout_enabled and stake_martingale_enabled must be booleans")
         if type(self.stake_double_steps) is not int or not 0 <= self.stake_double_steps <= 5:
             raise ValueError("stake_double_steps must be an integer between 0 and 5")
+        if type(self.trenball_enabled) is not bool:
+            raise ValueError("trenball_enabled must be a boolean")
+        if (type(self.trenball_streak_length) is not int
+                or not 2 <= self.trenball_streak_length <= 10):
+            raise ValueError("trenball_streak_length must be an integer between 2 and 10")
+        if (type(self.trenball_stake_double_steps) is not int
+                or not 0 <= self.trenball_stake_double_steps <= 5):
+            raise ValueError("trenball_stake_double_steps must be an integer between 0 and 5")
         if (type(self.smart_play_learning_minutes) is not int
                 or not 0 <= self.smart_play_learning_minutes <= 600):
             raise ValueError("smart_play_learning_minutes must be an integer between 0 and 600")
@@ -266,11 +283,12 @@ def load_settings(path: Path = SETTINGS_PATH) -> DesktopSettings:
     # letting the whole app fail to start.
     known = {item.name for item in fields(DesktopSettings)}
     data = {key: value for key, value in data.items() if key in known}
-    for key in ("result_region", "history_region", "click_region", "chart_region", "bet_region"):
+    for key in ("result_region", "history_region", "click_region", "chart_region",
+                "bet_region", "trenball_bet_region"):
         if data.get(key):
             data[key] = Region(**data[key])
-    for key in ("click_point", "classic_click_point", "stake_double_point",
-                "stake_half_point", "bet_point_red", "bet_point_green",
+    for key in ("click_point", "classic_click_point", "trenball_toggle_point",
+                "stake_double_point", "stake_half_point", "bet_point_red", "bet_point_green",
                 "bet_point_yellow"):
         if data.get(key) is not None:
             data[key] = tuple(data[key])
