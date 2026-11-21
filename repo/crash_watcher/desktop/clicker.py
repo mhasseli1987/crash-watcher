@@ -139,10 +139,12 @@ class AutoClicker:
         self._smart_play: tuple[str, ...] = ()
         self._smart_play_active = False
         self._smart_cashout: Decimal | None = None
+        self._smart_confidence: float | None = None
         self._stake_steps = 0  # چند بار مبلغ پایه با x2 دو برابر شده است
         self._ai_bet: dict | None = None
         self._page = "classic"  # صفحهٔ بازی که همین حالا باز است: classic یا trenball
         self._page_switched_round: str | None = None  # دوری که در آن صفحه عوض شد
+        self._page_switch_immediate: str | None = None  # شیفت هوشمند: شرط همان دور
         self._trenball_bet: dict | None = None
         self._ai_losses = 0
         self._ai_relearn = False
@@ -315,15 +317,22 @@ class AutoClicker:
         """رنگ ضریب — همین قاعدهٔ رنگ در بخش بررسی هوشمند هم استفاده می‌شود."""
         return self._color(value)
 
-    def set_smart_play(self, bets, active: bool = False, cashout=None) -> None:
+    def set_smart_play(self, bets, active: bool = False, cashout=None,
+                       confidence: float | None = None) -> None:
         """تصمیم آمادهٔ مدل برای دست بعد: یک یا دو رنگ و ضریب خروج کلاسیک.
 
         `active` یعنی زبانهٔ AI Analysis در حال کار است؛ در این حالت هیچ‌کدام از
         قواعد ربات اجرا نمی‌شوند و فقط تصمیم مدل کلیک می‌شود. `cashout` ضریبی
-        است که مدل برای «کلیک کلاسیک» انتخاب کرده (همیشه زیر ۱٫۹۹).
+        است که مدل برای «کلیک کلاسیک» انتخاب کرده (همیشه زیر ۱٫۹۹). `confidence`
+        اطمینان اعلامی مدل است و تعیین می‌کند صفحه ترنبال باشد یا کلاسیک.
         """
         self._smart_play = tuple(color for color in (bets or ()) if color)
         self._smart_play_active = bool(active)
+        try:
+            self._smart_confidence = (None if confidence is None
+                                      else min(1.0, max(0.0, float(confidence))))
+        except (TypeError, ValueError):
+            self._smart_confidence = None
         try:
             self._smart_cashout = Decimal(str(cashout)) if cashout is not None else None
         except Exception:
@@ -490,26 +499,57 @@ class AutoClicker:
             self.sender(point[0], point[1], restore=self.settings.autoclick_restore_cursor)
             self._stake_steps -= 1
 
-    def _switch_page(self, page: str, round_id: str | None = None) -> bool:
-        """با یک کلیک روی کلید Classic/Trenball، صفحهٔ بازی را عوض کن."""
+    def _switch_page(self, page: str, round_id: str | None = None,
+                     immediate: bool = False) -> bool:
+        """با یک کلیک روی کلید Classic/Trenball، صفحهٔ بازی را عوض کن.
+
+        `immediate` یعنی شیفت را مدل خواسته و پیش‌بینی همین دور از دست نمی‌رود؛
+        بعد از مکث کوتاهِ تعویض، شرط همین دور زده می‌شود.
+        """
         point = self.settings.trenball_toggle_point
         if point is None or page == self._page:
             return False
         ok = self.sender(point[0], point[1], restore=self.settings.autoclick_restore_cursor)
         if ok:
-            # مکث کوتاه پیش از هر کلیک بعدی تا صفحهٔ تازه بالا بیاید؛ شرط این دور
-            # زده نمی‌شود و به دور بعد می‌افتد.
+            # مکث کوتاه پیش از هر کلیک بعدی تا صفحهٔ تازه بالا بیاید؛ در شیفت
+            # معمولی شرط این دور زده نمی‌شود و به دور بعد می‌افتد.
             sleep(PAGE_SWITCH_PAUSE_S)
             self._page_switched_round = round_id
+            self._page_switch_immediate = round_id if immediate else None
             self._page = page
             # مبلغ در صفحهٔ تازه از همان مرحلهٔ مجاز ادامه پیدا می‌کند؛ اگر مرحلهٔ
             # کلاسیک از سقف ترنبال بیشتر باشد، دکمهٔ /2 خودکار مبلغ را پایین می‌آورد.
             self._stake(self._stake_steps)
         return ok
 
+    def _ai_trenball_wanted(self) -> bool:
+        """آیا مدل رنگ دست بعد را با اطمینان کافی داده و ترنبال آماده است؟"""
+        if self._smart_confidence is None or not self._smart_play:
+            return False
+        if self._smart_confidence < self.settings.ai_trenball_min_confidence:
+            return False
+        if (self.settings.trenball_toggle_point is None
+                or self.settings.trenball_bet_region is None):
+            return False
+        return any(color in ("RED", "GREEN", "YELLOW") for color in self._smart_play)
+
     def _sync_page(self, round_id: str | None = None) -> bool:
-        """صفحه را با روند رنگ هماهنگ کن: رنگ تکراری → ترنبال، پایان روند → کلاسیک."""
-        if self.settings.trenball_toggle_point is None or self.settings.trenball_bet_region is None:
+        """صفحه را با تصمیم مدل یا روند رنگ هماهنگ کن.
+
+        با AI Analysis، اطمینان بالای آستانه → ترنبال و شرط روی رنگ مدل؛
+        اطمینان کمتر → بازگشت به کلاسیک و اجرای تنظیمات عادی. در حالت عادی
+        (بدون مدل) رنگ تکراری → ترنبال و پایان روند → کلاسیک.
+        """
+        if self.settings.trenball_toggle_point is None:
+            return False
+        if self._smart_play_active and self.settings.ai_trenball_enabled:
+            want = "trenball" if self._ai_trenball_wanted() else "classic"
+            if want == self._page:
+                return False
+            if self.wants_live():
+                return False  # با شرط کلاسیکِ باز، صفحه عوض نمی‌شود
+            return self._switch_page(want, round_id, immediate=True)
+        if self.settings.trenball_bet_region is None:
             return False
         streak = (self._streak_color in ("RED", "GREEN")
                   and self._streak >= int(self.settings.trenball_streak_length))
@@ -541,9 +581,18 @@ class AutoClicker:
         self.forecaster.observe(color)
         self._window["rounds"] += 1
         self._rounds_seen += 1
-        play = self._streak_color
-        if play not in ("RED", "GREEN"):
-            return ClickReport(False, "trenball: رنگ روند مشخص نیست", count=self._clicks)
+        color_source = "روند"
+        if self._smart_play_active and self.settings.ai_trenball_enabled:
+            # شیفت هوشمند: دقیقاً همان رنگی که مدل پیش‌بینی کرده شرط می‌شود.
+            modeled = tuple(dict.fromkeys(
+                color for color in self._smart_play if color in ("RED", "GREEN", "YELLOW")))
+            self._smart_play = ()
+            play = modeled[0] if modeled else None
+            color_source = "مدل"
+        else:
+            play = self._streak_color
+        if play not in ("RED", "GREEN", "YELLOW"):
+            return ClickReport(False, "trenball: رنگ دست بعد مشخص نیست", count=self._clicks)
         point = self._trenball_point(play)
         if point is None:
             return ClickReport(False, "trenball: ناحیهٔ دکمه‌های ترنبال کالیبره نشده است",
@@ -560,10 +609,13 @@ class AutoClicker:
         if ok:
             self._trenball_bet = {"color": play}
         stage = self._stake_steps + 1
+        trust = (f" (اطمینان {self._smart_confidence:.0%})"
+                 if (self._smart_play_active and self.settings.ai_trenball_enabled
+                     and self._smart_confidence is not None) else "")
         return ClickReport(True, "clicked" if ok else "click failed", point,
                            self._clicks, 0, target=play, rule="trenball",
-                           detail=f"ترنبال روی {play} — مرحلهٔ {stage} از "
-                                  f"{self._stake_limit}")
+                           detail=f"ترنبال روی {play} از {color_source}{trust} — مرحلهٔ "
+                                  f"{stage} از {self._stake_limit}")
 
     def _settle_ai_bet(self) -> None:
         """دست کلاسیکی که تمام شده را تسویه کن و باخت‌های متوالی را بشمار."""
@@ -624,7 +676,6 @@ class AutoClicker:
 
     def _decide_smart_play(self, round_id: str, value: Decimal) -> ClickReport:
         """AI Analysis: فقط تصمیم مدل اجرا می‌شود؛ هیچ قانونی از ربات اجرا نمی‌شود."""
-        self._settle_ai_bet()
         color = self._color(value)
         if self._pending_rule is not None:
             target_colors, rule = self._pending_rule
@@ -676,12 +727,15 @@ class AutoClicker:
             self._streak += 1
         else:
             self._streak_color, self._streak = color, 1
-        # تسویهٔ دست ترنبال و انتخاب صفحه، پیش از هر تصمیمی برای همین دور.
+        # تسویهٔ دست قبلی و انتخاب صفحه، پیش از هر تصمیمی برای همین دور.
         self._settle_trenball(color)
+        self._settle_ai_bet()
         self._sync_page(round_id)
-        if self._page_switched_round == round_id:
+        if (self._page_switched_round == round_id
+                and self._page_switch_immediate != round_id):
             # همین دور صفحه عوض شد: کلیک شرط به دور بعد موکول می‌شود تا اگر
-            # صفحه جا نیفتاد، کلیک روی جای اشتباه نرود.
+            # صفحه جا نیفتاد، کلیک روی جای اشتباه نرود. شیفت هوشمند از این
+            # قاعده مستثناست تا پنجرهٔ کوتاه پیش‌بینی مدل از دست نرود.
             return ClickReport(False, "page switch: betting starts next round",
                                count=self._clicks)
         if self._page == "trenball":

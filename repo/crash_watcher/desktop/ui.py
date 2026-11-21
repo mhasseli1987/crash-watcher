@@ -797,6 +797,24 @@ class MainWindow(QMainWindow):
         self.smart_two = QCheckBox("اجازهٔ کلیک هم‌زمان روی دو رنگ (پوشش ضرر)")
         self.smart_two.setChecked(self.settings.smart_play_two_colors)
         form.addRow("", self.smart_two)
+        self.ai_trenball = QCheckBox()
+        self.ai_trenball.setChecked(self.settings.ai_trenball_enabled)
+        self.ai_trenball.setToolTip(
+            "اگر مدل رنگ دست بعد را با اطمینان بالای آستانه پیش‌بینی کند، ربات سریع "
+            "به صفحهٔ Trenball می‌رود و روی همان رنگ شرط می‌بندد؛ اگر اطمینان کمتر "
+            "باشد به Classic برمی‌گردد و تنظیمات عادی را اجرا می‌کند. برای این کار "
+            "«محل کلید Classic/Trenball» و «ناحیه ۵ — دکمه‌های ترنبال» باید کالیبره باشند.")
+        self._refresh_ai_trenball_label()
+        self.ai_trenball.toggled.connect(self._toggle_ai_trenball)
+        form.addRow("", self.ai_trenball)
+        self.ai_trenball_conf = QSpinBox()
+        self.ai_trenball_conf.setRange(20, 100)
+        self.ai_trenball_conf.setSuffix(" %")
+        self.ai_trenball_conf.setValue(round(self.settings.ai_trenball_min_confidence * 100))
+        self.ai_trenball_conf.setToolTip(
+            "فقط وقتی اطمینان اعلامی مدل از این درصد بیشتر باشد به ترنبال شیفت می‌شود")
+        self.ai_trenball_conf.valueChanged.connect(self._on_ai_trenball_confidence)
+        form.addRow("حداقل اطمینان برای شیفت به ترنبال", self.ai_trenball_conf)
         self.stake_steps = QSpinBox()
         self.stake_steps.setRange(0, 5)
         self.stake_steps.setSuffix(" مرحله")
@@ -934,6 +952,8 @@ class MainWindow(QMainWindow):
                        smart_play_learning_minutes=self.smart_learning.value(),
                        smart_play_min_confidence=self.smart_min_conf.value() / 100,
                        smart_play_two_colors=self.smart_two.isChecked(),
+                       ai_trenball_enabled=self.ai_trenball.isChecked(),
+                       ai_trenball_min_confidence=self.ai_trenball_conf.value() / 100,
                        smart_cashout_enabled=self.smart_cashout.isChecked(),
                        stake_martingale_enabled=self.stake_enabled.isChecked(),
                        stake_double_steps=self.stake_steps.value(),
@@ -1025,6 +1045,26 @@ class MainWindow(QMainWindow):
     def _toggle_stake(self, on: bool) -> None:
         self._refresh_stake_label()
         self.apply_settings(stake_martingale_enabled=bool(on))
+
+    def _refresh_ai_trenball_label(self) -> None:
+        """وضعیت «شیفت هوشمند به ترنبال» را با متن و رنگ نشان بده."""
+        on = self.ai_trenball.isChecked()
+        threshold = self.ai_trenball_conf.value() if hasattr(self, "ai_trenball_conf") \
+            else round(self.settings.ai_trenball_min_confidence * 100)
+        self.ai_trenball.setText(
+            f"شیفت هوشمند به Trenball با اطمینان {threshold}٪ یا بیشتر: "
+            + ("روشن" if on else "خاموش"))
+        color = "#6fe3ac" if on else "#95a5a6"
+        self.ai_trenball.setStyleSheet(f"QCheckBox {{ color: {color}; font-weight: bold; }}")
+
+    def _toggle_ai_trenball(self, on: bool) -> None:
+        self._refresh_ai_trenball_label()
+        self.apply_settings(ai_trenball_enabled=bool(on),
+                            ai_trenball_min_confidence=self.ai_trenball_conf.value() / 100)
+
+    def _on_ai_trenball_confidence(self, value: int) -> None:
+        self._refresh_ai_trenball_label()
+        self.apply_settings(ai_trenball_min_confidence=int(value) / 100)
 
     def _toggle_smart_cashout(self, on: bool) -> None:
         self._refresh_smart_cashout_label()
@@ -1412,6 +1452,11 @@ class MainWindow(QMainWindow):
         self.smart_learning.setValue(self.settings.smart_play_learning_minutes)
         self.smart_min_conf.setValue(round(self.settings.smart_play_min_confidence * 100))
         self.smart_two.setChecked(self.settings.smart_play_two_colors)
+        self.ai_trenball.blockSignals(True)
+        self.ai_trenball.setChecked(self.settings.ai_trenball_enabled)
+        self.ai_trenball.blockSignals(False)
+        self._refresh_ai_trenball_label()
+        self.ai_trenball_conf.setValue(round(self.settings.ai_trenball_min_confidence * 100))
         self.stake_enabled.blockSignals(True)
         self.stake_enabled.setChecked(self.settings.stake_martingale_enabled)
         self.stake_enabled.blockSignals(False)

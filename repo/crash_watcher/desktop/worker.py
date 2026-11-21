@@ -212,7 +212,8 @@ class MonitorWorker(QThread):
                                 ready = planner.take() if smart_active else None
                                 clicker.set_smart_play(ready.bets if ready else (),
                                                        active=smart_active,
-                                                       cashout=ready.exit_at if ready else None)
+                                                       cashout=ready.exit_at if ready else None,
+                                                       confidence=ready.confidence if ready else None)
                                 click_report = clicker.fire(completed.round_id,
                                                             completed.multiplier,
                                                             completed.confidence)

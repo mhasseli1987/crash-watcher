@@ -78,6 +78,11 @@ class DesktopSettings:
     smart_play_learning_minutes: int = 30
     smart_play_min_confidence: float = 0.40
     smart_play_two_colors: bool = True
+    # «شیفت هوشمند به ترنبال»: وقتی مدل رنگ دست بعد را با اطمینان ≥ این درصد
+    # پیش‌بینی کند، صفحه سریع به ترنبال می‌رود و روی همان رنگ شرط بسته می‌شود؛
+    # زیر این درصد دوباره به کلاسیک برمی‌گردد و تنظیمات عادی اجرا می‌شوند.
+    ai_trenball_enabled: bool = True
+    ai_trenball_min_confidence: float = 0.60
     # «کلیک کلاسیک»: ورود با یک کلیک پیش از پایان ۶ ثانیه و خروج با کلیک دوم زیر ۱٫۹۹.
     smart_cashout_enabled: bool = False
     # قوانین قدیمی «شکل رنگ» در تحلیل لاگ بازدهی نداشتند (۱۱٪ تا ۴۵٪) و پیش‌فرض
@@ -214,6 +219,12 @@ class DesktopSettings:
                 or isinstance(self.smart_play_min_confidence, bool)
                 or not 0.2 <= self.smart_play_min_confidence <= 1):
             raise ValueError("smart_play_min_confidence must be a number between 0.2 and 1")
+        if type(self.ai_trenball_enabled) is not bool:
+            raise ValueError("ai_trenball_enabled must be a boolean")
+        if (not isinstance(self.ai_trenball_min_confidence, (int, float))
+                or isinstance(self.ai_trenball_min_confidence, bool)
+                or not 0.2 <= self.ai_trenball_min_confidence <= 1):
+            raise ValueError("ai_trenball_min_confidence must be a number between 0.2 and 1")
         if type(self.review_window_s) is not int or self.review_window_s < 60:
             raise ValueError("review_window_s must be an integer of at least 60")
         if (type(self.session_minutes) is not int or self.session_minutes < 0
