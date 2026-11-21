@@ -59,6 +59,9 @@ class SmartPlanner:
         self.hits = 0
         self.tries = 0
         self.break_even = 0
+        # Brier score: میانگین (احتمال اعلامی − نتیجه)^2؛ کمتر بهتر است.
+        self.brier_sum = 0.0
+        self.brier_tries = 0
 
     # -- phase ---------------------------------------------------------
     @property
@@ -105,6 +108,11 @@ class SmartPlanner:
     def measured_accuracy(self) -> float | None:
         return self.hits / self.tries if self.tries else None
 
+    @property
+    def brier(self) -> float | None:
+        """خطای Brier روی همان پیش‌بینی‌های اصلی (بدون پوشش دو رنگ)."""
+        return self.brier_sum / self.brier_tries if self.brier_tries else None
+
     def decision(self) -> SmartDecision | None:
         """تصمیم آمادهٔ دست بعد؛ None یعنی این دست بازی نکن."""
         if self.phase == LEARNING or self._ready is None:
@@ -128,19 +136,27 @@ class SmartPlanner:
 
     # -- observe -------------------------------------------------------
     def observe(self, round_id: str, color: str) -> None:
-        """ثبت دور تازه و سنجش آخرین پیش‌بینی با همین نتیجه."""
+        """ثبت دور تازه و سنجش آخرین پیش‌بینی با همین نتیجه.
+
+        فقط رنگ اصلی «درست» است. رنگ دوم یعنی شرطِ پوششی، نه پیش‌بینی درست:
+        چنین دستی سربه‌سر شمرده می‌شود و دقت را متورم نمی‌کند. برای Brier هم
+        احتمال همان رنگ اصلی با نتیجهٔ اصلی مقایسه می‌شود.
+        """
         if not self._latest_scored and self._latest is not None:
             self._latest_scored = True
-            if self._latest.bets:
+            bets = self._latest.bets
+            if bets:
                 self.tries += 1
-                if color == self._latest.bets[0]:
+                hit = color == bets[0]
+                if hit:
                     self.hits += 1
-                elif color in self._latest.bets[1:]:
-                    self.hits += 1  # پوشش دو رنگ: برد یا سربه‌سر، نه باخت
+                elif color in bets[1:]:
                     self.break_even += 1
+                self.brier_sum += (float(self._latest.confidence) - (1.0 if hit else 0.0)) ** 2
+                self.brier_tries += 1
         self.rounds.append((round_id, color))
 
     def stats(self) -> dict:
         return {"phase": self.phase, "learning_left": self.remaining_minutes,
                 "hits": self.hits, "tries": self.tries, "break_even": self.break_even,
-                "accuracy": self.measured_accuracy}
+                "accuracy": self.measured_accuracy, "brier": self.brier}

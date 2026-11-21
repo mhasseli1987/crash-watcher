@@ -12,6 +12,9 @@ CrashWatcher.exe
 CrashWatcher-source-clean-2026-11-09/
 CrashWatcher-source-clean-2026-11-09.zip
 release/
-tools/
+# ابزارهای محلی نادیده گرفته می‌شوند، اما دو اسکریپت انتشار/سنجش در ریپو می‌مانند.
+tools/*
+!tools/evaluate.py
+!tools/release.py
 sample-fullscreen.png
 FINAL VERSION/

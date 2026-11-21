@@ -22,10 +22,19 @@ from .clicker import AutoClicker
 from .config import (DesktopSettings, Region, SETTINGS_PATH, PROJECT_ROOT, MAX_CLICK_DELAY_MS,
                      load_settings, save_settings)
 from .final_result import BangRecognizer
+from .preflight import failed as preflight_failed
+from .preflight import run_preflight, summary as preflight_summary
 from .smart_review import DEFAULT_BASE_URL, DEFAULT_MODEL, chat_completions_url, probe_models
 from .worker import MonitorWorker
 
 _FA_DIGITS = str.maketrans("0123456789", "۰۱۲۳۴۵۶۷۸۹")
+
+CLICK_REASON_LABELS = {
+    "clicked": "کلیک شد",
+    "click failed": "کلیک ناموفق",
+    "dry run: would click": "آزمایشی (کلیک نشد)",
+    "shadow: would click": "سایه (کلیک نشد)",
+}
 
 STYLE = """
 QWidget { background:transparent; color:#e8f4ec; font-family:'Segoe UI','Tahoma'; font-size:14px; }
@@ -486,6 +495,19 @@ class MainWindow(QMainWindow):
         self.autoclick_real = QCheckBox("کلیک واقعی (خاموش = فقط آزمایش)")
         self.autoclick_real.setChecked(not self.settings.autoclick_dry_run)
         form.addRow("حالت کلیک", self.autoclick_real)
+        self.shadow_mode = QCheckBox("حالت سایه: تصمیم‌ها ثبت می‌شوند، هیچ کلیکی نمی‌شود")
+        self.shadow_mode.setChecked(self.settings.shadow_mode)
+        form.addRow("حالت سایه", self.shadow_mode)
+        self.bankroll_enabled = QCheckBox("استاپ‌لاس سرمایه (سنجهٔ ریسک جلسه)")
+        self.bankroll_enabled.setChecked(self.settings.bankroll_enabled)
+        form.addRow("سرمایه", self.bankroll_enabled)
+        self.bankroll_start = QLineEdit(self.settings.bankroll_start)
+        form.addRow("سرمایهٔ شروع", self.bankroll_start)
+        self.bankroll_stop = QDoubleSpinBox()
+        self.bankroll_stop.setRange(1, 100)
+        self.bankroll_stop.setSuffix(" %")
+        self.bankroll_stop.setValue(self.settings.bankroll_stop_loss_pct)
+        form.addRow("کف استاپ‌لاس", self.bankroll_stop)
         self.click_threshold = QLineEdit(self.settings.autoclick_threshold)
         form.addRow("آستانهٔ کلیک (ضریب ≥)", self.click_threshold)
         self.click_delay = QSpinBox()
@@ -653,19 +675,38 @@ class MainWindow(QMainWindow):
         self.smart_two = QCheckBox("اجازهٔ کلیک هم‌زمان روی دو رنگ (پوشش ضرر)")
         self.smart_two.setChecked(self.settings.smart_play_two_colors)
         form.addRow("", self.smart_two)
+        self.smart_compare = QLineEdit(self.settings.smart_compare_models)
+        self.smart_compare.setPlaceholderText("model-a, model-b  (خالی = فقط همان مدل بالا)")
+        self.smart_compare.setToolTip("همان اسنپ‌شات موازی به این مدل‌ها داده می‌شود؛ بهترین "
+                                       "بر اساس Brier واقعی انتخاب می‌شود")
+        form.addRow("مقایسهٔ چند مدل", self.smart_compare)
+        self.smart_latency = QSpinBox()
+        self.smart_latency.setRange(500, 120000)
+        self.smart_latency.setSingleStep(500)
+        self.smart_latency.setSuffix(" میلی‌ثانیه")
+        self.smart_latency.setValue(self.settings.smart_latency_budget_ms)
+        self.smart_latency.setToolTip("پاسخی که دیرتر از این برسد برای دست بعد کهنه است و استفاده نمی‌شود")
+        form.addRow("بودجهٔ تأخیر مدل", self.smart_latency)
         layout.addLayout(form)
         buttons = QHBoxLayout()
         connect_button = QPushButton("تست اتصال")
         connect_button.clicked.connect(self.test_smart_connection)
         save_button = QPushButton("ذخیره")
         save_button.clicked.connect(self.save_ui_settings)
+        check_button = QPushButton("پیش‌بررسی نواحی و OCR")
+        check_button.clicked.connect(self.run_preflight_check)
         buttons.addWidget(connect_button)
+        buttons.addWidget(check_button)
         buttons.addWidget(save_button)
         buttons.addStretch()
         layout.addLayout(buttons)
         self.smart_probe_status = QLabel("اتصال هنوز آزمایش نشده است.")
         self.smart_probe_status.setWordWrap(True)
         layout.addWidget(self.smart_probe_status)
+        self.preflight_status = QLabel("پیش‌بررسی هنوز اجرا نشده است.")
+        self.preflight_status.setWordWrap(True)
+        self.preflight_status.setStyleSheet("color:#aeb8c5;")
+        layout.addWidget(self.preflight_status)
         self.smart_status = QLabel("پیشنهاد مدل: —")
         self.smart_status.setWordWrap(True)
         self.smart_status.setStyleSheet("font-size:18px;font-weight:700;color:#c7d0dc;")
@@ -879,6 +920,10 @@ class MainWindow(QMainWindow):
                        tesseract_path=self.tesseract.text().strip(),
                        autoclick_enabled=self.autoclick.isChecked(),
                        autoclick_dry_run=not self.autoclick_real.isChecked(),
+                       shadow_mode=self.shadow_mode.isChecked(),
+                       bankroll_enabled=self.bankroll_enabled.isChecked(),
+                       bankroll_start=self.bankroll_start.text().strip() or "100",
+                       bankroll_stop_loss_pct=round(self.bankroll_stop.value(), 2),
                        autoclick_threshold=self.click_threshold.text().strip(),
                        autoclick_delay_ms=self.click_delay.value(),
                        autoclick_skip_rounds=self.click_wait.value(),
@@ -905,6 +950,8 @@ class MainWindow(QMainWindow):
                        smart_play_learning_minutes=self.smart_learning.value(),
                        smart_play_min_confidence=self.smart_min_conf.value() / 100,
                        smart_play_two_colors=self.smart_two.isChecked(),
+                       smart_compare_models=self.smart_compare.text().strip(),
+                       smart_latency_budget_ms=self.smart_latency.value(),
                        bot_mode=self.settings.bot_mode,
                        turnbal_red_enabled=self.tb_red_on.isChecked(),
                        turnbal_green_enabled=self.tb_green_on.isChecked(),
@@ -966,6 +1013,11 @@ class MainWindow(QMainWindow):
         accuracy = report.get("accuracy")
         if tries and accuracy is not None:
             parts.append(f"دقت مدل: {accuracy:.0%} در {tries} پیش‌بینی")
+        if report.get("brier") is not None:
+            parts.append(f"Brier: {report['brier']:.3f}")
+        selection = report.get("selection")
+        if selection:
+            parts.append(selection)
         bets = report.get("bets") or ()
         if report.get("ok") and bets:
             parts.append("انتخاب برای دست بعد: " + " + ".join(names.get(bet, bet) for bet in bets))
@@ -987,6 +1039,32 @@ class MainWindow(QMainWindow):
         if on:
             self.test_smart_connection()
 
+    def run_preflight_check(self):
+        """یک‌بار نواحی، OCR، شبکهٔ رنگ و اتصال مدل را بررسی کن (بدون کلیک)."""
+        self.preflight_status.setText("در حال پیش‌بررسی نواحی و OCR…")
+        QApplication.processEvents()
+        try:
+            # نواحیِ داخل فرم (حتی پیش از ذخیره) بررسی شوند.
+            settings = self._settings_from_form()
+            settings.validate()
+        except Exception:
+            settings = self.settings
+        try:
+            checks = run_preflight(settings)
+        except Exception as exc:  # noqa: BLE001 - نمایش خطا به کاربر
+            self.preflight_status.setText("پیش‌بررسی ناموفق: " + str(exc))
+            return
+        self.preflight_status.setText(preflight_summary(checks))
+        problems = preflight_failed(checks)
+        if problems:
+            QMessageBox.warning(self, "پیش‌بررسی",
+                                "\n".join(check.label for check in problems))
+
+    def _resolved_key(self) -> str:
+        """کلید فرم؛ اگر خالی بود، متغیر محیطی/کلید ذخیره‌شده."""
+        typed = self.smart_key.text().strip()
+        return typed or self.settings.resolved_key()
+
     def test_smart_connection(self):
         """اتصال، پورت و کلید را قبل از شروع پایش آزمایش کن."""
         try:
@@ -995,7 +1073,7 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "آدرس نامعتبر", str(exc))
             return
         self.smart_probe_status.setText("در حال اتصال به پرووایدر…")
-        self.smart_probe = SmartProbeWorker(self.smart_url.text(), self.smart_key.text(),
+        self.smart_probe = SmartProbeWorker(self.smart_url.text(), self._resolved_key(),
                                             min(15, self.smart_timeout.value()))
         self.smart_probe.done.connect(self._smart_probe_done)
         self.smart_probe.failed.connect(
@@ -1019,7 +1097,8 @@ class MainWindow(QMainWindow):
         else:
             verdict = report.get("verdict")
             if verdict is None:
-                self.smart_status.setText("پاسخ مدل قابل خواندن نبود — متن خام را ببینید")
+                note = report.get("selection") or "پاسخ مدل قابل خواندن نبود — متن خام را ببینید"
+                self.smart_status.setText(note)
                 self.smart_status.setStyleSheet("font-size:16px;font-weight:700;color:#e6ca4f;")
             else:
                 color = {"RED": "#e05a5a", "GREEN": "#2ecc71",
@@ -1229,6 +1308,10 @@ class MainWindow(QMainWindow):
         self.autoclick.setChecked(self.settings.autoclick_enabled)
         self._refresh_autoclick_label()
         self.autoclick_real.setChecked(not self.settings.autoclick_dry_run)
+        self.shadow_mode.setChecked(self.settings.shadow_mode)
+        self.bankroll_enabled.setChecked(self.settings.bankroll_enabled)
+        self.bankroll_start.setText(self.settings.bankroll_start)
+        self.bankroll_stop.setValue(self.settings.bankroll_stop_loss_pct)
         self.click_threshold.setText(self.settings.autoclick_threshold)
         self.click_delay.setValue(self.settings.autoclick_delay_ms)
         self.click_wait.setValue(self.settings.autoclick_skip_rounds)
@@ -1260,6 +1343,8 @@ class MainWindow(QMainWindow):
         self.smart_learning.setValue(self.settings.smart_play_learning_minutes)
         self.smart_min_conf.setValue(round(self.settings.smart_play_min_confidence * 100))
         self.smart_two.setChecked(self.settings.smart_play_two_colors)
+        self.smart_compare.setText(self.settings.smart_compare_models)
+        self.smart_latency.setValue(self.settings.smart_latency_budget_ms)
         self.tb_red_on.setChecked(self.settings.turnbal_red_enabled)
         self.tb_green_on.setChecked(self.settings.turnbal_green_enabled)
         self.tb_yellow_on.setChecked(self.settings.turnbal_yellow_enabled)
@@ -1297,8 +1382,7 @@ class MainWindow(QMainWindow):
             report = clicker.test()
         finally:
             clicker.close()
-        label = {"clicked": "کلیک شد", "dry-run": "آزمایشی", "click failed": "کلیک ناموفق"}.get(
-            report.reason, "انجام نشد")
+        label = CLICK_REASON_LABELS.get(report.reason, "انجام نشد")
         if report.point is None:
             self.click_status.setText(
                 f"کلیک تست: انجام نشد — {report.reason}. "
@@ -1307,12 +1391,13 @@ class MainWindow(QMainWindow):
             self.click_status.setText(f"کلیک تست: {label} — {report.reason} {report.point}")
 
     def _on_click(self, report):
-        label = {"clicked": "کلیک شد", "click failed": "کلیک ناموفق"}.get(report.reason, "انجام نشد")
+        label = CLICK_REASON_LABELS.get(report.reason, "انجام نشد")
         budget = (f" | باقی‌مانده {report.remaining}/{self.settings.autoclick_max_clicks}"
                   if report.remaining else "")
         forecast = f" | پیش‌بینی: {report.forecast}" if report.forecast else ""
-        self.click_status.setText(f"وضعیت کلیک: {label} — {report.reason}{budget}{forecast} "
-                                  f"{report.point or ''}")
+        balance = f" | سرمایه: {report.balance:.2f}" if report.balance is not None else ""
+        self.click_status.setText(f"وضعیت کلیک: {label} — {report.reason}{budget}{forecast}"
+                                  f"{balance} {report.point or ''}")
         if report.clicked:
             self._add_history(["", "", "", "", datetime.now().isoformat(timespec="seconds"), "", "",
                                f"CLICK {report.reason}: {report.point}"])

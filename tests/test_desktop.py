@@ -7,9 +7,19 @@ import numpy as np
 import pytest
 from crash_watcher import StrategyConfig, StrategyEngine
 from crash_watcher.desktop.clicker import AutoClicker
+from crash_watcher.desktop.bankroll import Bankroll
 from crash_watcher.desktop.config import DesktopSettings, Region, load_settings, save_settings
 from crash_watcher.desktop.final_result import (BangDetector, BangRecognizer, FinalReading,
                                                  parse_bang, parse_history_entry)
+from crash_watcher.desktop.model_compare import (ModelAttempt, ModelLeaderboard,
+                                                  compare as compare_models, parse_models)
+from crash_watcher.desktop.preflight import run_preflight
+from crash_watcher.desktop.secrets_store import is_protected, protect, unprotect
+from crash_watcher.desktop.smart_play import SmartPlanner
+from crash_watcher.desktop.smart_review import SmartSnapshot, SmartVerdict
+from crash_watcher.desktop.turnbal import (ColorRule, TurnbalCalibration, TurnbalGuard,
+                                            calibrate, build_prompt as turnbal_prompt)
+from types import SimpleNamespace
 from crash_watcher.desktop.forecast import ColorForecaster, Forecast
 from crash_watcher.desktop.color_grid import read_grid
 from crash_watcher.desktop.signals import row_yellow_due
@@ -242,15 +252,16 @@ def test_clicker_clicks_once_per_round_and_respects_cooldown(no_detection):
     blocked = slow.fire("b", Decimal("10.00"))
     assert not blocked.clicked and blocked.reason == "cooldown" and len(sender.calls) == 3
 
-def test_clicker_clicks_in_dry_run_and_never_when_disabled(no_detection):
+def test_dry_run_reports_the_click_but_never_sends_it(no_detection):
     sender = _Sender()
     dry = AutoClicker(_clicker(autoclick_dry_run=True), sender=sender)
     report = dry.fire("r1", Decimal("10.00"))
-    assert report.clicked and report.reason == "clicked"
-    assert sender.calls == [(130, 220, True)]
+    assert not report.clicked and report.dry_run
+    assert report.reason == "dry run: would click"
+    assert report.point == (130, 220) and sender.calls == []
     off = AutoClicker(DesktopSettings(autoclick_enabled=False), sender=sender)
     assert off.fire("r1", Decimal("99.00")).reason == "disabled"
-    assert len(sender.calls) == 1
+    assert sender.calls == []
 
 
 
@@ -579,3 +590,201 @@ def test_clicker_without_target_sends_nothing(no_detection):
                                          autoclick_cooldown_ms=0, autoclick_skip_rounds=0),
                          sender=sender).fire("r1", Decimal("10.00"))
     assert not report.clicked and report.reason == "target not found" and sender.calls == []
+
+
+# --- shadow mode, bankroll, turnbal guards, model comparison, secrets ---------
+
+def test_shadow_mode_never_sends_but_records_the_decision(no_detection):
+    sender = _Sender()
+    clicker = AutoClicker(_clicker(shadow_mode=True), sender=sender)
+    report = clicker.fire("r1", Decimal("10.00"))
+    assert not report.clicked and report.shadow
+    assert report.reason == "shadow: would click" and report.target == "YELLOW"
+    assert sender.calls == []
+
+
+def test_dry_run_cashout_does_not_send_a_click(no_detection):
+    sender = _Sender()
+    clicker = AutoClicker(_clicker(autoclick_dry_run=True, cashout_enabled=True),
+                          sender=sender)
+    clicker.fire("r1", Decimal("10.00"))
+    clicker.set_smart_play((), 1.5)
+    clicker.fire("r2", Decimal("1.20"))
+    clicker.tick(Decimal("1.45"))
+    clicker.tick(Decimal("1.60"))
+    assert sender.calls == []
+
+
+def test_bankroll_stops_the_session_after_the_loss_limit(no_detection):
+    sender = _Sender()
+    clicker = AutoClicker(_clicker(bankroll_enabled=True, bankroll_start="10",
+                                   bankroll_stop_loss_pct=20, fixed_bet_amount="10"),
+                          sender=sender)
+    assert clicker.fire("r1", Decimal("10.00")).clicked
+    assert len(sender.calls) == 1
+    # The click was on yellow; a red round loses the whole stake.
+    clicker.fire("r2", Decimal("1.50"))
+    assert clicker.balance == 0 and clicker.bankroll.stopped
+    blocked = clicker.fire("r3", Decimal("10.00"))
+    assert not blocked.clicked and "capital stop-loss" in blocked.reason
+    assert len(sender.calls) == 1
+
+
+def test_bankroll_settles_a_win_and_a_loss_with_the_colour_payout():
+    account = Bankroll(10, 0.2)
+    account.settle(2, 10, True)
+    assert account.balance == 28 and account.realized == 18 and account.wins == 1
+    account.settle(2, 2, False)
+    assert account.balance == 26 and account.losses == 1 and not account.stopped
+
+
+def test_bankroll_treats_a_hedge_and_a_simulated_stake_as_break_even():
+    account = Bankroll(10, 0.2)
+    assert account.settle(2, 2, None) == 0
+    assert account.balance == 10 and account.break_even == 1
+    assert account.wins == account.losses == 0
+    assert account.settle(0, 2, False) == 0
+    assert account.balance == 10 and account.losses == 0
+
+
+def test_turnbal_calibration_rejects_disabled_and_low_confidence():
+    calibration = TurnbalCalibration(yellow=ColorRule(False, 0.8, 2),
+                                     green=ColorRule(True, 0.6, 3))
+    rejected, reason = calibrate(SmartVerdict("YELLOW", 0.95, ""), calibration)
+    assert rejected is None and "غیرفعال" in reason
+    weak, reason = calibrate(SmartVerdict("GREEN", 0.5, ""), calibration)
+    assert weak is None and "کمتر" in reason
+    allowed, _ = calibrate(SmartVerdict("GREEN", 0.7, "", cashout=1.8), calibration)
+    assert allowed is not None and allowed.cashout == 1.8
+
+
+def test_turnbal_guard_enforces_max_streak():
+    calibration = TurnbalCalibration(max_streak=2, min_gap=0, red=ColorRule(True, 0.5, 99))
+    guard = TurnbalGuard(calibration)
+    verdict = SmartVerdict("RED", 0.9, "")
+    assert guard.check(verdict)[0] is verdict
+    guard.begin(("RED",))
+    guard.observe("RED")
+    assert guard.check(verdict)[0] is verdict
+    guard.begin(("RED",))
+    guard.observe("GREEN")
+    blocked, reason = guard.check(verdict)
+    assert blocked is None and "پشت‌سرهم" in reason
+
+
+def test_turnbal_guard_enforces_the_gap_between_bets():
+    calibration = TurnbalCalibration(max_streak=99, min_gap=2, red=ColorRule(True, 0.5, 99))
+    guard = TurnbalGuard(calibration)
+    verdict = SmartVerdict("RED", 0.9, "")
+    guard.begin(("RED",))
+    guard.observe("GREEN")
+    assert guard.check(verdict)[0] is None
+    guard.observe("GREEN")
+    assert guard.check(verdict)[0] is None       # only one round has passed
+    guard.observe("GREEN")
+    assert guard.check(verdict)[0] is verdict
+
+
+def test_turnbal_guard_enforces_attempts_per_cycle():
+    calibration = TurnbalCalibration(max_streak=99, min_gap=0, red=ColorRule(True, 0.5, 1))
+    guard = TurnbalGuard(calibration)
+    verdict = SmartVerdict("RED", 0.9, "")
+    guard.begin(("RED",))
+    guard.observe("GREEN")
+    blocked, reason = guard.check(verdict)
+    assert blocked is None and "تلاش" in reason
+
+
+def test_turnbal_guard_blocks_below_the_cycle_win_rate():
+    calibration = TurnbalCalibration(max_streak=99, min_gap=0, min_cycle_win=0.6,
+                                     red=ColorRule(True, 0.5, 99))
+    guard = TurnbalGuard(calibration, min_samples=2)
+    verdict = SmartVerdict("RED", 0.9, "")
+    for _ in range(2):
+        guard.begin(("RED",))
+        guard.observe("GREEN")
+    blocked, reason = guard.check(verdict)
+    assert blocked is None and "نرخ برد" in reason
+
+
+def test_turnbal_guard_caps_the_cashout_at_the_emergency_exit():
+    calibration = TurnbalCalibration(emergency_exit=1.55)
+    assert TurnbalGuard(calibration).cap_cashout(1.90) == 1.55
+    assert TurnbalGuard(calibration).cap_cashout(1.45) == 1.45
+
+
+def test_turnbal_prompt_states_the_enforced_limits():
+    calibration = TurnbalCalibration(max_streak=4, min_gap=2, emergency_exit=1.55,
+                                     min_cycle_win=0.55)
+    text = turnbal_prompt(SmartSnapshot(recent=("1.20", "9.00")), calibration)
+    assert "4 دست" in text and "2 دست" in text
+    assert "1.55" in text and "55%" in text
+
+
+def test_smart_planner_scores_the_second_colour_as_break_even_only():
+    planner = SmartPlanner(0, 0.0, True, clock=lambda: 0)
+    planner.store(SmartVerdict("RED", 0.7, "", second="GREEN"), "r1")
+    planner.observe("r2", "GREEN")
+    assert planner.tries == 1 and planner.hits == 0 and planner.break_even == 1
+    assert planner.measured_accuracy == 0.0
+    assert planner.brier == pytest.approx(0.49)
+    planner.store(SmartVerdict("RED", 0.9, ""), "r2")
+    planner.observe("r3", "RED")
+    assert planner.hits == 1 and planner.tries == 2
+    assert planner.brier == pytest.approx((0.49 + 0.01) / 2)
+
+
+def test_model_leaderboard_picks_the_lowest_brier_and_handles_cold_start(tmp_path):
+    board = ModelLeaderboard(tmp_path / "scores.json", min_samples=3)
+    for _ in range(3):
+        board.record("good", 0.9, True)
+        board.record("bad", 0.9, False)
+    board.save()
+    chosen, note = board.choose([ModelAttempt("good", SmartVerdict("RED", 0.5, "")),
+                                 ModelAttempt("bad", SmartVerdict("GREEN", 0.99, ""))])
+    assert chosen.model == "good" and "Brier" in note
+    assert ModelLeaderboard(tmp_path / "scores.json", min_samples=3).best(["good"])
+    cold = ModelLeaderboard(None, min_samples=3)
+    chosen, note = cold.choose([ModelAttempt("a", SmartVerdict("RED", 0.4, "")),
+                                ModelAttempt("b", SmartVerdict("GREEN", 0.9, ""))])
+    assert chosen.model == "b" and "سرد" in note
+
+
+def test_compare_runs_models_in_parallel_and_isolates_errors():
+    attempts = compare_models(["a", "b", "c"],
+                              lambda model: (SmartVerdict("RED", 0.6, model), model, "p"))
+    assert [attempt.model for attempt in attempts] == ["a", "b", "c"]
+    assert all(attempt.ok and attempt.verdict.reason == attempt.model for attempt in attempts)
+
+    def boom(model):
+        raise RuntimeError("unreachable")
+
+    failed = compare_models(["x"], boom)
+    assert failed[0].error == "unreachable" and not failed[0].ok
+    assert parse_models("a, b، a ,, c") == ["a", "b", "c"]
+
+
+def test_settings_key_is_encrypted_at_rest_and_env_wins(tmp_path, monkeypatch):
+    sealed = protect("sk-secret-123456")
+    assert unprotect(sealed) == "sk-secret-123456"
+    stored = tmp_path / "settings.json"
+    save_settings(DesktopSettings(smart_review_key="sk-secret-123456"), stored)
+    if is_protected(sealed):
+        assert "sk-secret-123456" not in stored.read_text(encoding="utf-8")
+    assert load_settings(stored).smart_review_key == "sk-secret-123456"
+    monkeypatch.setenv("CRASH_WATCHER_API_KEY", "env-key")
+    assert DesktopSettings(smart_review_key="file-key").resolved_key() == "env-key"
+    monkeypatch.delenv("CRASH_WATCHER_API_KEY")
+    assert DesktopSettings(smart_review_key="file-key").resolved_key() == "file-key"
+
+
+def test_preflight_flags_missing_regions_and_accepts_a_configured_setup():
+    checks = run_preflight(DesktopSettings(), capture=lambda region: None, check_ocr=False)
+    problems = {check.name for check in checks if not check.ok}
+    assert "ناحیهٔ نتیجه (۲)" in problems and "هدف کلیک / دکمهٔ شرط" in problems
+    image = np.zeros((20, 40, 3), np.uint8)
+    good = DesktopSettings(result_region=Region(1, 0, 0, 40, 20),
+                           chart_region=Region(1, 0, 0, 40, 20), click_point=(5, 5))
+    checks = run_preflight(good, capture=lambda region: image, check_ocr=False,
+                           grid=lambda picture: SimpleNamespace(columns=3, rows=2))
+    assert all(check.ok for check in checks), [check.label for check in checks]

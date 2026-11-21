@@ -54,14 +54,14 @@ def test_two_colours_are_kept_or_trimmed_by_setting():
     assert single.decision().bets == ("YELLOW",)
 
 
-def test_hedge_hit_counts_as_correct_and_weak_accuracy_stops_betting():
+def test_hedge_hit_is_break_even_not_a_hit_and_weak_accuracy_stops_betting():
     planner = SmartPlanner(learning_minutes=0, min_confidence=0.40)
     planner.store(SmartVerdict("YELLOW", 0.5, "شک", second="RED"), "1")
-    planner.observe("2", "RED")  # رنگ دوم زد: سربه‌سر، نه باخت
-    assert planner.hits == 1 and planner.break_even == 1
+    planner.observe("2", "RED")  # رنگ دوم زد: سربه‌سر است، نه پیش‌بینی درست
+    assert planner.hits == 0 and planner.break_even == 1 and planner.tries == 1
     planner.store(SmartVerdict("GREEN", 0.5, "x"), "2")
     planner.observe("3", "YELLOW")
-    assert planner.hits == 1 and planner.tries == 2
+    assert planner.hits == 0 and planner.tries == 2
     for index in range(20):
         planner.store(SmartVerdict("GREEN", 0.9, "x"), str(index))
         planner.observe(str(index + 100), "YELLOW")
@@ -93,7 +93,8 @@ def test_parse_verdict_reads_the_second_colour():
 
 
 def _settings(**changes) -> DesktopSettings:
-    base = dict(autoclick_enabled=True, autoclick_delay_ms=0, autoclick_cooldown_ms=0,
+    base = dict(autoclick_enabled=True, autoclick_dry_run=False,
+                autoclick_delay_ms=0, autoclick_cooldown_ms=0,
                 smart_review_enabled=True, smart_play_enabled=True,
                 smart_play_learning_minutes=0, smart_play_two_colors=True,
                 bet_point_red=(10, 20), bet_point_green=(15, 25), bet_point_yellow=(30, 40))

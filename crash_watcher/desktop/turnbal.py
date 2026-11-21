@@ -13,7 +13,7 @@
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from .smart_review import (EXIT_MAX, EXIT_MIN, SmartSnapshot, SmartVerdict,
                            ask, parse_verdict)
@@ -134,6 +134,89 @@ def build_prompt(snapshot: SmartSnapshot, calibration: TurnbalCalibration,
            '{"bet":"RED|GREEN|YELLOW|SKIP","cashout":1.45,"confidence":0.0,'
            '"reason":"یک جمله فارسی"}')
     )
+
+
+@dataclass
+class TurnbalGuard:
+    """اجرای واقعی محافظ‌های کالیبراسیون در کد، نه فقط در پرامپت.
+
+    * `max_streak`: بیش از این تعداد شرط پشت‌سرهم بسته نمی‌شود؛
+    * `min_gap`: بعد از هر شرط دست‌کم این تعداد دست صبر می‌شود؛
+    * `*_attempts`: هر رنگ در هر چرخه فقط تا این تعداد تلاش می‌شود و با
+      بردِ همان رنگ شمارنده‌های چرخه صفر می‌شوند؛
+    * `min_cycle_win`: وقتی نرخ برد اندازه‌گیری‌شده از این عدد کمتر شد،
+      تا پایان جلسه هیچ شرط تازه‌ای بسته نمی‌شود.
+    """
+
+    calibration: TurnbalCalibration
+    min_samples: int = 20
+    _streak: int = field(default=0, init=False)
+    # اولین شرطِ جلسه فاصله نمی‌خواهد؛ فقط بین دو شرط شمرده می‌شود.
+    _gap: int = field(default=10 ** 6, init=False)
+    _attempts: dict[str, int] = field(default_factory=dict, init=False)
+    _wins: int = field(default=0, init=False)
+    _tries: int = field(default=0, init=False)
+    _pending: tuple[str, ...] | None = field(default=None, init=False)
+
+    # -- state ---------------------------------------------------------
+    def observe(self, color: str) -> None:
+        """دست تازه بسته شد: شرط قبلی را بسنج و شمارنده‌ها را جلو ببر."""
+        if self._pending is not None:
+            bets, self._pending = self._pending, None
+            won = bool(bets) and color == bets[0]
+            self._tries += 1
+            self._wins += 1 if won else 0
+            if bets:
+                self._attempts[bets[0]] = self._attempts.get(bets[0], 0) + 1
+            if won:
+                self._attempts.clear()  # چرخهٔ تازه بعد از برد
+            self._streak += 1
+            self._gap = 0
+        else:
+            self._streak = 0
+            self._gap += 1
+
+    def begin(self, bets) -> None:
+        """شرطی که همین حالا واقعاً بسته شد را ثبت کن (بعد از کلیک)."""
+        self._pending = tuple(color for color in (bets or ()) if color)
+
+    # -- checks --------------------------------------------------------
+    @property
+    def win_rate(self) -> float | None:
+        return self._wins / self._tries if self._tries else None
+
+    def check(self, verdict: SmartVerdict | None) -> tuple[SmartVerdict | None, str]:
+        """آیا این تصمیم با محافظ‌های کالیبراسیون سازگار است؟"""
+        if verdict is None or verdict.bet == "SKIP" or not verdict.bets:
+            return verdict, ""
+        rate = self.win_rate
+        if (rate is not None and self._tries >= self.min_samples
+                and rate < self.calibration.min_cycle_win):
+            return None, (f"نرخ برد {rate:.0%} کمتر از کف "
+                          f"{self.calibration.min_cycle_win:.0%} است")
+        if self._streak >= self.calibration.max_streak:
+            return None, (f"سقف {self.calibration.max_streak} شرط پشت‌سرهم پر است؛ "
+                          "دست‌کم یک دست صبر")
+        if self._gap < self.calibration.min_gap:
+            return None, (f"باید {self.calibration.min_gap} دست بین دو شرط فاصله باشد "
+                          f"({self._gap} دست گذشته)")
+        primary = verdict.bets[0]
+        rule = self.calibration.rule(primary)
+        used = self._attempts.get(primary, 0)
+        if used >= rule.max_attempts:
+            return None, (f"سهمیهٔ {rule.max_attempts} تلاش "
+                          f"{NAMES.get(primary, primary)} در این چرخه پر شده است")
+        return verdict, ""
+
+    def cap_cashout(self, value: float | None) -> float:
+        """هدف خروج هرگز از خروج اضطراری دیرتر نباشد."""
+        target = self.calibration.cashout(value)
+        ceiling = float(self.calibration.emergency_exit)
+        return round(max(self.calibration.cashout_min, min(target, ceiling)), 2)
+
+    def stats(self) -> dict:
+        return {"win_rate": self.win_rate, "tries": self._tries, "streak": self._streak,
+                "gap": self._gap, "attempts": dict(self._attempts)}
 
 
 def calibrate(verdict: SmartVerdict | None,

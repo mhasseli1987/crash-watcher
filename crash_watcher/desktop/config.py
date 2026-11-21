@@ -2,10 +2,12 @@
 from dataclasses import asdict, dataclass, field, fields
 from decimal import Decimal, InvalidOperation
 import json
+import os
 import sys
 from pathlib import Path
 from crash_watcher.core.config import StrategyConfig, positive_number
 from crash_watcher.vision.capture import CaptureConfig
+from .secrets_store import protect, unprotect
 
 PROJECT_ROOT = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) else Path(__file__).resolve().parents[2]
 SETTINGS_PATH = PROJECT_ROOT / "settings.json"
@@ -45,6 +47,9 @@ class DesktopSettings:
     autoclick_max_clicks: int = 3
     autoclick_skip_rounds: int = 7
     autoclick_dry_run: bool = True
+    # حالت سایه: همهٔ تصمیم‌ها و گزارش‌ها مثل حالت واقعی ساخته می‌شوند اما هیچ
+    # کلیکی فرستاده نمی‌شود؛ برای سنجش عملکرد بدون ریسک.
+    shadow_mode: bool = False
     autoclick_restore_cursor: bool = True
     smart_click_enabled: bool = False
     prediction_min_confidence: float = 0.60
@@ -52,8 +57,14 @@ class DesktopSettings:
     smart_review_enabled: bool = False
     smart_review_url: str = "http://127.0.0.1:31415/v1"
     smart_review_key: str = ""
+    # کلید می‌تواند در متغیر محیطی بماند و اصلاً در settings.json ذخیره نشود.
+    smart_review_key_env: str = "CRASH_WATCHER_API_KEY"
     smart_review_model: str = "auto"
+    # فهرست مدل‌ها برای مقایسهٔ موازی؛ خالی = فقط همان smart_review_model.
+    smart_compare_models: str = ""
     smart_review_timeout_s: int = 45
+    # بودجهٔ تأخیر: پاسخی که دیرتر از این برسد برای دست بعد کهنه است.
+    smart_latency_budget_ms: int = 4000
     smart_review_every_rounds: int = 1
     smart_review_rules: str = ""
     # «ورود هوشمند به بازی»: اول یادگیری، بعد شرط‌بندی بر پایهٔ تصمیم آمادهٔ مدل.
@@ -92,6 +103,13 @@ class DesktopSettings:
     value_bets: dict[str, str] = field(default_factory=lambda: {
         "1.00": "GREEN", "1.11": "GREEN", "1.99": "GREEN", "2.08": "YELLOW"})
     review_window_s: int = 1800
+    # استاپ‌لاس سرمایه: هیچ پولی جابه‌جا نمی‌شود؛ فقط سنجهٔ ریسک جلسه است.
+    bankroll_enabled: bool = False
+    bankroll_start: str = "100"
+    bankroll_stop_loss_pct: float = 20.0
+    payout_red: float = 2.0
+    payout_green: float = 2.0
+    payout_yellow: float = 10.0
     fixed_bet_amount: str = "10"
     max_attempts: int = 8
     yellow_threshold: str = "10.00"
@@ -100,6 +118,20 @@ class DesktopSettings:
     ocr_confidence: float = 0.55
     theme: str = "dark"
     tesseract_path: str = ""
+
+    def resolved_key(self) -> str:
+        """کلید مؤثر: متغیر محیطی بر مقدار ذخیره‌شده اولویت دارد."""
+        name = (self.smart_review_key_env or "").strip()
+        if name:
+            value = os.environ.get(name, "").strip()
+            if value:
+                return value
+        return self.smart_review_key
+
+    @property
+    def simulated(self) -> bool:
+        """هیچ کلیکی نباید فرستاده شود."""
+        return bool(self.autoclick_dry_run or self.shadow_mode)
 
     def strategy(self) -> StrategyConfig:
         return StrategyConfig(
@@ -158,9 +190,34 @@ class DesktopSettings:
             raise ValueError("smart review key and rules must be text")
         if not isinstance(self.smart_review_model, str):
             raise ValueError("smart_review_model must be text")
+        for name in ("smart_review_key_env", "smart_compare_models"):
+            if not isinstance(getattr(self, name), str):
+                raise ValueError(f"{name} must be text")
         if (type(self.smart_review_timeout_s) is not int
                 or not 5 <= self.smart_review_timeout_s <= 300):
             raise ValueError("smart_review_timeout_s must be an integer between 5 and 300")
+        if (type(self.smart_latency_budget_ms) is not int
+                or not 500 <= self.smart_latency_budget_ms <= 120000):
+            raise ValueError("smart_latency_budget_ms must be between 500 and 120000")
+        if type(self.shadow_mode) is not bool:
+            raise ValueError("shadow_mode must be a boolean")
+        if type(self.bankroll_enabled) is not bool:
+            raise ValueError("bankroll_enabled must be a boolean")
+        if not isinstance(self.bankroll_start, str):
+            raise ValueError("bankroll_start must be text")
+        try:
+            positive_number(Decimal(self.bankroll_start), "bankroll_start")
+        except (InvalidOperation, TypeError, ValueError) as exc:
+            raise ValueError("bankroll_start must be a positive number") from exc
+        if (not isinstance(self.bankroll_stop_loss_pct, (int, float))
+                or isinstance(self.bankroll_stop_loss_pct, bool)
+                or not 0 < self.bankroll_stop_loss_pct <= 100):
+            raise ValueError("bankroll_stop_loss_pct must be between 0 and 100")
+        for name in ("payout_red", "payout_green", "payout_yellow"):
+            value = getattr(self, name)
+            if (not isinstance(value, (int, float)) or isinstance(value, bool)
+                    or not 1.0 <= value <= 100):
+                raise ValueError(f"{name} must be between 1 and 100")
         if (type(self.smart_review_every_rounds) is not int
                 or not 1 <= self.smart_review_every_rounds <= 100):
             raise ValueError("smart_review_every_rounds must be an integer between 1 and 100")
@@ -251,6 +308,8 @@ def load_settings(path: Path = SETTINGS_PATH) -> DesktopSettings:
         # keep clicking ten rounds; the run is now wait 7, click 3.
         data["autoclick_skip_rounds"] = 7
         data["autoclick_max_clicks"] = 3
+    if isinstance(data.get("smart_review_key"), str):
+        data["smart_review_key"] = unprotect(data["smart_review_key"])
     result = DesktopSettings(**data)
     result.validate()
     return result
@@ -258,6 +317,9 @@ def load_settings(path: Path = SETTINGS_PATH) -> DesktopSettings:
 def save_settings(settings: DesktopSettings, path: Path = SETTINGS_PATH) -> None:
     settings.validate()
     path.parent.mkdir(parents=True, exist_ok=True)
+    data = asdict(settings)
+    # کلید در settings.json همیشه رمزشده است؛ متن‌ساده هرگز روی دیسک نمی‌ماند.
+    data["smart_review_key"] = protect(settings.smart_review_key)
     temporary = path.with_suffix(".tmp")
-    temporary.write_text(json.dumps(asdict(settings), indent=2), encoding="utf-8")
+    temporary.write_text(json.dumps(data, indent=2), encoding="utf-8")
     temporary.replace(path)

@@ -15,9 +15,11 @@ from .config import DesktopSettings, PROJECT_ROOT
 from .clicker import AutoClicker
 from .color_grid import read_grid
 from .final_result import BangDetector, BangRecognizer, parse_history_entry
+from .model_compare import (ModelAttempt, ModelLeaderboard, compare as compare_models,
+                            parse_models)
 from .smart_play import SmartPlanner
 from .smart_review import SmartSnapshot, append_log, build_prompt, grid_columns, review
-from .turnbal import TurnbalCalibration, build_prompt as build_turnbal_prompt
+from .turnbal import TurnbalCalibration, TurnbalGuard, build_prompt as build_turnbal_prompt
 from .turnbal import review as review_turnbal
 
 
@@ -58,6 +60,10 @@ class MonitorWorker(QThread):
         self._smart_rounds = 0
         self._smart_busy = False
         self._planner: SmartPlanner | None = None
+        self._guard: TurnbalGuard | None = None
+        # Brier هر مدل بین جلسه‌ها ذخیره می‌شود تا انتخاب خودکار واقعی باشد.
+        self._leaderboard = ModelLeaderboard(PROJECT_ROOT / "logs" / "model-scores.json")
+        self._compare_pending: list[tuple[str, tuple[str, ...], float]] = []
         self._chart_backend = None
 
     def configure(self, settings: DesktopSettings) -> None:
@@ -84,6 +90,8 @@ class MonitorWorker(QThread):
 
     def run(self) -> None:
         clicker = self._clicker = AutoClicker(self.settings)
+        self._guard = (TurnbalGuard(TurnbalCalibration.from_settings(self.settings))
+                       if self.settings.bot_mode == "turnbal" else None)
         # دورهٔ یادگیری از همین لحظهٔ شروع پایش شمرده می‌شود.
         planner = self._planner = SmartPlanner(
             self.settings.smart_play_learning_minutes,
@@ -175,14 +183,25 @@ class MonitorWorker(QThread):
                                 # اول نتیجهٔ دست تازه ثبت و پیش‌بینی قبلی سنجیده
                                 # می‌شود، بعد تصمیمِ آمادهٔ مدل برای دست بعد به
                                 # کلیکر داده می‌شود تا در پنجرهٔ کوتاه فقط کلیک کند.
-                                planner.observe(completed.round_id,
-                                                clicker.color(completed.multiplier))
+                                color = clicker.color(completed.multiplier)
+                                self._score_models(color)
+                                if self._guard is not None:
+                                    self._guard.observe(color)
+                                planner.observe(completed.round_id, color)
                                 ready = (planner.take() if self._smart_play_active()
                                          else None)
-                                clicker.set_smart_play(ready.bets if ready else (),
-                                                       ready.cashout if ready else None)
-                                self.click_report.emit(clicker.fire(completed.round_id,
-                                                                    completed.multiplier))
+                                cashout = ready.cashout if ready else None
+                                if ready is not None and self._guard is not None:
+                                    # خروج اضطراری کالیبراسیون روی هدف کش‌اوت اعمال
+                                    # می‌شود، نه فقط در متن پرامپت.
+                                    cashout = self._guard.cap_cashout(cashout)
+                                clicker.set_smart_play(ready.bets if ready else (), cashout)
+                                report = clicker.fire(completed.round_id,
+                                                      completed.multiplier)
+                                if (ready is not None and self._guard is not None
+                                        and report.rule == "smart-play"):
+                                    self._guard.begin(ready.bets)
+                                self.click_report.emit(report)
                                 review = clicker.take_review()
                                 if review is not None:
                                     self.review_report.emit(review)
@@ -237,6 +256,30 @@ class MonitorWorker(QThread):
         except Exception:
             return ()
 
+    def _score_models(self, color: str) -> None:
+        """پیش‌بینی همهٔ مدل‌های مقایسه‌شده را با رنگ واقعی بسنج."""
+        if not self._compare_pending:
+            return
+        pending, self._compare_pending = self._compare_pending, []
+        for model, bets, confidence in pending:
+            if not bets:
+                continue
+            self._leaderboard.record(model, confidence, color == bets[0])
+        self._leaderboard.save()
+
+    def _ask(self, model, snapshot, settings, turnbal, calibration, timeout):
+        """یک درخواست مدل؛ همین تابع در مقایسهٔ موازی هم استفاده می‌شود."""
+        key = settings.resolved_key()
+        if turnbal:
+            return review_turnbal(settings.smart_review_url, key, model, snapshot,
+                                  calibration, timeout, settings.autoclick_threshold,
+                                  settings.smart_review_rules,
+                                  allow_two=settings.smart_play_two_colors)
+        return review(settings.smart_review_url, key, model, snapshot, timeout,
+                      settings.autoclick_threshold, settings.smart_review_rules,
+                      min_confidence=settings.smart_play_min_confidence,
+                      allow_two=settings.smart_play_two_colors)
+
     def _smart_play_active(self) -> bool:
         """ورود هوشمند فقط وقتی معنا دارد که بررسی هوشمند هم روشن باشد."""
         if self.settings.bot_mode == "turnbal":
@@ -257,34 +300,53 @@ class MonitorWorker(QThread):
         started = perf_counter()
         turnbal = settings.bot_mode == "turnbal"
         calibration = TurnbalCalibration.from_settings(settings)
+        log_path = PROJECT_ROOT / "logs" / ("turnbal-review.jsonl" if turnbal
+                                           else "smart-review.jsonl")
+        models = parse_models(settings.smart_compare_models)
+        if len(models) < 2:
+            models = [settings.smart_review_model or "auto"]
+        # بودجه فقط تعیین می‌کند پاسخِ دیر برای دست بعد استفاده شود یا نه؛
+        # timeout همان مقدار تنظیمات می‌ماند تا تماس عادی قطع نشود.
+        budget = settings.smart_latency_budget_ms / 1000
+        timeout = settings.smart_review_timeout_s
+        attempts: list[ModelAttempt] = []
+        chosen: ModelAttempt | None = None
+        note = ""
         try:
-            if turnbal:
-                # تصمیم مدل پیش از دیدنِ آستانه‌های رنگ گرفته و بعد با همان
-                # کالیبراسیون سه‌رنگ تطبیق داده می‌شود.
-                printed = build_turnbal_prompt(snapshot, calibration,
-                                               settings.autoclick_threshold,
-                                               settings.smart_review_rules,
-                                               allow_two=settings.smart_play_two_colors)
-                verdict, raw, prompt = review_turnbal(
-                    settings.smart_review_url, settings.smart_review_key,
-                    settings.smart_review_model, snapshot, calibration,
-                    settings.smart_review_timeout_s, settings.autoclick_threshold,
-                    settings.smart_review_rules,
-                    allow_two=settings.smart_play_two_colors)
-                prompt = prompt or printed
+            if len(models) == 1:
+                # یک مدل: تماس مستقیم تا پیام خطای دقیق همان مدل بماند.
+                verdict, raw, prompt = self._ask(models[0], snapshot, settings, turnbal,
+                                                 calibration, timeout)
+                attempts = [ModelAttempt(models[0], verdict, raw, prompt,
+                                         perf_counter() - started)]
+                chosen = attempts[0]
             else:
-                verdict, raw, prompt = review(settings.smart_review_url, settings.smart_review_key,
-                                              settings.smart_review_model, snapshot,
-                                              settings.smart_review_timeout_s,
-                                              settings.autoclick_threshold, settings.smart_review_rules,
-                                              min_confidence=settings.smart_play_min_confidence,
-                                              allow_two=settings.smart_play_two_colors)
+                # همان اسنپ‌شات موازی به همهٔ مدل‌ها؛ خطای یکی بقیه را خراب نمی‌کند.
+                attempts = compare_models(
+                    models, lambda model: self._ask(model, snapshot, settings, turnbal,
+                                                    calibration, timeout))
+                chosen, note = self._leaderboard.choose(attempts)
+                if chosen is None:
+                    errors = "; ".join(f"{item.model}: {item.error}"
+                                       for item in attempts if item.error)
+                    raise RuntimeError(note + (f" ({errors})" if errors else ""))
+            verdict, raw, prompt = chosen.verdict, chosen.raw, chosen.prompt
+            if turnbal:
+                # محافظ‌های کالیبراسیون در کد اجرا می‌شوند، نه فقط در پرامپت.
+                guard = self._guard or TurnbalGuard(calibration)
+                self._guard = guard
+                gated, guard_reason = guard.check(verdict)
+                if gated is None and guard_reason:
+                    note = guard_reason
+                    raw = (raw or "") + f"\n[guard] {guard_reason}"
+                verdict = gated
         except Exception as exc:
             self._smart_busy = False
-            append_log(PROJECT_ROOT / "logs" / ("turnbal-review.jsonl" if turnbal
-                                                 else "smart-review.jsonl"),
+            append_log(log_path,
                        {"round": snapshot.current, "ok": False, "mode": settings.bot_mode,
-                        "error": str(exc)})
+                        "error": str(exc),
+                        "models": [{"model": item.model, "error": item.error}
+                                   for item in attempts]})
             fallback = (build_turnbal_prompt(snapshot, calibration, settings.autoclick_threshold,
                                              settings.smart_review_rules,
                                              allow_two=settings.smart_play_two_colors)
@@ -299,24 +361,54 @@ class MonitorWorker(QThread):
                                     **(self._planner.stats() if self._planner else {}),
                                     "prompt": fallback})
             return
-        self._smart_busy = False
         elapsed = perf_counter() - started
+        if elapsed > budget:
+            # پاسخ دیرتر از بودجه رسیده؛ برای دست بعد کهنه است و استفاده نمی‌شود.
+            self._smart_busy = False
+            append_log(log_path,
+                       {"round": snapshot.current, "ok": False, "late": True,
+                        "mode": settings.bot_mode, "seconds": round(elapsed, 2),
+                        "budget": budget, "model": chosen.model if chosen else None,
+                        "error": "latency budget exceeded"})
+            self.smart_report.emit(
+                {"ok": False, "round": snapshot.current, "mode": settings.bot_mode,
+                 "late": True,
+                 "error": (f"پاسخ مدل {elapsed:.1f} ثانیه طول کشید و از بودجهٔ "
+                           f"{budget:.1f} ثانیه گذشت؛ برای دست بعد استفاده نشد."),
+                 **(self._planner.stats() if self._planner else {})})
+            return
+        self._smart_busy = False
         planner = self._planner
         if planner is not None:
             # تصمیم برای دست بعد آماده می‌شود، پیش از بسته‌شدن ضریب جاری.
             planner.store(verdict, snapshot.current)
-        append_log(PROJECT_ROOT / "logs" / ("turnbal-review.jsonl" if turnbal
-                                             else "smart-review.jsonl"),
-                   {"round": snapshot.current, "ok": True, "mode": settings.bot_mode,
-                    "bet": verdict.bet if verdict else None,
-                    "second": verdict.second if verdict else None,
-                    "confidence": verdict.confidence if verdict else None,
-                    "reason": verdict.reason if verdict else "", "raw": raw,
-                    "phase": planner.phase if planner else None,
-                    "seconds": round(elapsed, 2), "model": settings.smart_review_model})
+        if len(attempts) > 1 and verdict is not None:
+            # پیش‌بینی همهٔ مدل‌ها با دور بعد سنجیده می‌شود تا Brier هرکدام واقعی باشد.
+            self._compare_pending = [(item.model, item.verdict.bets, item.verdict.confidence)
+                                     for item in attempts
+                                     if item.verdict and item.verdict.bets]
+        record = {"round": snapshot.current, "ok": True, "mode": settings.bot_mode,
+                  "bet": verdict.bet if verdict else None,
+                  "second": verdict.second if verdict else None,
+                  "confidence": verdict.confidence if verdict else None,
+                  "reason": verdict.reason if verdict else "", "raw": raw,
+                  "phase": planner.phase if planner else None,
+                  "seconds": round(elapsed, 2),
+                  "model": chosen.model if chosen else settings.smart_review_model,
+                  "chosen_model": chosen.model if chosen and len(attempts) > 1 else None,
+                  "selection": note,
+                  "models": [{"model": item.model,
+                              "bet": item.verdict.bet if item.verdict else None,
+                              "confidence": item.verdict.confidence if item.verdict else None,
+                              "seconds": round(item.elapsed, 2), "error": item.error}
+                             for item in attempts]}
+        append_log(log_path, record)
         self.smart_report.emit({"ok": True, "round": snapshot.current, "verdict": verdict,
                                 "mode": settings.bot_mode,
                                 "raw": raw, "prompt": prompt, "seconds": elapsed,
                                 "bets": verdict.bets if verdict else (),
+                                "model": record["model"], "selection": note,
+                                "models": record["models"],
+                                "leaderboard": self._leaderboard.summary(),
                                 **(planner.stats() if planner else {})})
 

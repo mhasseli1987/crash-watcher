@@ -11,6 +11,7 @@ import ctypes.wintypes
 import json
 import cv2
 import numpy as np
+from .bankroll import Bankroll
 from .config import DesktopSettings, PROJECT_ROOT
 from .color_grid import read_grid
 from .forecast import ColorForecaster
@@ -87,6 +88,9 @@ class ClickReport:
     target: str = ""
     rule: str = ""
     detail: str = ""
+    dry_run: bool = False
+    shadow: bool = False
+    balance: float | None = None
 
 
 RULE_LABELS = {"yellow-run": "صف ۷+۳ زرد",
@@ -128,6 +132,9 @@ class AutoClicker:
         self._pending_color: str | None = None
         self._smart_play: tuple[str, ...] = ()
         self._smart_cashout: float | None = None
+        # استاپ‌لاس سرمایه: فقط وقتی کاربر سرمایهٔ جلسه را روشن کند.
+        self.bankroll: Bankroll | None = None
+        self._refresh_bankroll()
         self._cashout_target: Decimal | None = None
         self._cashout_points: list[tuple[int, int]] = []
         self._cashout_prev: Decimal | None = None
@@ -150,13 +157,51 @@ class AutoClicker:
         """Rounds still to skip before the click window of the current run."""
         return self._waiting
 
+    def _refresh_bankroll(self) -> None:
+        """سرمایهٔ جلسه را از تنظیمات بساز؛ اگر خاموش شد، پاک کن."""
+        if not self.settings.bankroll_enabled:
+            self.bankroll = None
+            return
+        try:
+            start = float(Decimal(self.settings.bankroll_start))
+        except Exception:
+            self.bankroll = None
+            return
+        fraction = self.settings.bankroll_stop_loss_pct / 100
+        if (self.bankroll is None or self.bankroll.start != start
+                or self.bankroll.stop_loss_fraction != fraction):
+            self.bankroll = Bankroll(start, fraction)
+
     def update(self, settings: DesktopSettings) -> None:
         """Apply a settings change made while monitoring is already running."""
         self.settings = settings
+        self._refresh_bankroll()
 
     @property
     def enabled(self) -> bool:
         return self.settings.autoclick_enabled
+
+    @property
+    def _simulated_label(self) -> str:
+        """برچسب حالتِ بدون کلیک برای گزارش‌ها."""
+        return "shadow" if self.settings.shadow_mode else "dry run"
+
+    @property
+    def balance(self) -> float | None:
+        """موجودی سرمایهٔ جلسه؛ None یعنی استاپ‌لاس خاموش است."""
+        return self.bankroll.balance if self.bankroll is not None else None
+
+    def _stake(self) -> float:
+        """مبلغ ثابت هر شرط."""
+        try:
+            return float(Decimal(self.settings.fixed_bet_amount))
+        except Exception:
+            return 0.0
+
+    def _payout(self, color: str | None) -> float:
+        """پرداخت هر رنگ برای تسویهٔ سرمایه."""
+        return {"RED": self.settings.payout_red, "GREEN": self.settings.payout_green,
+                "YELLOW": self.settings.payout_yellow}.get(color or "GREEN", 2.0)
 
     def _detect(self):
         region = self.settings.click_region
@@ -262,9 +307,16 @@ class AutoClicker:
             point = self._bet_point("RED")
         if point is None:
             return ClickReport(False, "target not found", count=self._clicks)
+        if self.settings.simulated:
+            # حالت آزمایشی و سایه هر دو یعنی «بدون کلیک واقعی».
+            return ClickReport(False, f"{self._simulated_label}: would click",
+                               point, self._clicks, self._armed,
+                               dry_run=self.settings.autoclick_dry_run,
+                               shadow=self.settings.shadow_mode, balance=self.balance)
         self._wait_before_click()
         ok = self.sender(point[0], point[1], restore=self.settings.autoclick_restore_cursor)
-        return ClickReport(True, "clicked" if ok else "click failed", point, self._clicks, self._armed)
+        return ClickReport(True, "clicked" if ok else "click failed", point, self._clicks,
+                           self._armed, balance=self.balance)
 
     def color(self, value: Decimal) -> str:
         """رنگ ضریب — همین قاعدهٔ رنگ در بخش بررسی هوشمند هم استفاده می‌شود."""
@@ -290,7 +342,9 @@ class AutoClicker:
                      "clicked": report.clicked, "reason": report.reason,
                      "forecast": report.forecast, "target": report.target,
                      "rule": report.rule, "detail": report.detail,
-                     "clicks": report.count, "remaining": report.remaining}
+                     "clicks": report.count, "remaining": report.remaining,
+                     "dry_run": report.dry_run, "shadow": report.shadow,
+                     "balance": report.balance}
             with self.log_path.open("a", encoding="utf-8") as file:
                 file.write(json.dumps(entry, ensure_ascii=False) + "\n")
         except Exception:
@@ -346,6 +400,8 @@ class AutoClicker:
                 f"دقت شرطی: {model['cond_accuracy']:.0%}",
                 "",
                 *self._rule_lines(),
+                (f"سرمایهٔ جلسه: {self.bankroll.label()}" if self.bankroll else
+                 "سرمایهٔ جلسه: خاموش"),
                 "",
                 f"دادهٔ کامل هر دور: {self.log_path}",
                 f"بازبینی‌های ۳۰ دقیقه‌ای: {self.summary_path.parent / 'reviews.csv'}",
@@ -361,14 +417,29 @@ class AutoClicker:
         self._cashout_prev = None
         if not self.settings.autoclick_enabled:
             return ClickReport(False, "disabled", count=self._clicks)
+        if self.bankroll is not None and self.bankroll.stopped:
+            # کف استاپ‌لاس رد شده: تا شروع دوبارهٔ جلسه هیچ شرطی بسته نمی‌شود.
+            return ClickReport(False, f"capital stop-loss: {self.bankroll.label()}",
+                               count=self._clicks, balance=self.bankroll.balance)
         if round_id == self._last_id:
             return ClickReport(False, "same round", count=self._clicks, remaining=self._armed)
         color = self._color(value)
         if self._pending_rule is not None:
-            target_colors, rule = self._pending_rule
+            target_colors, rule, stake, payouts = self._pending_rule
             self._pending_rule = None
-            if target_colors and color in target_colors:
+            hit = bool(target_colors) and color in target_colors
+            if hit:
                 self._rule_stats.setdefault(rule, [0, 0])[0] += 1
+            if self.bankroll is not None and target_colors:
+                payout = payouts.get(color) or min(payouts.values())
+                # رنگ دوم پوشش است: نه سود، نه ضرر.
+                outcome = (True if color == target_colors[0]
+                           else None if color in target_colors[1:] else False)
+                self.bankroll.settle(stake, payout, outcome)
+                if self.bankroll.stopped:
+                    # همین شرط کف را رد کرد؛ دیگر در همین دست هم کلیکی نمی‌شود.
+                    return ClickReport(False, f"capital stop-loss: {self.bankroll.label()}",
+                                       count=self._clicks, balance=self.bankroll.balance)
         if self._pending_color is not None:
             # Score the forecast that was acted on against the round just finished.
             self._window["gated_total"] += 1
@@ -490,6 +561,7 @@ class AutoClicker:
         points = [(color, point) for color, point in points if point is not None]
         if not points:
             return ClickReport(False, "target not found", count=self._clicks, remaining=self._armed)
+        simulated = self.settings.simulated
         gated = (not row_click
                  and value_color is None and self._armed <= 0
                  and self.settings.smart_click_enabled)
@@ -501,7 +573,10 @@ class AutoClicker:
         self._window["clicks"] += 1
         if target_color or rule == "smart-play":
             colors = tuple(color for color, _ in points if color)
-            self._pending_rule = (colors, rule or "unknown")
+            # در حالت آزمایشی/سایه سرمایه جابه‌جا نمی‌شود؛ مبلغ صفر ثبت می‌شود.
+            stake = 0.0 if simulated else self._stake()
+            payouts = {color: self._payout(color) for color in colors}
+            self._pending_rule = (colors, rule or "unknown", stake, payouts)
             self._rule_stats.setdefault(rule or "unknown", [0, 0])[1] += 1
         if self._armed > 0:
             # Every clicked round of a run spends one, the trigger included, so a
@@ -509,9 +584,10 @@ class AutoClicker:
             self._armed -= 1
         ok = True
         for _, point in points:
+            if simulated:
+                continue
             # Permanent rule: each click waits at most one second after the round.
             self._wait_before_click()
-            # Every mode clicks: autoclick_dry_run only labels the report.
             ok = self.sender(point[0], point[1],
                              restore=self.settings.autoclick_restore_cursor) and ok
         if self.settings.cashout_enabled:
@@ -527,10 +603,14 @@ class AutoClicker:
             self._cashout_prev = None
         self._smart_cashout = None
         colors = tuple(color for color, _ in points if color)
-        return ClickReport(True, "clicked" if ok else "click failed", points[0][1], self._clicks,
+        reason = (f"{self._simulated_label}: would click" if simulated
+                  else "clicked" if ok else "click failed")
+        return ClickReport(not simulated and ok, reason, points[0][1], self._clicks,
                            self._armed, forecast=self.forecaster.forecast().label,
                            target="+".join(colors) or (target_color or ""),
-                           rule=rule, detail=row_detail)
+                           rule=rule, detail=row_detail,
+                           dry_run=self.settings.autoclick_dry_run,
+                           shadow=self.settings.shadow_mode, balance=self.balance)
 
     def wants_cashout(self) -> bool:
         """شرطی باز است و هنوز روی هدف خروج کلیک نشده؟"""
@@ -574,11 +654,15 @@ class AutoClicker:
         points, self._cashout_points = self._cashout_points, []
         self._cashout_prev = None
         ok = True
+        simulated = self.settings.simulated
         for point in points:
+            if simulated:
+                continue
             ok = self.sender(point[0], point[1],
                              restore=self.settings.autoclick_restore_cursor) and ok
-        self._log_cashout(value, ok,
-                          f"smart cashout target {target} on the bet button", points)
+        reason = (f"smart cashout target {target} on the bet button" if not simulated else
+                  f"{self._simulated_label}: would cash out at {target}")
+        self._log_cashout(value, ok and not simulated, reason, points)
 
     def _log_cashout(self, value, clicked: bool, reason: str, points=()) -> None:
         """ثبت هر تصمیم خروج؛ لاگ هرگز نباید تصمیم کلیک را خراب کند."""
