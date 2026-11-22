@@ -307,12 +307,7 @@ class AutoClicker:
             point = self._bet_point("RED")
         if point is None:
             return ClickReport(False, "target not found", count=self._clicks)
-        if self.settings.simulated:
-            # حالت آزمایشی و سایه هر دو یعنی «بدون کلیک واقعی».
-            return ClickReport(False, f"{self._simulated_label}: would click",
-                               point, self._clicks, self._armed,
-                               dry_run=self.settings.autoclick_dry_run,
-                               shadow=self.settings.shadow_mode, balance=self.balance)
+        # درخواست دستی کاربر «بدون کلیک» نیست: یک کلیک واقعی برای آزمون ارسال می‌شود.
         self._wait_before_click()
         ok = self.sender(point[0], point[1], restore=self.settings.autoclick_restore_cursor)
         return ClickReport(True, "clicked" if ok else "click failed", point, self._clicks,

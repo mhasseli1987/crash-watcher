@@ -1376,19 +1376,26 @@ class MainWindow(QMainWindow):
         self._add_history(["", "", "", "", datetime.now().isoformat(timespec="seconds"), "", "", "UNCERTAIN: " + message])
 
     def test_click(self):
-        """One manual click on the resolved target; dry-run only reports the point."""
-        clicker = AutoClicker(self.settings)
+        """One manual click on the resolved target, even while dry-run is on."""
         try:
-            report = clicker.test()
-        finally:
-            clicker.close()
-        label = CLICK_REASON_LABELS.get(report.reason, "انجام نشد")
+            clicker = AutoClicker(self.settings)
+            try:
+                report = clicker.test()
+            finally:
+                clicker.close()
+        except Exception as error:
+            self.click_status.setText(f"کلیک تست: خطا — {error}")
+            return
         if report.point is None:
             self.click_status.setText(
-                f"کلیک تست: انجام نشد — {report.reason}. "
-                "هدف کلیک تنظیم نشده: ناحیهٔ کلیک/نقطهٔ کلیک یا ناحیهٔ ۴ را انتخاب کن.")
+                "کلیک تست: انجام نشد — هدف کلیک تنظیم نشده. "
+                "نقطهٔ کلیک یا ناحیهٔ ۴ (دکمهٔ شرط) را انتخاب کن.")
+        elif report.clicked:
+            self.click_status.setText(f"کلیک تست: کلیک شد — {report.point}")
         else:
-            self.click_status.setText(f"کلیک تست: {label} — {report.reason} {report.point}")
+            self.click_status.setText(
+                f"کلیک تست: کلیک ناموفق — {report.point}؛ مکان‌نما جابه‌جا نشد. "
+                "اجرای برنامه با دسترسی معمولی و باز بودن صفحهٔ بازی را بررسی کن.")
 
     def _on_click(self, report):
         label = CLICK_REASON_LABELS.get(report.reason, "انجام نشد")

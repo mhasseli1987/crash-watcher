@@ -167,6 +167,13 @@ def _clicker(**overrides):
     values.update(overrides)
     return DesktopSettings(**values)
 
+def test_manual_click_test_clicks_even_in_dry_run(no_detection):
+    sender = _Sender()
+    clicker = AutoClicker(_clicker(autoclick_dry_run=True), sender=sender)
+    report = clicker.test()
+    assert report.clicked and sender.calls == [(130, 220, True)]
+
+
 def test_clicker_waits_for_a_high_round_then_clicks_the_region_centre(no_detection):
     sender = _Sender()
     clicker = AutoClicker(_clicker(), sender=sender)
