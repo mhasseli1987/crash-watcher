@@ -17,4 +17,16 @@ tools/*
 !tools/evaluate.py
 !tools/release.py
 sample-fullscreen.png
-FINAL VERSION/
+# نسخهٔ نهایی در گیت می‌ماند، ولی داده‌های اجرا، محیط مجازی و بکاپ‌ها نه.
+!FINAL VERSION/
+FINAL VERSION/**/.venv/
+FINAL VERSION/**/dist/
+FINAL VERSION/**/.freebuff/
+FINAL VERSION/**/.cloud-attachments/
+FINAL VERSION/**/.pytest_cache/
+FINAL VERSION/**/__pycache__/
+FINAL VERSION/**/settings.json
+FINAL VERSION/**/settings.json.bak
+FINAL VERSION/**/*.bak
+FINAL VERSION/**/logs/
+FINAL VERSION/**/CrashWatcher.old-*/
