@@ -597,7 +597,7 @@ class MainWindow(QMainWindow):
             "همان تعداد ÷2 زده می‌شود تا مبلغ پایه برگردد.")
         double_form.addRow(self.double_bet)
         self.double_max = QSpinBox()
-        self.double_max.setRange(1, 4)
+        self.double_max.setRange(1, 10)
         self.double_max.setSuffix(" بار")
         self.double_max.setValue(self.settings.double_bet_max)
         self.double_max.setToolTip("مبلغ شرط حداکثر این تعداد بار پشت‌سرهم دو برابر می‌شود")

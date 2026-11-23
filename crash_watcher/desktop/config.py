@@ -222,8 +222,8 @@ class DesktopSettings:
             raise ValueError("bankroll_stop_loss_pct must be between 0 and 100")
         if type(self.double_bet_enabled) is not bool:
             raise ValueError("double_bet_enabled must be a boolean")
-        if type(self.double_bet_max) is not int or not 1 <= self.double_bet_max <= 4:
-            raise ValueError("double_bet_max must be an integer between 1 and 4")
+        if type(self.double_bet_max) is not int or not 1 <= self.double_bet_max <= 10:
+            raise ValueError("double_bet_max must be an integer between 1 and 10")
         for name in ("payout_red", "payout_green", "payout_yellow"):
             value = getattr(self, name)
             if (not isinstance(value, (int, float)) or isinstance(value, bool)

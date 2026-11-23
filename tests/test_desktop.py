@@ -239,6 +239,18 @@ def test_bet_doubling_resets_after_four_steps(no_detection):
     assert sender.calls[9:14] == [(30, 40, True)] * 4 + [(130, 220, True)]
 
 
+def test_ten_doubling_steps_reset_to_base(no_detection):
+    settings = _clicker(autoclick_threshold="100", value_bets={"3.00": "RED"},
+                        double_bet_enabled=True, double_bet_max=10,
+                        double_bet_point=(10, 20), halve_bet_point=(30, 40),
+                        fixed_bet_amount="10")
+    settings.validate()
+    clicker = AutoClicker(settings, sender=_Sender())
+    stakes = [clicker.fire(f"r{index}", Decimal("3.00")).stake
+              for index in range(12)]
+    assert stakes == [10 * 2**level for level in range(11)] + [10]
+
+
 @pytest.mark.parametrize("losses", [1, 2, 3, 4])
 def test_win_at_each_doubling_level_returns_to_base(no_detection, losses):
     sender = _Sender()
