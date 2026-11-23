@@ -1,6 +1,8 @@
 """Qt worker: screenshots and OCR stay off the GUI thread."""
 from collections import deque
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
+import re
 from threading import Event, Thread
 from time import perf_counter
 import cv2
@@ -35,6 +37,17 @@ def live_multiplier(reader, image, minimum: float = 0.55):
             if value is not None:
                 return value
     return None
+
+
+def detected_lines(engine, image):
+    result = engine(image)
+    return [(str(text), float(score)) for text, score in
+            zip(result.txts or (), result.scores or ())]
+
+
+def has_win_message(lines):
+    return any(score >= 0.8 and re.search(r"\byou\s+won\b", text, re.I)
+               for text, score in lines)
 
 
 class MonitorWorker(QThread):
@@ -93,6 +106,7 @@ class MonitorWorker(QThread):
 
     def run(self) -> None:
         clicker = self._clicker = AutoClicker(self.settings)
+        win_executor = None
         self._guard = (TurnbalGuard(TurnbalCalibration.from_settings(self.settings))
                        if self.settings.bot_mode == "turnbal" else None)
         # دورهٔ یادگیری از همین لحظهٔ شروع پایش شمرده می‌شود.
@@ -109,6 +123,9 @@ class MonitorWorker(QThread):
             else:
                 reader = RapidOCRReader()
             recognizer = BangRecognizer(reader, self.settings.ocr_confidence)
+            from rapidocr import RapidOCR
+            screen_engine = RapidOCR()
+            win_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="cashout-ocr")
             history_engine = None
             if self.settings.history_region:
                 from rapidocr import RapidOCR
@@ -135,6 +152,10 @@ class MonitorWorker(QThread):
                     history_id = None
                     history_value = None
                     cashout_wait_for_live = False
+                    win_message_cleared = False
+                    win_future = None
+                    win_round = None
+                    win_after_attempt = False
                     while not self._stop.is_set():
                         if self._resync_on_resume.is_set():
                             self._resync_on_resume.clear()
@@ -164,6 +185,19 @@ class MonitorWorker(QThread):
                                 previous_reading = reading
                             else:
                                 reading = previous_reading
+                            if win_future is not None and win_future.done():
+                                lines = win_future.result()
+                                if win_round == clicker._last_id and clicker._pending_rule is not None:
+                                    if not has_win_message(lines):
+                                        win_message_cleared = True
+                                    elif win_message_cleared and win_after_attempt and clicker._cashout_attempted:
+                                        clicker.confirm_cashout(clicker._cashout_attempt_multiplier)
+                                win_future = None
+                            if (win_future is None and clicker._pending_rule is not None
+                                    and self.settings.cashout_enabled and not clicker._cashout_confirmed):
+                                win_round = clicker._last_id
+                                win_after_attempt = clicker._cashout_attempted
+                                win_future = win_executor.submit(detected_lines, screen_engine, frame.image.copy())
                             # The site updates history after the Bang screen is
                             # replaced by the countdown, so observe history in
                             # every phase (OCR still runs only when it changes).
@@ -202,6 +236,8 @@ class MonitorWorker(QThread):
                                 clicker.set_smart_play(ready.bets if ready else (), cashout)
                                 report = clicker.fire(completed.round_id,
                                                       completed.multiplier)
+                                if report.clicked:
+                                    win_message_cleared = False
                                 if report.clicked and clicker.wants_cashout():
                                     cashout_wait_for_live = True
                                 if (ready is not None and self._guard is not None
@@ -244,6 +280,8 @@ class MonitorWorker(QThread):
         except Exception as exc:
             self.problem.emit(str(exc))
         finally:
+            if win_executor is not None:
+                win_executor.shutdown(wait=False, cancel_futures=True)
             clicker.close()
             self._clicker = None
             if self._chart_backend is not None:

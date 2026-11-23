@@ -144,6 +144,9 @@ class AutoClicker:
         self._cashout_target: Decimal | None = None
         self._cashout_points: list[tuple[int, int]] = []
         self._cashout_prev: Decimal | None = None
+        self._cashout_confirmed = False
+        self._cashout_attempted = False
+        self._cashout_planned_target: Decimal | None = None
         self._window = {"rounds": 0, "clicks": 0, "skipped": 0,
                         "gated_correct": 0, "gated_total": 0}
         self._window_started = monotonic()
@@ -224,18 +227,17 @@ class AutoClicker:
 
     def _apply_double_clicks(self) -> bool:
         """دکمه‌های ×2/÷2 بازی را پیش از ثبت شرط بعدی بزن تا مبلغ واقعی درست شود."""
-        plan = ((self.settings.double_bet_point, self._double_clicks),
-                (self.settings.halve_bet_point, self._halve_clicks))
-        ok = True
-        for point, count in plan:
-            if count and point is None:
+        plan = ((self.settings.double_bet_point, "_double_clicks"),
+                (self.settings.halve_bet_point, "_halve_clicks"))
+        for point, attribute in plan:
+            if getattr(self, attribute) and point is None:
                 return False
-            for _ in range(count):
+            while getattr(self, attribute):
                 if not self.sender(point[0], point[1],
                                    restore=self.settings.autoclick_restore_cursor):
                     return False
-        self._double_clicks = self._halve_clicks = 0
-        return ok
+                setattr(self, attribute, getattr(self, attribute) - 1)
+        return True
 
     def _payout(self, color: str | None) -> float:
         """پرداخت هر رنگ برای تسویهٔ سرمایه."""
@@ -461,6 +463,12 @@ class AutoClicker:
         color = self._color(value)
         if self._pending_rule is not None:
             target_colors, rule, stake, payouts = self._pending_rule
+            if (self.settings.cashout_enabled and not self.settings.simulated
+                    and not self._cashout_confirmed and
+                    (self._cashout_attempted or self._cashout_planned_target is None
+                     or value >= self._cashout_planned_target)):
+                return ClickReport(False, "cashout unconfirmed: check site and restart monitoring",
+                                   count=self._clicks)
             self._pending_rule = None
             hit = bool(target_colors) and color in target_colors
             if hit:
@@ -468,11 +476,14 @@ class AutoClicker:
             outcome = None
             if target_colors:
                 # برد رنگ اصلی، پوشش رنگ دوم (سربه‌سر) یا باخت.
-                outcome = (True if color == target_colors[0]
+                outcome = (True if self._cashout_confirmed else False
+                           if self.settings.cashout_enabled and not self.settings.simulated
+                           else True if color == target_colors[0]
                            else None if color in target_colors[1:] else False)
                 self._track_doubling(outcome)
             if self.bankroll is not None and target_colors:
-                payout = payouts.get(color) or min(payouts.values())
+                payout = (float(self._cashout_confirmed_multiplier) if self._cashout_confirmed
+                          else payouts.get(color) or min(payouts.values()))
                 self.bankroll.settle(stake, payout, outcome)
                 if self.bankroll.stopped:
                     # همین شرط کف را رد کرد؛ دیگر در همین دست هم کلیکی نمی‌شود.
@@ -610,6 +621,8 @@ class AutoClicker:
         self._clicks += 1
         self._window["clicks"] += 1
         if target_color or rule == "smart-play":
+            self._cashout_confirmed = False
+            self._cashout_attempted = False
             colors = tuple(color for color, _ in points if color)
             # در حالت آزمایشی/سایه سرمایه جابه‌جا نمی‌شود؛ مبلغ صفر ثبت می‌شود.
             stake = 0.0 if simulated else self._stake()
@@ -645,6 +658,7 @@ class AutoClicker:
                 # مبنای خروج است تا عدد ثابت جای تنظیمات کاربر ننشیند.
                 target = Decimal(str(self.settings.turnbal_cashout_min))
             self._cashout_target = min(max(target, CASHOUT_MIN_TARGET), CASHOUT_MAX_TARGET)
+            self._cashout_planned_target = self._cashout_target
             self._cashout_points = [point for _, point in points]
             self._cashout_prev = None
         self._smart_cashout = None
@@ -664,6 +678,13 @@ class AutoClicker:
         """شرطی باز است و هنوز روی هدف خروج کلیک نشده؟"""
         return bool(self.settings.cashout_enabled and self._cashout_points
                     and self._cashout_target is not None)
+
+    def confirm_cashout(self, multiplier: Decimal) -> None:
+        """Only an observed site win message can confirm an attempted cashout."""
+        if self._pending_rule is not None and self._cashout_attempted and not self._cashout_confirmed:
+            self._cashout_confirmed = True
+            self._cashout_confirmed_multiplier = multiplier
+            self._log_cashout(multiplier, False, "cashout confirmed by site", (), confirmed=True)
 
     def tick(self, live=None, ended: bool = False) -> None:
         """کش‌اوت هوشمند: ضریب جاری که به هدفِ مدل رسید، روی همان دکمهٔ شرط کلیک کن.
@@ -708,17 +729,20 @@ class AutoClicker:
                 continue
             ok = self.sender(point[0], point[1],
                              restore=self.settings.autoclick_restore_cursor) and ok
+        self._cashout_attempted = bool(ok and not simulated)
+        if self._cashout_attempted:
+            self._cashout_attempt_multiplier = value
         reason = (f"smart cashout target {target} on the bet button" if not simulated else
                   f"{self._simulated_label}: would cash out at {target}")
         self._log_cashout(value, ok and not simulated, reason, points)
 
-    def _log_cashout(self, value, clicked: bool, reason: str, points=()) -> None:
+    def _log_cashout(self, value, clicked: bool, reason: str, points=(), confirmed=False) -> None:
         """ثبت هر تصمیم خروج؛ لاگ هرگز نباید تصمیم کلیک را خراب کند."""
         try:
             self.log_path.parent.mkdir(parents=True, exist_ok=True)
             entry = {"time": datetime.now().isoformat(timespec="seconds"),
                      "round": self._last_id, "value": str(value), "clicked": bool(clicked),
-                     "reason": reason,
+                     "reason": reason, "site_confirmed": confirmed,
                      "points": [list(point) for point in points],
                      "clicks": self._clicks}
             with self.log_path.open("a", encoding="utf-8") as file:

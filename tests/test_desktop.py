@@ -251,6 +251,62 @@ def test_ten_doubling_steps_reset_to_base(no_detection):
     assert stakes == [10 * 2**level for level in range(11)] + [10]
 
 
+def test_failed_stake_adjustment_does_not_repeat_successful_clicks(no_detection):
+    calls = []
+    def sender(x, y, restore=True):
+        calls.append((x, y))
+        return len(calls) != 2
+    settings = _clicker(double_bet_enabled=True, double_bet_max=4,
+                        double_bet_point=(10, 20), halve_bet_point=(30, 40))
+    clicker = AutoClicker(settings, sender=sender)
+    clicker._halve_clicks = 3
+    assert not clicker._apply_double_clicks()
+    assert clicker._halve_clicks == 2
+    assert clicker._apply_double_clicks()
+    assert len(calls) == 4 and clicker._halve_clicks == 0
+
+
+def test_cashout_confirmation_overrides_final_color(no_detection, tmp_path):
+    sender = _Sender()
+    settings = _clicker(autoclick_threshold="100", value_bets={"1.50": "RED", "1.20": "GREEN"},
+                        cashout_enabled=True, double_bet_enabled=True, double_bet_max=4,
+                        double_bet_point=(10, 20), halve_bet_point=(30, 40))
+    clicker = AutoClicker(settings, sender=sender, log_path=tmp_path / "rounds.jsonl")
+    clicker.fire("r1", Decimal("1.50"))
+    clicker.fire("r2", Decimal("1.20"))
+    assert clicker.double_level == 1
+    clicker.tick(Decimal("1.40"))
+    clicker.tick(Decimal("1.50"))
+    clicker.confirm_cashout(Decimal("1.50"))
+    result = clicker.fire("r3", Decimal("1.50"))
+    assert result.stake == 10 and clicker.double_level == 0
+    assert (30, 40, True) in sender.calls
+
+
+def test_unconfirmed_cashout_blocks_next_bet(no_detection, tmp_path):
+    sender = _Sender()
+    settings = _clicker(autoclick_threshold="100", value_bets={"1.50": "RED", "3.00": "GREEN"},
+                        cashout_enabled=True, double_bet_enabled=True,
+                        double_bet_point=(10, 20), halve_bet_point=(30, 40))
+    clicker = AutoClicker(settings, sender=sender, log_path=tmp_path / "rounds.jsonl")
+    clicker.fire("r1", Decimal("1.50"))
+    clicker.tick(Decimal("1.40"))
+    clicker.tick(Decimal("1.50"))
+    count = len(sender.calls)
+    result = clicker.fire("r2", Decimal("3.00"))
+    assert not result.clicked and "unconfirmed" in result.reason
+    assert len(sender.calls) == count
+
+
+def test_win_message_from_supplied_image():
+    import cv2
+    from rapidocr import RapidOCR
+    from crash_watcher.desktop.worker import detected_lines, has_win_message
+    img = cv2.imread(str(Path(__file__).resolve().parents[1] / "assets/successful-cashout-example.png"))
+    assert has_win_message(detected_lines(RapidOCR(), img))
+    assert not has_win_message([("Bang @1.16", 0.99), ("You Won", 0.3)])
+
+
 @pytest.mark.parametrize("losses", [1, 2, 3, 4])
 def test_win_at_each_doubling_level_returns_to_base(no_detection, losses):
     sender = _Sender()

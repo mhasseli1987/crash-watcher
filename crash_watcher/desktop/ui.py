@@ -34,6 +34,7 @@ CLICK_REASON_LABELS = {
     "click failed": "کلیک ناموفق",
     "dry run: would click": "آزمایشی (کلیک نشد)",
     "shadow: would click": "سایه (کلیک نشد)",
+    "cashout unconfirmed: check site and restart monitoring": "خروج تأیید نشد؛ بازی را بررسی و پایش را دوباره شروع کنید",
 }
 
 STYLE = """
