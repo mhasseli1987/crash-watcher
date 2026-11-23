@@ -305,7 +305,8 @@ def load_settings(path: Path = SETTINGS_PATH) -> DesktopSettings:
     for key in ("result_region", "history_region", "click_region", "chart_region", "bet_region"):
         if data.get(key):
             data[key] = Region(**data[key])
-    for key in ("click_point", "bet_point_red", "bet_point_green", "bet_point_yellow"):
+    for key in ("click_point", "bet_point_red", "bet_point_green", "bet_point_yellow",
+                "double_bet_point", "halve_bet_point"):
         if data.get(key) is not None:
             data[key] = tuple(data[key])
     # Older settings files still carry the immediate-click default of 0.

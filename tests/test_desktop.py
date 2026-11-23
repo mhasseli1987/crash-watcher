@@ -121,6 +121,15 @@ def test_settings_roundtrip_and_validation(tmp_path):
     save_settings(settings, path)
     assert load_settings(path) == settings
     assert load_settings(tmp_path / "absent.json") == DesktopSettings()
+def test_saved_double_bet_points_reload_as_tuples(tmp_path):
+    """نقاط دوبل/نصف در JSON به لیست تبدیل می‌شوند؛ خواندن دوباره نباید خطا بدهد."""
+    path = tmp_path / "settings.json"
+    settings = DesktopSettings(double_bet_point=(521, 787), halve_bet_point=(481, 791))
+    save_settings(settings, path)
+    loaded = load_settings(path)
+    assert loaded.double_bet_point == (521, 787)
+    assert loaded.halve_bet_point == (481, 791)
+
     with pytest.raises(ValueError):
         save_settings(DesktopSettings(fixed_bet_amount="-1"), path)
 
