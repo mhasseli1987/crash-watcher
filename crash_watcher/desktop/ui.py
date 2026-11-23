@@ -580,6 +580,34 @@ class MainWindow(QMainWindow):
         self.value_bets_edit.setToolTip("هر مورد به شکل ضریب:رنگ (RED/GREEN/YELLOW)، جداشده با کاما")
         form.addRow("ضریب‌های ویژه", self.value_bets_edit)
         layout.addLayout(form)
+        doubles = QGroupBox("2 /2")
+        double_form = QFormLayout(doubles)
+        self.double_bet = QCheckBox("دوبل کردن مبلغ شرط پس از باخت (جبران باخت)")
+        self.double_bet.setChecked(self.settings.double_bet_enabled)
+        self.double_bet.setToolTip(
+            "پس از هر باخت، مبلغ شرط در بازی یک بار دو برابر می‌شود؛ با برد "
+            "همان تعداد ÷2 زده می‌شود تا مبلغ پایه برگردد.")
+        double_form.addRow(self.double_bet)
+        self.double_max = QSpinBox()
+        self.double_max.setRange(1, 4)
+        self.double_max.setSuffix(" بار")
+        self.double_max.setValue(self.settings.double_bet_max)
+        self.double_max.setToolTip("مبلغ شرط حداکثر این تعداد بار پشت‌سرهم دو برابر می‌شود")
+        double_form.addRow("حداکثر دوبل پشت‌سرهم", self.double_max)
+        double_points = QHBoxLayout()
+        self.double_pick = QPushButton("انتخاب دکمهٔ ×2")
+        self.double_pick.clicked.connect(lambda: self.select_region("double"))
+        self.halve_pick = QPushButton("انتخاب دکمهٔ ÷2")
+        self.halve_pick.clicked.connect(lambda: self.select_region("halve"))
+        double_points.addWidget(self.double_pick)
+        double_points.addWidget(self.halve_pick)
+        double_form.addRow(double_points)
+        self.double_status = QLabel()
+        self.double_status.setWordWrap(True)
+        self.double_status.setStyleSheet("color:#9fc4b1;font-size:12px")
+        double_form.addRow(self.double_status)
+        layout.addWidget(doubles)
+        self._update_double_status()
         regions = QHBoxLayout()
         for title, target in (("ناحیه ۱ — تاریخچه", "history"),
                               ("ناحیه ۲ — ضریب فعلی", "result"),
@@ -642,10 +670,12 @@ class MainWindow(QMainWindow):
         form.addRow("Custom Provider", self.smart_url)
         self.smart_key = QLineEdit(self.settings.smart_review_key)
         self.smart_key.setEchoMode(QLineEdit.EchoMode.Password)
-        self.smart_key.setPlaceholderText("کلید یکپارچهٔ داشبورد FreeLLMAPI")
+        self.smart_key.setPlaceholderText("کلید API (اگر پرووایدر کلید می‌خواهد)")
         form.addRow("کلید", self.smart_key)
-        self.smart_model = QLineEdit(self.settings.smart_review_model or DEFAULT_MODEL)
-        self.smart_model.setPlaceholderText(DEFAULT_MODEL)
+        # مدل: کمبوباکس قابل تایپ؛ با «دریافت مدل‌ها» از هر پرووایدر پر می‌شود.
+        self.smart_model = QComboBox()
+        self.smart_model.setEditable(True)
+        self.smart_model.setCurrentText(self.settings.smart_review_model or DEFAULT_MODEL)
         form.addRow("مدل", self.smart_model)
         self.smart_timeout = QSpinBox()
         self.smart_timeout.setRange(5, 300)
@@ -691,11 +721,16 @@ class MainWindow(QMainWindow):
         buttons = QHBoxLayout()
         connect_button = QPushButton("تست اتصال")
         connect_button.clicked.connect(self.test_smart_connection)
+        models_button = QPushButton("دریافت مدل‌ها")
+        models_button.setToolTip("فهرست مدل‌های همین پرووایدر را از /v1/models می‌گیرد و "
+                                 "در فهرست «مدل» می‌گذارد")
+        models_button.clicked.connect(self.test_smart_connection)
         save_button = QPushButton("ذخیره")
         save_button.clicked.connect(self.save_ui_settings)
         check_button = QPushButton("پیش‌بررسی نواحی و OCR")
         check_button.clicked.connect(self.run_preflight_check)
         buttons.addWidget(connect_button)
+        buttons.addWidget(models_button)
         buttons.addWidget(check_button)
         buttons.addWidget(save_button)
         buttons.addStretch()
@@ -915,6 +950,8 @@ class MainWindow(QMainWindow):
 
     def _settings_from_form(self) -> DesktopSettings:
         return replace(self.settings, result_region=self._current_region(), fixed_bet_amount=self.amount.text(),
+                       double_bet_enabled=self.double_bet.isChecked(),
+                       double_bet_max=self.double_max.value(),
                        max_attempts=self.attempts.value(), yellow_threshold=self.threshold.text(),
                        interval_ms=self.interval.value(), ocr_confidence=self.confidence.value(),
                        tesseract_path=self.tesseract.text().strip(),
@@ -942,7 +979,7 @@ class MainWindow(QMainWindow):
                        smart_review_enabled=self.smart_enabled.isChecked(),
                        smart_review_url=self.smart_url.text().strip() or DEFAULT_BASE_URL,
                        smart_review_key=self.smart_key.text().strip(),
-                       smart_review_model=self.smart_model.text().strip() or DEFAULT_MODEL,
+                       smart_review_model=self.smart_model.currentText().strip() or DEFAULT_MODEL,
                        smart_review_timeout_s=self.smart_timeout.value(),
                        smart_review_every_rounds=self.smart_every.value(),
                        smart_review_rules=self.smart_rules.text().strip(),
@@ -1083,9 +1120,19 @@ class MainWindow(QMainWindow):
     def _smart_probe_done(self, models):
         names = "، ".join(str(name) for name in models[:5])
         if models:
+            # فهرست مدل‌های همین پرووایدر در کمبوباکس «مدل» می‌نشیند؛
+            # انتخاب فعلی و هر متن دستی از بین نمی‌رود.
+            current = self.smart_model.currentText().strip()
+            known = [self.smart_model.itemText(index)
+                     for index in range(self.smart_model.count())]
+            for name in models:
+                if name not in known:
+                    self.smart_model.addItem(str(name))
+            if current:
+                self.smart_model.setCurrentText(current)
             self.smart_probe_status.setText(
                 f"متصل شد — {len(models)} مدل در دسترس: {names}"
-                " (نام یکی از همین‌ها را در فیلد «مدل» بگذارید یا auto را نگه دارید)")
+                " (از فهرست «مدل» انتخاب کنید یا auto را نگه دارید)")
         else:
             self.smart_probe_status.setText("متصل شد (فهرست مدل‌ها خالی بود؛ مدل را دستی بگذارید).")
 
@@ -1128,6 +1175,14 @@ class MainWindow(QMainWindow):
                                       (3, "chart_region"), (4, "bet_region"))]
         self.region_status.setText("  |  ".join(parts))
 
+    def _update_double_status(self):
+        """مختصات دکمه‌های ×2/÷2 را نشان بده."""
+        def show(point):
+            return "انتخاب نشده" if point is None else f"{point[0]},{point[1]}"
+        self.double_status.setText(
+            f"×2: {show(self.settings.double_bet_point)} | "
+            f"÷2: {show(self.settings.halve_bet_point)} — روی خود دکمه بکشید؛ مرکز آن ذخیره می‌شود.")
+
     def select_region(self, target: str = "result"):
         """Hide this window, let the user drag on the live screen, then come back."""
         error = None
@@ -1150,6 +1205,11 @@ class MainWindow(QMainWindow):
                     self.settings = replace(self.settings, click_region=overlay.selected)
                 elif target == "chart":
                     self.settings = replace(self.settings, chart_region=overlay.selected)
+                elif target in ("double", "halve"):
+                    chosen = overlay.selected
+                    key = "double_bet_point" if target == "double" else "halve_bet_point"
+                    self.settings = replace(self.settings, **{
+                        key: (chosen.x + chosen.width // 2, chosen.y + chosen.height // 2)})
                 elif target.startswith("bet_"):
                     chosen = overlay.selected
                     self.settings = replace(self.settings, **{
@@ -1160,6 +1220,7 @@ class MainWindow(QMainWindow):
                     self.settings = replace(self.settings, result_region=overlay.selected)
                 self.save_ui_settings()  # فایل تنظیمات را ذخیره کن تا مقدارها به‌روز باشند
                 self._update_region_status()
+                self._update_double_status()
         except Exception as exc:
             error = exc
         finally:
@@ -1312,6 +1373,9 @@ class MainWindow(QMainWindow):
         self.bankroll_enabled.setChecked(self.settings.bankroll_enabled)
         self.bankroll_start.setText(self.settings.bankroll_start)
         self.bankroll_stop.setValue(self.settings.bankroll_stop_loss_pct)
+        self.double_bet.setChecked(self.settings.double_bet_enabled)
+        self.double_max.setValue(self.settings.double_bet_max)
+        self._update_double_status()
         self.click_threshold.setText(self.settings.autoclick_threshold)
         self.click_delay.setValue(self.settings.autoclick_delay_ms)
         self.click_wait.setValue(self.settings.autoclick_skip_rounds)
@@ -1332,7 +1396,7 @@ class MainWindow(QMainWindow):
         self._refresh_smart_label()
         self.smart_url.setText(self.settings.smart_review_url)
         self.smart_key.setText(self.settings.smart_review_key)
-        self.smart_model.setText(self.settings.smart_review_model)
+        self.smart_model.setCurrentText(self.settings.smart_review_model)
         self.smart_timeout.setValue(self.settings.smart_review_timeout_s)
         self.smart_every.setValue(self.settings.smart_review_every_rounds)
         self.smart_rules.setText(self.settings.smart_review_rules)

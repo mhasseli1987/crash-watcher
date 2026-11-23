@@ -111,6 +111,12 @@ class DesktopSettings:
     payout_green: float = 2.0
     payout_yellow: float = 10.0
     fixed_bet_amount: str = "10"
+    # «2 /2»: دوبل کردن مبلغ شرط برای جبران باخت (تا ۴ بار) با دکمهٔ ×2 بازی
+    # و برگشت به مبلغ پایه با دکمهٔ ÷2 پس از برد.
+    double_bet_enabled: bool = False
+    double_bet_max: int = 4
+    double_bet_point: tuple[int, int] | None = None
+    halve_bet_point: tuple[int, int] | None = None
     max_attempts: int = 8
     yellow_threshold: str = "10.00"
     red_threshold: str = "2.00"
@@ -154,7 +160,8 @@ class DesktopSettings:
             if not isinstance(region, Region):
                 raise ValueError(f"{name} must be a Region")
             region.capture(self.interval_ms)
-        for name in ("click_point", "bet_point_red", "bet_point_green", "bet_point_yellow"):
+        for name in ("click_point", "bet_point_red", "bet_point_green", "bet_point_yellow",
+                     "double_bet_point", "halve_bet_point"):
             point = getattr(self, name)
             if point is None:
                 continue
@@ -213,6 +220,10 @@ class DesktopSettings:
                 or isinstance(self.bankroll_stop_loss_pct, bool)
                 or not 0 < self.bankroll_stop_loss_pct <= 100):
             raise ValueError("bankroll_stop_loss_pct must be between 0 and 100")
+        if type(self.double_bet_enabled) is not bool:
+            raise ValueError("double_bet_enabled must be a boolean")
+        if type(self.double_bet_max) is not int or not 1 <= self.double_bet_max <= 4:
+            raise ValueError("double_bet_max must be an integer between 1 and 4")
         for name in ("payout_red", "payout_green", "payout_yellow"):
             value = getattr(self, name)
             if (not isinstance(value, (int, float)) or isinstance(value, bool)

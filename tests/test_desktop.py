@@ -174,6 +174,40 @@ def test_manual_click_test_clicks_even_in_dry_run(no_detection):
     assert report.clicked and sender.calls == [(130, 220, True)]
 
 
+def test_loss_doubles_the_stake_and_a_win_halves_it_back(no_detection):
+    sender = _Sender()
+    settings = _clicker(autoclick_threshold="100",
+                        value_bets={"1.50": "RED", "3.00": "GREEN"},
+                        double_bet_enabled=True, double_bet_max=4,
+                        double_bet_point=(10, 20), halve_bet_point=(30, 40),
+                        fixed_bet_amount="10", bankroll_enabled=True,
+                        bankroll_start="100")
+    clicker = AutoClicker(settings, sender=sender)
+    assert clicker.fire("r1", Decimal("1.50")).clicked
+    assert sender.calls == [(130, 220, True)] and clicker.balance == 100
+    lost = clicker.fire("r2", Decimal("3.00"))  # سبز: شرط قرمز باخت
+    assert lost.stake == 20 and clicker.double_level == 1
+    assert sender.calls[1:] == [(10, 20, True), (130, 220, True)]
+    assert clicker.balance == 90
+    won = clicker.fire("r3", Decimal("3.00"))  # سبز: شرط دوبل‌شده برد
+    assert won.stake == 10 and clicker.double_level == 0
+    assert sender.calls[3:] == [(30, 40, True), (130, 220, True)]
+    assert clicker.balance == 110
+
+
+def test_bet_doubling_stops_after_four_steps(no_detection):
+    sender = _Sender()
+    settings = _clicker(autoclick_threshold="100", value_bets={"3.00": "RED"},
+                        double_bet_enabled=True, double_bet_max=4,
+                        double_bet_point=(10, 20), halve_bet_point=(30, 40),
+                        fixed_bet_amount="10")
+    clicker = AutoClicker(settings, sender=sender)
+    for index in range(1, 7):
+        clicker.fire(f"r{index}", Decimal("3.00"))
+    assert clicker.double_level == 4
+    assert clicker.fire("r7", Decimal("3.00")).stake == 160
+
+
 def test_clicker_waits_for_a_high_round_then_clicks_the_region_centre(no_detection):
     sender = _Sender()
     clicker = AutoClicker(_clicker(), sender=sender)

@@ -91,6 +91,8 @@ class ClickReport:
     dry_run: bool = False
     shadow: bool = False
     balance: float | None = None
+    stake: float = 0.0
+    double_level: int = 0
 
 
 RULE_LABELS = {"yellow-run": "صف ۷+۳ زرد",
@@ -135,6 +137,10 @@ class AutoClicker:
         # استاپ‌لاس سرمایه: فقط وقتی کاربر سرمایهٔ جلسه را روشن کند.
         self.bankroll: Bankroll | None = None
         self._refresh_bankroll()
+        # «2 /2»: هر باخت یک دوبل و هر برد یک برگشت به مبلغ پایه.
+        self._double_level = 0
+        self._double_clicks = 0
+        self._halve_clicks = 0
         self._cashout_target: Decimal | None = None
         self._cashout_points: list[tuple[int, int]] = []
         self._cashout_prev: Decimal | None = None
@@ -192,11 +198,44 @@ class AutoClicker:
         return self.bankroll.balance if self.bankroll is not None else None
 
     def _stake(self) -> float:
-        """مبلغ ثابت هر شرط."""
+        """مبلغ این شرط: مبلغ پایه ضرب در دوبل‌های جبران باخت."""
         try:
-            return float(Decimal(self.settings.fixed_bet_amount))
+            base = float(Decimal(self.settings.fixed_bet_amount))
         except Exception:
             return 0.0
+        return base * (2 ** self._double_level)
+
+    @property
+    def double_level(self) -> int:
+        """تعداد دوبل‌های فعال مبلغ شرط در جبران باخت."""
+        return self._double_level
+
+    def _track_doubling(self, outcome: bool | None) -> None:
+        """باخت = یک دوبل تازه؛ برد یا سربه‌سر = برگشت به مبلغ پایه."""
+        if not self.settings.double_bet_enabled:
+            return
+        if outcome is False:
+            if self._double_level < max(1, self.settings.double_bet_max):
+                self._double_level += 1
+                self._double_clicks += 1
+            return
+        if self._double_level:
+            self._halve_clicks += self._double_level
+            self._double_level = 0
+
+    def _apply_double_clicks(self) -> bool:
+        """دکمه‌های ×2/÷2 بازی را پیش از ثبت شرط بعدی بزن تا مبلغ واقعی درست شود."""
+        plan = ((self.settings.double_bet_point, self._double_clicks),
+                (self.settings.halve_bet_point, self._halve_clicks))
+        self._double_clicks = self._halve_clicks = 0
+        ok = True
+        for point, count in plan:
+            if point is None:
+                continue
+            for _ in range(count):
+                ok = self.sender(point[0], point[1],
+                                 restore=self.settings.autoclick_restore_cursor) and ok
+        return ok
 
     def _payout(self, color: str | None) -> float:
         """پرداخت هر رنگ برای تسویهٔ سرمایه."""
@@ -339,7 +378,8 @@ class AutoClicker:
                      "rule": report.rule, "detail": report.detail,
                      "clicks": report.count, "remaining": report.remaining,
                      "dry_run": report.dry_run, "shadow": report.shadow,
-                     "balance": report.balance}
+                     "balance": report.balance, "stake": report.stake,
+                     "double_level": report.double_level}
             with self.log_path.open("a", encoding="utf-8") as file:
                 file.write(json.dumps(entry, ensure_ascii=False) + "\n")
         except Exception:
@@ -425,11 +465,14 @@ class AutoClicker:
             hit = bool(target_colors) and color in target_colors
             if hit:
                 self._rule_stats.setdefault(rule, [0, 0])[0] += 1
-            if self.bankroll is not None and target_colors:
-                payout = payouts.get(color) or min(payouts.values())
-                # رنگ دوم پوشش است: نه سود، نه ضرر.
+            outcome = None
+            if target_colors:
+                # برد رنگ اصلی، پوشش رنگ دوم (سربه‌سر) یا باخت.
                 outcome = (True if color == target_colors[0]
                            else None if color in target_colors[1:] else False)
+                self._track_doubling(outcome)
+            if self.bankroll is not None and target_colors:
+                payout = payouts.get(color) or min(payouts.values())
                 self.bankroll.settle(stake, payout, outcome)
                 if self.bankroll.stopped:
                     # همین شرط کف را رد کرد؛ دیگر در همین دست هم کلیکی نمی‌شود.
@@ -578,6 +621,10 @@ class AutoClicker:
             # run is exactly autoclick_max_clicks clicks and then stops.
             self._armed -= 1
         ok = True
+        if not simulated and self.settings.double_bet_enabled:
+            # مبلغ شرط در بازی پیش از کلیک شرط تنظیم می‌شود: ×2 پس از باخت و
+            # ÷2 پس از برد تا برگشت به مبلغ پایه.
+            ok = self._apply_double_clicks() and ok
         for _, point in points:
             if simulated:
                 continue
@@ -605,7 +652,9 @@ class AutoClicker:
                            target="+".join(colors) or (target_color or ""),
                            rule=rule, detail=row_detail,
                            dry_run=self.settings.autoclick_dry_run,
-                           shadow=self.settings.shadow_mode, balance=self.balance)
+                           shadow=self.settings.shadow_mode, balance=self.balance,
+                           stake=0.0 if simulated else self._stake(),
+                           double_level=self._double_level)
 
     def wants_cashout(self) -> bool:
         """شرطی باز است و هنوز روی هدف خروج کلیک نشده؟"""
