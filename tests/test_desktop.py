@@ -204,17 +204,37 @@ def test_loss_doubles_the_stake_and_a_win_halves_it_back(no_detection):
     assert clicker.balance == 110
 
 
-def test_bet_doubling_stops_after_four_steps(no_detection):
+def test_bet_doubling_resets_after_four_steps(no_detection):
     sender = _Sender()
     settings = _clicker(autoclick_threshold="100", value_bets={"3.00": "RED"},
                         double_bet_enabled=True, double_bet_max=4,
                         double_bet_point=(10, 20), halve_bet_point=(30, 40),
                         fixed_bet_amount="10")
     clicker = AutoClicker(settings, sender=sender)
-    for index in range(1, 7):
-        clicker.fire(f"r{index}", Decimal("3.00"))
-    assert clicker.double_level == 4
-    assert clicker.fire("r7", Decimal("3.00")).stake == 160
+    stakes = [clicker.fire(f"r{index}", Decimal("3.00")).stake
+              for index in range(1, 8)]
+    assert stakes == [10, 20, 40, 80, 160, 10, 20]
+    assert sender.calls[9:14] == [(30, 40, True)] * 4 + [(130, 220, True)]
+
+
+@pytest.mark.parametrize("losses", [1, 2, 3, 4])
+def test_win_at_each_doubling_level_returns_to_base(no_detection, losses):
+    sender = _Sender()
+    settings = _clicker(autoclick_threshold="100",
+                        value_bets={"1.50": "RED", "3.00": "GREEN"},
+                        double_bet_enabled=True, double_bet_max=4,
+                        double_bet_point=(10, 20), halve_bet_point=(30, 40),
+                        fixed_bet_amount="10")
+    clicker = AutoClicker(settings, sender=sender)
+    clicker.fire("start", Decimal("1.50"))
+    for index in range(losses):
+        # Alternating results always lose against the preceding target.
+        value = Decimal("3.00") if index % 2 == 0 else Decimal("1.50")
+        clicker.fire(f"loss{index}", value)
+    win_value = Decimal("3.00") if losses % 2 else Decimal("1.50")
+    report = clicker.fire("win", win_value)
+    assert report.stake == 10 and clicker.double_level == 0
+    assert sender.calls[-(losses + 1):] == [(30, 40, True)] * losses + [(130, 220, True)]
 
 
 def test_clicker_waits_for_a_high_round_then_clicks_the_region_centre(no_detection):

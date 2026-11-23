@@ -214,10 +214,9 @@ class AutoClicker:
         """باخت = یک دوبل تازه؛ برد یا سربه‌سر = برگشت به مبلغ پایه."""
         if not self.settings.double_bet_enabled:
             return
-        if outcome is False:
-            if self._double_level < max(1, self.settings.double_bet_max):
-                self._double_level += 1
-                self._double_clicks += 1
+        if outcome is False and self._double_level < self.settings.double_bet_max:
+            self._double_level += 1
+            self._double_clicks += 1
             return
         if self._double_level:
             self._halve_clicks += self._double_level
