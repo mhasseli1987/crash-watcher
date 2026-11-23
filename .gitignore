@@ -9,6 +9,9 @@ settings.json
 self-test.json
 *.spec
 CrashWatcher.exe
+_internal/
+build_out/
+preview/
 CrashWatcher-source-clean-2026-11-09/
 CrashWatcher-source-clean-2026-11-09.zip
 release/
@@ -17,20 +20,4 @@ tools/*
 !tools/evaluate.py
 !tools/release.py
 sample-fullscreen.png
-# نسخهٔ نهایی در گیت می‌ماند، ولی داده‌های اجرا، محیط مجازی و بکاپ‌ها نه.
-!FINAL VERSION/
-FINAL VERSION/**/.venv/
-FINAL VERSION/**/dist/
-FINAL VERSION/**/.freebuff/
-FINAL VERSION/**/.cloud-attachments/
-FINAL VERSION/**/.pytest_cache/
-FINAL VERSION/**/__pycache__/
-FINAL VERSION/**/settings.json
-FINAL VERSION/**/settings.json.bak
-FINAL VERSION/**/*.bak
-FINAL VERSION/**/logs/
-FINAL VERSION/**/CrashWatcher.old-*/
-FINAL VERSION/*.zip
-FINAL VERSION/repo/
-FINAL VERSION/**/_internal/
-!FINAL VERSION/repo 1/CrashWatcher/CrashWatcher.exe
+# فایل اجرایی نهایی با git add -f ثبت می‌شود؛ وابستگی‌ها و تنظیمات محلی خصوصی‌اند.
