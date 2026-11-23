@@ -183,6 +183,28 @@ def test_manual_click_test_clicks_even_in_dry_run(no_detection):
     assert report.clicked and sender.calls == [(130, 220, True)]
 
 
+def test_button_picker_accepts_a_single_click(monkeypatch):
+    os.environ["QT_QPA_PLATFORM"] = "offscreen"
+    from PySide6.QtCore import QPoint, Qt
+    from PySide6.QtTest import QTest
+    from PySide6.QtWidgets import QApplication, QDialog
+    from crash_watcher.desktop import ui
+
+    class Screen:
+        monitors = [None, {"left": 0, "top": 0, "width": 100, "height": 100}]
+        def __enter__(self): return self
+        def __exit__(self, *args): pass
+        def grab(self, region): return np.zeros((100, 100, 4), dtype=np.uint8)
+
+    monkeypatch.setattr(ui.mss, "MSS", Screen)
+    app = QApplication.instance() or QApplication([])
+    overlay = ui.RegionOverlay(1, point_mode=True)
+    overlay.show()
+    QTest.mouseClick(overlay, Qt.MouseButton.LeftButton, pos=QPoint(25, 35))
+    assert overlay.result() == QDialog.DialogCode.Accepted
+    assert (overlay.selected.x, overlay.selected.y) == (25, 35)
+
+
 def test_loss_doubles_the_stake_and_a_win_halves_it_back(no_detection):
     sender = _Sender()
     settings = _clicker(autoclick_threshold="100",

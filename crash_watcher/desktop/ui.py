@@ -186,9 +186,10 @@ class RegionOverlay(QDialog):
     The main window is hidden before this overlay is created, so the captured
     image shows the live screen without the calibration window on top of it.
     """
-    def __init__(self, monitor: int, parent=None) -> None:
+    def __init__(self, monitor: int, parent=None, point_mode: bool = False) -> None:
         super().__init__(parent)
         self.monitor = monitor
+        self.point_mode = point_mode
         self.selected: Region | None = None
         self.setWindowTitle("انتخاب ناحیه")
         with mss.MSS() as backend:
@@ -219,6 +220,7 @@ class RegionOverlay(QDialog):
         painter.setPen(QColor("#f4f6fa"))
         painter.drawText(self.rect().adjusted(0, 24, 0, 0),
                          Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop,
+                         "روی دکمه کلیک کنید — Esc برای انصراف" if self.point_mode else
                          "مستطیل را با ماوس بکشید — Esc برای انصراف")
 
     def keyPressEvent(self, event):
@@ -238,6 +240,12 @@ class RegionOverlay(QDialog):
 
     def mouseReleaseEvent(self, event):
         self._end = event.position().toPoint()
+        if self.point_mode:
+            geo = self.geometry()
+            self.selected = Region(self.monitor, geo.x() + self._end.x(),
+                                   geo.y() + self._end.y(), 1, 1)
+            self.accept()
+            return
         rect = QRect(self._start, self._end).normalized()
         if rect.width() >= 20 and rect.height() >= 20:
             geo = self.geometry()
@@ -1181,7 +1189,7 @@ class MainWindow(QMainWindow):
             return "انتخاب نشده" if point is None else f"{point[0]},{point[1]}"
         self.double_status.setText(
             f"×2: {show(self.settings.double_bet_point)} | "
-            f"÷2: {show(self.settings.halve_bet_point)} — روی خود دکمه بکشید؛ مرکز آن ذخیره می‌شود.")
+            f"÷2: {show(self.settings.halve_bet_point)} — روی مرکز دکمه کلیک کنید.")
 
     def select_region(self, target: str = "result"):
         """Hide this window, let the user drag on the live screen, then come back."""
@@ -1190,7 +1198,7 @@ class MainWindow(QMainWindow):
             self.hide()
             QApplication.processEvents()
             sleep(0.3)  # let this window actually leave the screen before the capture
-            overlay = RegionOverlay(self.monitor.currentData())
+            overlay = RegionOverlay(self.monitor.currentData(), point_mode=target in ("double", "halve"))
             if overlay.exec() and overlay.selected:
                 if target == "history":
                     self.settings = replace(self.settings, history_region=overlay.selected)
