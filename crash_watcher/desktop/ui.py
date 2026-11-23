@@ -519,8 +519,8 @@ class MainWindow(QMainWindow):
         self.cashout = QCheckBox("کش‌اوت هوشمند: بعد از هر شرط، مدل تعیین می‌کند کجا خارج شوی")
         self.cashout.setChecked(self.settings.cashout_enabled)
         self.cashout.setToolTip(
-            "مدل بین 1.10 و 1.80 هدف خروج را انتخاب می‌کند؛ اگر دست قبلی زیر 1.10 بسته شده "
-            "باشد تا 1.89 صبر می‌شود. دیرترین خروج همیشه 1.90 است و کلیک روی همان دکمهٔ شرط زده می‌شود.")
+            "در حالت هوشمند مدل هدف خروج را انتخاب می‌کند و در حالت کلاسیک «حداقل کش‌اوت» تب "
+            "ترنبال مبناست. هدف همیشه بین 1.40 و 1.90 می‌ماند و کلیک روی همان دکمهٔ شرط زده می‌شود.")
         form.addRow("کش‌اوت هوشمند", self.cashout)
         self.smart_click = QCheckBox("کلیک هوشمند: فقط وقتی پیش‌بینی رنگ به اطمینان برسد")
         self.smart_click.setChecked(self.settings.smart_click_enabled)

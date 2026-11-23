@@ -633,13 +633,14 @@ class AutoClicker:
             ok = self.sender(point[0], point[1],
                              restore=self.settings.autoclick_restore_cursor) and ok
         if self.settings.cashout_enabled:
-            # شرط ثبت شد: هدفِ خروج را مدل تعیین می‌کند و همیشه داخل ۱٫۴۰ تا ۱٫۹۰
-            # می‌ماند (دستِ زیر ۱٫۱۰ هم تا همان ۱٫۹۰ اجازهٔ صبر دارد). سقف ثابت
-            # ۱٫۹۰ است تا هیچ شرطی از این عدد جلوتر باز نماند.
+            # شرط ثبت شد: هدفِ خروج همیشه داخل ۱٫۴۰ تا ۱٫۹۰ نگه داشته می‌شود تا
+            # هیچ شرطی از این عدد جلوتر باز نماند.
             try:
                 target = Decimal(str(self._smart_cashout))
             except Exception:
-                target = Decimal("1.60")  # پاسخ مدل در دسترس نیست: میانهٔ محدوده
+                # حالت کلاسیک مدل ندارد: «حداقل کش‌اوت» تنظیمات کاربر (تب ترنبال)
+                # مبنای خروج است تا عدد ثابت جای تنظیمات کاربر ننشیند.
+                target = Decimal(str(self.settings.turnbal_cashout_min))
             self._cashout_target = min(max(target, CASHOUT_MIN_TARGET), CASHOUT_MAX_TARGET)
             self._cashout_points = [point for _, point in points]
             self._cashout_prev = None

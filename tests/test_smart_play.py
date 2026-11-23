@@ -165,6 +165,23 @@ def test_smart_cashout_clicks_once_when_the_live_multiplier_reaches_the_target(t
     assert sent == [(10, 20), (10, 20)]
 
 
+def test_classic_cashout_uses_the_user_min_cashout_setting(tmp_path):
+    """کلاسیک مدل ندارد: هدف خروج «حداقل کش‌اوت» تنظیمات است، نه عدد ثابت 1.60."""
+    sent = []
+    clicker = _clicker(tmp_path, sent, cashout_enabled=True,
+                       value_bets={"2.08": "GREEN"},
+                       turnbal_cashout_min=1.50, turnbal_cashout_max=1.90,
+                       turnbal_emergency_exit=1.40)
+    clicker.set_smart_play((), None)  # مسیر کلاسیک: بدون تصمیم مدل
+    report = clicker.fire("7", Decimal("2.08"))  # ضریب ویژهٔ کاربر: شرط ثبت می‌شود
+    assert report.clicked and sent == [(15, 25)]
+    assert clicker._cashout_target == Decimal("1.50")
+    clicker.tick(Decimal("1.30"))
+    clicker.tick(Decimal("1.52"))
+    assert sent == [(15, 25), (15, 25)]
+    assert not clicker.wants_cashout()
+
+
 def test_smart_cashout_target_stays_between_140_and_190(tmp_path):
     sent = []
     clicker = _clicker(tmp_path, sent, cashout_enabled=True)
