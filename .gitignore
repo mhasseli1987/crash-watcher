@@ -31,3 +31,6 @@ FINAL VERSION/**/*.bak
 FINAL VERSION/**/logs/
 FINAL VERSION/**/CrashWatcher.old-*/
 FINAL VERSION/*.zip
+FINAL VERSION/repo/
+FINAL VERSION/**/_internal/
+!FINAL VERSION/repo 1/CrashWatcher/CrashWatcher.exe
