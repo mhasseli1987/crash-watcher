@@ -25,13 +25,16 @@ from .turnbal import review as review_turnbal
 
 def live_multiplier(reader, image, minimum: float = 0.55):
     """Read the big running multiplier (region 2) while a bet is open."""
-    try:
-        text, confidence = reader(preprocess(image)[0])
-    except Exception:
-        return None
-    if not np.isfinite(confidence) or confidence < minimum:
-        return None
-    return parse_multiplier(text)
+    for variant in preprocess(image):
+        try:
+            text, confidence = reader(variant)
+        except Exception:
+            continue
+        if np.isfinite(confidence) and confidence >= minimum:
+            value = parse_multiplier(text)
+            if value is not None:
+                return value
+    return None
 
 
 class MonitorWorker(QThread):
@@ -131,6 +134,7 @@ class MonitorWorker(QThread):
                     history_previous = None
                     history_id = None
                     history_value = None
+                    cashout_wait_for_live = False
                     while not self._stop.is_set():
                         if self._resync_on_resume.is_set():
                             self._resync_on_resume.clear()
@@ -198,6 +202,8 @@ class MonitorWorker(QThread):
                                 clicker.set_smart_play(ready.bets if ready else (), cashout)
                                 report = clicker.fire(completed.round_id,
                                                       completed.multiplier)
+                                if report.clicked and clicker.wants_cashout():
+                                    cashout_wait_for_live = True
                                 if (ready is not None and self._guard is not None
                                         and report.rule == "smart-play"):
                                     self._guard.begin(ready.bets)
@@ -212,14 +218,18 @@ class MonitorWorker(QThread):
                                         and self._smart_rounds >= self.settings.smart_review_every_rounds):
                                     self._smart_rounds = 0
                                     self._start_smart_review(str(completed.multiplier))
-                            if clicker.wants_cashout():
+                            if completed is None and clicker.wants_cashout():
                                 # ضریب زندهٔ ناحیهٔ ۲ (عدد در حال بالا رفتن) را جدا
                                 # بخوان؛ خوانش Bang فقط عدد پایان دست را می‌دهد.
                                 # اگر همین فریم Bang بود، دست تمام شده و کلیک روی
                                 # دکمهٔ شرط فقط یک شرط تازه باز می‌کند: هرگز نزن.
-                                ended = reading.value is not None
-                                live = None if ended else live_multiplier(reader, frame.image)
-                                clicker.tick(live, ended=ended)
+                                if reading.value is None:
+                                    live = live_multiplier(reader, frame.image)
+                                    if live is not None:
+                                        cashout_wait_for_live = False
+                                        clicker.tick(live)
+                                elif not cashout_wait_for_live:
+                                    clicker.tick(ended=True)
                             self.preview.emit(frame.image.copy())
                         except Exception as exc:
                             self.detector.reset()

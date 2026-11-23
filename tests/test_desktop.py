@@ -275,16 +275,16 @@ def test_no_click_waits_longer_than_one_second(no_detection, monkeypatch):
     clicker = AutoClicker(_clicker(autoclick_delay_ms=1000), sender=_Sender())
     assert clicker.fire("r", Decimal("12.00")).clicked
     assert clicker.test().clicked
-    assert slept == [1.0, 1.0]
+    assert slept == [1.0]
 
 
-def test_clicker_waits_before_clicking(no_detection, monkeypatch):
+def test_clicker_places_automatic_bet_without_delay(no_detection, monkeypatch):
     slept = []
     monkeypatch.setattr("crash_watcher.desktop.clicker.sleep", lambda seconds: slept.append(seconds))
     sender = _Sender()
     clicker = AutoClicker(_clicker(autoclick_delay_ms=1000), sender=sender)
     assert clicker.fire("r1", Decimal("12.00")).clicked
-    assert slept == [1.0] and len(sender.calls) == 1
+    assert slept == [] and len(sender.calls) == 1
     slept.clear()
     AutoClicker(_clicker(autoclick_delay_ms=0), sender=sender).fire("r2", Decimal("12.00"))
     assert slept == []

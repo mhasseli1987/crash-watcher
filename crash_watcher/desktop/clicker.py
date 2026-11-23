@@ -227,14 +227,15 @@ class AutoClicker:
         """دکمه‌های ×2/÷2 بازی را پیش از ثبت شرط بعدی بزن تا مبلغ واقعی درست شود."""
         plan = ((self.settings.double_bet_point, self._double_clicks),
                 (self.settings.halve_bet_point, self._halve_clicks))
-        self._double_clicks = self._halve_clicks = 0
         ok = True
         for point, count in plan:
-            if point is None:
-                continue
+            if count and point is None:
+                return False
             for _ in range(count):
-                ok = self.sender(point[0], point[1],
-                                 restore=self.settings.autoclick_restore_cursor) and ok
+                if not self.sender(point[0], point[1],
+                                   restore=self.settings.autoclick_restore_cursor):
+                    return False
+        self._double_clicks = self._halve_clicks = 0
         return ok
 
     def _payout(self, color: str | None) -> float:
@@ -625,14 +626,17 @@ class AutoClicker:
             # مبلغ شرط در بازی پیش از کلیک شرط تنظیم می‌شود: ×2 پس از باخت و
             # ÷2 پس از برد تا برگشت به مبلغ پایه.
             ok = self._apply_double_clicks() and ok
+        if not ok:
+            self._pending_rule = None
+            return ClickReport(False, "stake adjustment failed", count=self._clicks,
+                               remaining=self._armed)
         for _, point in points:
             if simulated:
                 continue
             # Permanent rule: each click waits at most one second after the round.
-            self._wait_before_click()
             ok = self.sender(point[0], point[1],
                              restore=self.settings.autoclick_restore_cursor) and ok
-        if self.settings.cashout_enabled:
+        if self.settings.cashout_enabled and (simulated or ok):
             # شرط ثبت شد: هدفِ خروج همیشه داخل ۱٫۴۰ تا ۱٫۹۰ نگه داشته می‌شود تا
             # هیچ شرطی از این عدد جلوتر باز نماند.
             try:
