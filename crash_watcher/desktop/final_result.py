@@ -155,6 +155,11 @@ class BangDetector:
             # closes instead of silently dropping the round.
             self._pending_history = None
             self._pending_steps = 0
+            if self._last == reading.value and self._last_image is not None:
+                same_image = float(np.mean(cv2.absdiff(thumb, self._last_image))) < self.pixel_difference
+                if same_image and (not history_id or history_id == self._last_history_id):
+                    self.state = DetectionState.RESULT_CONFIRMED
+                    return None
             self._last = reading.value
             self._last_image = thumb.copy()
             self._last_history_id = None

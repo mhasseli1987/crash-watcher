@@ -36,12 +36,12 @@ def model_available(settings: DesktopSettings) -> bool:
                for item in models)
 
 
-def _parse_verdict(content: str) -> SmartVerdict:
+def _parse_verdict(content: str, allowed_bets=("RED", "GREEN", "YELLOW", "SKIP")) -> SmartVerdict:
     try:
         data = json.loads(content)
     except (TypeError, ValueError) as exc:
         raise OllamaError("Ollama prediction is not JSON") from exc
-    if not isinstance(data, dict) or data.get("bet") not in ("RED", "GREEN", "YELLOW", "SKIP"):
+    if not isinstance(data, dict) or data.get("bet") not in allowed_bets:
         raise OllamaError("Ollama prediction has an invalid bet")
     confidence = data.get("confidence")
     if (type(confidence) not in (int, float) or not math.isfinite(confidence)
@@ -71,10 +71,19 @@ def predict(settings: DesktopSettings, prompt: str) -> SmartVerdict:
         raise OllamaError(f"Ollama model {settings.ollama_model} is not installed")
     if not isinstance(prompt, str) or not prompt.strip():
         raise ValueError("prompt must be nonempty text")
+    allowed_bets = ("PLAY", "SKIP") if settings.bot_mode == "classic" else ("RED", "GREEN", "YELLOW", "SKIP")
     payload = {"model": settings.ollama_model, "stream": False, "think": False,
-               "keep_alive": settings.ollama_keep_alive, "format": "json",
-               "options": {"temperature": 0.2},
-               "messages": [{"role": "user", "content": prompt}]}
+               "keep_alive": settings.ollama_keep_alive,
+               "format": {"type": "object", "properties": {
+                   "bet": {"type": "string", "enum": list(allowed_bets)},
+                   "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+                   "reason": {"type": "string"}},
+                   "required": ["bet", "confidence", "reason"], "additionalProperties": False},
+               "options": {"temperature": 0.2, "num_predict": 160},
+               "messages": [{"role": "system", "content":
+                             "Return only the required JSON object. Use a short reason. "
+                             "If evidence is insufficient choose SKIP. Do not invent certainty."},
+                            {"role": "user", "content": prompt}]}
     body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     call = request.Request(settings.ollama_base_url.rstrip("/") + "/api/chat",
                            data=body, headers={"Content-Type": "application/json"},
@@ -88,4 +97,4 @@ def predict(settings: DesktopSettings, prompt: str) -> SmartVerdict:
         content = data["message"]["content"]
     except (TypeError, KeyError) as exc:
         raise OllamaError("Ollama response has no message") from exc
-    return _parse_verdict(content)
+    return _parse_verdict(content, allowed_bets)

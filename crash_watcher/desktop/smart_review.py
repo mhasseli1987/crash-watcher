@@ -154,7 +154,7 @@ def build_prompt(snapshot: SmartSnapshot, threshold: str = "10.00",
 
 @dataclass(frozen=True)
 class SmartVerdict:
-    bet: str          # RED / GREEN / YELLOW / SKIP
+    bet: str          # PLAY / RED / GREEN / YELLOW / SKIP
     confidence: float  # 0..1
     reason: str
     second: str | None = None  # رنگ دوم اختیاری (پوشش ضرر)
@@ -169,7 +169,7 @@ class SmartVerdict:
 
     @property
     def label(self) -> str:
-        names = {"RED": "قرمز", "GREEN": "سبز", "YELLOW": "زرد (مون)",
+        names = {"PLAY": "ورود", "RED": "قرمز", "GREEN": "سبز", "YELLOW": "زرد (مون)",
                  "SKIP": "بدون شرط"}
         color = " + ".join(names.get(bet, bet) for bet in self.bets) or "بدون شرط"
         return f"{color} — اطمینان {self.confidence:.0%}"
@@ -201,7 +201,7 @@ def parse_verdict(text: str) -> SmartVerdict | None:
     bet = payload.get("bet", payload.get("color", payload.get("choice", "")))
     bet = str(bet).strip()
     color = _COLOR_ALIASES.get(bet.lower(), _COLOR_ALIASES.get(bet, bet.upper()))
-    if color not in ("RED", "GREEN", "YELLOW", "SKIP"):
+    if color not in ("PLAY", "RED", "GREEN", "YELLOW", "SKIP"):
         return None
     raw_confidence = payload.get("confidence", payload.get("probability", 0))
     try:
@@ -212,7 +212,7 @@ def parse_verdict(text: str) -> SmartVerdict | None:
         confidence /= 100
     confidence = min(1.0, max(0.0, confidence))
     reason = str(payload.get("reason", payload.get("why", ""))).strip()
-    second = _second_color(payload, color)
+    second = _second_color(payload, color) if color in ("RED", "GREEN", "YELLOW") else None
     cashout = payload.get("cashout", payload.get("cash_out", payload.get("exit")))
     try:
         cashout = float(str(cashout).replace("x", "").strip())
@@ -250,11 +250,14 @@ def _error_message(exc: Exception, base_url: str) -> str:
         except Exception:
             detail = ""
         if exc.code in (401, 403):
-            return f"کلید FreeLLMAPI پذیرفته نشد (HTTP {exc.code})؛ کلید یکپارچهٔ داشبورد را بگذارید."
+            return f"پرووایدر دسترسی را رد کرد (HTTP {exc.code})؛ کلید و دسترسی حساب را بررسی کنید."
         return f"خطای HTTP {exc.code} از {base_url}: {detail}".strip()
     if isinstance(exc, urlerror.URLError):
+        guidance = ("مطمئن شوید FreeLLMAPI روی همان پورت در حال اجراست."
+                    if _is_local(base_url) else
+                    "دسترسی شبکه و وضعیت سرویس پرووایدر خارجی را بررسی کنید.")
         return (f"اتصال به {base_url} برقرار نشد ({exc.reason}). "
-                "مطمئن شوید FreeLLMAPI روی همان پورت در حال اجراست.")
+                + guidance)
     return f"خطا در تماس با {base_url}: {exc}"
 
 
@@ -312,9 +315,17 @@ def probe_models(base_url: str, api_key: str, timeout: float = 15.0) -> list[str
         raise RuntimeError(_error_message(exc, url)) from exc
     try:
         data = json.loads(body)
-        return [str(item.get("id", "")) for item in data.get("data", []) if item.get("id")]
-    except (ValueError, AttributeError, TypeError):
-        return []
+    except ValueError as exc:
+        raise RuntimeError("پاسخ فهرست مدل‌های پرووایدر JSON معتبر نبود") from exc
+    if not isinstance(data, dict) or not isinstance(data.get("data"), list):
+        raise RuntimeError("پاسخ پرووایدر ساختار فهرست مدل‌ها را نداشت")
+    models = []
+    for item in data["data"]:
+        if (not isinstance(item, dict) or not isinstance(item.get("id"), str)
+                or not item["id"].strip()):
+            raise RuntimeError("پاسخ پرووایدر شامل شناسهٔ مدل نامعتبر بود")
+        models.append(item["id"])
+    return models
 
 
 def append_log(path: Path, entry: dict) -> None:

@@ -172,9 +172,61 @@ def no_detection(monkeypatch):
 def _clicker(**overrides):
     values = dict(click_region=Region(1, 100, 200, 60, 40), autoclick_enabled=True,
                   autoclick_dry_run=False, autoclick_cooldown_ms=0, autoclick_delay_ms=0,
-                  autoclick_skip_rounds=0)
+                  autoclick_skip_rounds=0, bot_mode="turnbal")
     values.update(overrides)
     return DesktopSettings(**values)
+
+
+def test_classic_ignores_turnbal_rules_and_clicks_one_button(no_detection):
+    sender = _Sender()
+    settings = _clicker(bot_mode="classic", bet_region=Region(1, 100, 200, 300, 40),
+                        autoclick_skip_rounds=7, pair_flip_enabled=True,
+                        row_signal_enabled=True, value_bet_enabled=True,
+                        turnbal_cashout_min=1.8, cashout_enabled=True)
+    clicker = AutoClicker(settings, sender=sender)
+    clicker.set_smart_play(("PLAY",))
+    report = clicker.fire("high", Decimal("12.00"))
+    assert report.clicked and report.rule == "smart-play"
+    assert sender.calls == [(250, 220, True)]
+    assert clicker.armed == 0 and clicker.waiting == 0
+    assert clicker._cashout_target == Decimal("1.40")
+
+
+def test_classic_does_not_click_without_a_decision(no_detection):
+    sender = _Sender()
+    clicker = AutoClicker(_clicker(bot_mode="classic", smart_click_enabled=False), sender=sender)
+    report = clicker.fire("high", Decimal("12.00"))
+    assert not report.clicked and not sender.calls and clicker.waiting == 0
+
+
+def test_classic_rejects_color_decisions_and_never_uses_color_forecast(no_detection, monkeypatch):
+    sender = _Sender()
+    clicker = AutoClicker(_clicker(bot_mode="classic", smart_click_enabled=True), sender=sender)
+    monkeypatch.setattr(clicker, "_color", lambda value: pytest.fail("color used in classic"))
+    monkeypatch.setattr(clicker.forecaster, "observe", lambda value: pytest.fail("color forecast used"))
+    clicker.set_smart_play(("RED", "GREEN", "YELLOW"))
+    assert not clicker.fire("r1", Decimal("12")).clicked
+    clicker.set_smart_play(("PLAY",))
+    assert clicker.fire("r2", Decimal("12")).clicked
+
+
+def test_classic_loss_doubles_once_and_confirmed_win_resets(no_detection):
+    sender = _Sender()
+    settings = _clicker(bot_mode="classic", bet_region=Region(1, 100, 200, 300, 40),
+                        cashout_enabled=True, double_bet_enabled=True,
+                        double_bet_point=(10, 20), halve_bet_point=(30, 40))
+    clicker = AutoClicker(settings, sender=sender)
+    clicker.set_smart_play(("PLAY",))
+    assert clicker.fire("r1", Decimal("2.20")).clicked
+    clicker.set_smart_play(("PLAY",))
+    assert clicker.fire("r2", Decimal("1.20")).clicked
+    assert clicker.double_level == 1 and sender.calls[1:3] == [(10, 20, True), (250, 220, True)]
+    clicker.tick(Decimal("1.30"))
+    clicker.tick(Decimal("1.45"))
+    clicker.confirm_cashout(Decimal("1.45"))
+    clicker.set_smart_play(("PLAY",))
+    assert clicker.fire("r3", Decimal("1.55")).clicked
+    assert clicker.double_level == 0 and sender.calls[-2:] == [(30, 40, True), (250, 220, True)]
 
 def test_manual_click_test_clicks_even_in_dry_run(no_detection):
     sender = _Sender()
@@ -298,6 +350,32 @@ def test_unconfirmed_cashout_blocks_next_bet(no_detection, tmp_path):
     assert len(sender.calls) == count
 
 
+def test_inflight_win_ocr_is_settled_before_next_bet(no_detection, tmp_path):
+    from concurrent.futures import Future
+    from crash_watcher.desktop.worker import resolve_win_ocr
+
+    sender = _Sender()
+    settings = _clicker(autoclick_threshold="100", value_bets={"1.50": "RED", "3.00": "GREEN"},
+                        cashout_enabled=True, double_bet_enabled=True,
+                        double_bet_point=(10, 20), halve_bet_point=(30, 40))
+    clicker = AutoClicker(settings, sender=sender, log_path=tmp_path / "rounds.jsonl")
+    clicker.fire("r1", Decimal("1.50"))
+    clicker.tick(Decimal("1.40"))
+    clicker.tick(Decimal("1.50"))
+    pending = Future()
+    assert not resolve_win_ocr(pending, clicker, "r1", True)
+    assert not clicker._cashout_confirmed
+    pending.set_result([("You Won 4.24 CUB", 0.99)])
+    assert resolve_win_ocr(pending, clicker, "different-round", True)
+    assert not clicker._cashout_confirmed
+    assert resolve_win_ocr(pending, clicker, "r1", False)
+    assert not clicker._cashout_confirmed
+    assert resolve_win_ocr(pending, clicker, "r1", True)
+    assert clicker._cashout_confirmed
+    assert clicker.fire("r2", Decimal("3.00")).clicked
+    assert clicker.double_level == 0
+
+
 def test_win_message_from_supplied_image():
     import cv2
     from rapidocr import RapidOCR
@@ -305,6 +383,14 @@ def test_win_message_from_supplied_image():
     img = cv2.imread(str(Path(__file__).resolve().parents[1] / "assets/successful-cashout-example.png"))
     assert has_win_message(detected_lines(RapidOCR(), img))
     assert not has_win_message([("Bang @1.16", 0.99), ("You Won", 0.3)])
+
+
+def test_win_message_from_current_multiplier_reference():
+    import cv2
+    from rapidocr import RapidOCR
+    from crash_watcher.desktop.worker import detected_lines, has_win_message
+    img = cv2.imread(str(Path(__file__).resolve().parents[1] / "assets/cashout-you-won-reference.png"))
+    assert has_win_message(detected_lines(RapidOCR(), img))
 
 
 @pytest.mark.parametrize("losses", [1, 2, 3, 4])
@@ -747,7 +833,8 @@ def test_review_window_reports_after_ten_minutes(no_detection, monkeypatch):
 def test_clicker_without_target_sends_nothing(no_detection):
     sender = _Sender()
     report = AutoClicker(DesktopSettings(autoclick_enabled=True, autoclick_dry_run=False,
-                                         autoclick_cooldown_ms=0, autoclick_skip_rounds=0),
+                                         autoclick_cooldown_ms=0, autoclick_skip_rounds=0,
+                                         bot_mode="turnbal"),
                          sender=sender).fire("r1", Decimal("10.00"))
     assert not report.clicked and report.reason == "target not found" and sender.calls == []
 

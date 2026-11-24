@@ -95,6 +95,7 @@ def test_parse_verdict_reads_the_second_colour():
 def _settings(**changes) -> DesktopSettings:
     base = dict(autoclick_enabled=True, autoclick_dry_run=False,
                 autoclick_delay_ms=0, autoclick_cooldown_ms=0,
+                bot_mode="turnbal",
                 smart_review_enabled=True, smart_play_enabled=True,
                 smart_play_learning_minutes=0, smart_play_two_colors=True,
                 bet_point_red=(10, 20), bet_point_green=(15, 25), bet_point_yellow=(30, 40))
@@ -150,6 +151,17 @@ def test_smart_play_settings_are_validated():
             DesktopSettings(**bad).validate()
 
 
+def test_classic_play_is_scored_against_target_reached_not_color():
+    planner = SmartPlanner(0, 0.4, False)
+    planner.store(SmartVerdict("PLAY", 0.8, "", cashout=1.5), "previous")
+    assert planner.take().bets == ("PLAY",)
+    planner.observe("r1", "SUCCESS")
+    assert planner.tries == 1 and planner.hits == 1
+    planner.store(SmartVerdict("PLAY", 0.7, "", cashout=1.5), "r1")
+    planner.observe("r2", "FAIL")
+    assert planner.tries == 2 and planner.hits == 1
+
+
 def test_smart_cashout_clicks_once_when_the_live_multiplier_reaches_the_target(tmp_path):
     sent = []
     clicker = _clicker(tmp_path, sent, cashout_enabled=True)
@@ -165,8 +177,8 @@ def test_smart_cashout_clicks_once_when_the_live_multiplier_reaches_the_target(t
     assert sent == [(10, 20), (10, 20)]
 
 
-def test_classic_cashout_uses_the_user_min_cashout_setting(tmp_path):
-    """کلاسیک مدل ندارد: هدف خروج «حداقل کش‌اوت» تنظیمات است، نه عدد ثابت 1.60."""
+def test_turnbal_cashout_uses_the_user_min_cashout_setting(tmp_path):
+    """When the model does not select a target, turnbal uses its configured minimum."""
     sent = []
     clicker = _clicker(tmp_path, sent, cashout_enabled=True,
                        value_bets={"2.08": "GREEN"},

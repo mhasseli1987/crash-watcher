@@ -183,6 +183,9 @@ class AutoClicker:
 
     def update(self, settings: DesktopSettings) -> None:
         """Apply a settings change made while monitoring is already running."""
+        if settings.bot_mode != self.settings.bot_mode:
+            self._armed = self._waiting = self._row_uses = self._streak_clicks = 0
+            self._flip_color = None
         self.settings = settings
         self._refresh_bankroll()
 
@@ -261,7 +264,7 @@ class AutoClicker:
 
     def _resolve(self):
         """Target: detected yellow, fixed point, else the saved click region centre."""
-        if self.settings.autoclick_mode == "detect":
+        if self.settings.bot_mode == "turnbal" and self.settings.autoclick_mode == "detect":
             found = self._detect() or self.settings.click_point
             if found is not None:
                 return found
@@ -301,6 +304,11 @@ class AutoClicker:
 
     def _bet_point(self, color: str | None):
         """The saved button for one colour, else the normal click target."""
+        if self.settings.bot_mode == "classic":
+            region = self.settings.bet_region
+            if region is not None:
+                return (region.x + region.width // 2, region.y + region.height // 2)
+            return self._resolve()
         if color:
             point = getattr(self.settings, f"bet_point_{color.lower()}", None)
             if point is not None:
@@ -316,7 +324,9 @@ class AutoClicker:
 
     def _color(self, value: Decimal) -> str:
         """The game's dot color for a multiplier (red < 2, green < 10, else yellow)."""
-        if value >= Decimal(self.settings.yellow_threshold):
+        threshold = (Decimal(self.settings.yellow_threshold)
+                     if self.settings.bot_mode == "turnbal" else Decimal("10"))
+        if value >= threshold:
             return "YELLOW"
         return "RED" if value < Decimal(self.settings.red_threshold) else "GREEN"
 
@@ -360,7 +370,8 @@ class AutoClicker:
 
     def set_smart_play(self, bets, cashout=None) -> None:
         """تصمیم آمادهٔ مدل برای دست بعد: یک یا دو رنگ، به‌همراه ضریب خروج."""
-        self._smart_play = tuple(color for color in (bets or ()) if color)
+        allowed = ("RED", "GREEN", "YELLOW") if self.settings.bot_mode == "turnbal" else ("PLAY",)
+        self._smart_play = tuple(bet for bet in (bets or ()) if bet in allowed)
         self._smart_cashout = cashout
 
     def fire(self, round_id: str, value: Decimal) -> ClickReport:
@@ -374,7 +385,7 @@ class AutoClicker:
         try:
             self.log_path.parent.mkdir(parents=True, exist_ok=True)
             entry = {"time": datetime.now().isoformat(timespec="seconds"), "round": round_id,
-                     "value": str(value), "color": self._color(value),
+                     "value": str(value), "color": self._color(value) if self.settings.bot_mode == "turnbal" else None,
                      "clicked": report.clicked, "reason": report.reason,
                      "forecast": report.forecast, "target": report.target,
                      "rule": report.rule, "detail": report.detail,
@@ -460,7 +471,8 @@ class AutoClicker:
                                count=self._clicks, balance=self.bankroll.balance)
         if round_id == self._last_id:
             return ClickReport(False, "same round", count=self._clicks, remaining=self._armed)
-        color = self._color(value)
+        turnbal = self.settings.bot_mode == "turnbal"
+        color = self._color(value) if turnbal else None
         if self._pending_rule is not None:
             target_colors, rule, stake, payouts = self._pending_rule
             if (self.settings.cashout_enabled and not self.settings.simulated
@@ -470,7 +482,7 @@ class AutoClicker:
                 return ClickReport(False, "cashout unconfirmed: check site and restart monitoring",
                                    count=self._clicks)
             self._pending_rule = None
-            hit = bool(target_colors) and color in target_colors
+            hit = (bool(target_colors) and color in target_colors) if turnbal else self._cashout_confirmed
             if hit:
                 self._rule_stats.setdefault(rule, [0, 0])[0] += 1
             outcome = None
@@ -478,10 +490,11 @@ class AutoClicker:
                 # برد رنگ اصلی، پوشش رنگ دوم (سربه‌سر) یا باخت.
                 outcome = (True if self._cashout_confirmed else False
                            if self.settings.cashout_enabled and not self.settings.simulated
-                           else True if color == target_colors[0]
-                           else None if color in target_colors[1:] else False)
-                self._track_doubling(outcome)
-            if self.bankroll is not None and target_colors:
+                           else True if turnbal and color == target_colors[0]
+                           else None if not turnbal or color in target_colors[1:] else False)
+                if turnbal or outcome is not None:
+                    self._track_doubling(outcome)
+            if self.bankroll is not None and target_colors and (turnbal or outcome is not None):
                 payout = (float(self._cashout_confirmed_multiplier) if self._cashout_confirmed
                           else payouts.get(color) or min(payouts.values()))
                 self.bankroll.settle(stake, payout, outcome)
@@ -495,29 +508,30 @@ class AutoClicker:
             if color == self._pending_color:
                 self._window["gated_correct"] += 1
             self._pending_color = None
-        self.forecaster.observe(color)
+        if turnbal:
+            self.forecaster.observe(color)
         self._window["rounds"] += 1
         self._rounds_seen += 1
         flip = self._flip_color  # decided on the previous round, so it applies here only
         self._flip_color = None
-        if color == self._streak_color:
+        if turnbal and color == self._streak_color:
             self._streak += 1
-        else:
+        elif turnbal:
             self._streak_color, self._streak = color, 1
-        if (self.settings.pair_flip_enabled and self._streak == 2
+        if (turnbal and self.settings.pair_flip_enabled and self._streak == 2
                 and color in ("RED", "GREEN")):
             # Two reds or two greens in a row: the user expects the opposite colour next.
             self._flip_color = "GREEN" if color == "RED" else "RED"
-        if (self.settings.streak_signal_enabled
+        if (turnbal and self.settings.streak_signal_enabled
                 and self._streak > self.settings.streak_signal_length
                 and color in ("RED", "GREEN") and self._streak_clicks <= 0):
             # Seven reds or greens in a row: the user reads a streak that long as
             # a trend that keeps going, so the same colour is bet for ten rounds.
             self._streak_clicks = self.settings.streak_signal_clicks
             self._streak_target = color
-        reading = self._chart_reading()
+        reading = self._chart_reading() if turnbal else None
         row_gap = self.settings.row_signal_gap
-        row_due = (self.settings.row_signal_enabled
+        row_due = (turnbal and self.settings.row_signal_enabled
                    and row_yellow_due(reading, row_gap, self.settings.row_signal_rows,
                                       self.settings.row_signal_recent_columns))
         row_cell = None
@@ -532,7 +546,7 @@ class AutoClicker:
         if row_cell is not None:
             self._row_cell = row_cell
         threshold = Decimal(self.settings.autoclick_threshold)
-        if value >= threshold and self._armed <= 0 and self._waiting <= 0:
+        if turnbal and value >= threshold and self._armed <= 0 and self._waiting <= 0:
             # A yellow arms a run: skip autoclick_skip_rounds rounds, then click the
             # next autoclick_max_clicks rounds whatever they close at. A second
             # yellow inside the run neither restarts the wait nor extends the burst.
@@ -546,7 +560,7 @@ class AutoClicker:
             self._row_uses -= 1
         row_detail = (f"row {row_cell[0]} was yellow {row_gap} columns back"
                       if row_click and row_cell else "")
-        value_color = (None if (row_click or self._armed > 0)
+        value_color = (None if (not turnbal or row_click or self._armed > 0)
                        else self._value_bet(value))
         streak_click = (not row_click
                         and self._armed <= 0 and value_color is None
@@ -572,8 +586,9 @@ class AutoClicker:
                     # تصمیم آمادهٔ مدل: یکی از قواعد بالا فعال نشده، پس نظر مدل
                     # را اجرا کن — یک رنگ یا دو رنگ هم‌زمان.
                     rule = "smart-play"
-                elif not self.settings.smart_click_enabled:
-                    return ClickReport(False, f"waiting for a round >= {threshold}",
+                elif not turnbal or not self.settings.smart_click_enabled:
+                    return ClickReport(False, (f"waiting for a round >= {threshold}" if turnbal
+                                               else "waiting for a smart decision"),
                                        count=self._clicks, remaining=0)
                 else:
                     # Smart mode: only a colour the model can back with real confidence
@@ -603,6 +618,8 @@ class AutoClicker:
         if rule == "smart-play":
             # حداکثر دو رنگ، هر کدام با همان قاعدهٔ یک ثانیه‌ای کلیک می‌شود.
             targets: list[str | None] = list(dict.fromkeys(self._smart_play))
+            if not turnbal:
+                targets = targets[:1]
             self._smart_play = ()
         else:
             targets = [target_color]
@@ -611,7 +628,7 @@ class AutoClicker:
         if not points:
             return ClickReport(False, "target not found", count=self._clicks, remaining=self._armed)
         simulated = self.settings.simulated
-        gated = (not row_click
+        gated = (turnbal and not row_click
                  and value_color is None and self._armed <= 0
                  and self.settings.smart_click_enabled)
         if gated:
@@ -656,7 +673,8 @@ class AutoClicker:
             except Exception:
                 # حالت کلاسیک مدل ندارد: «حداقل کش‌اوت» تنظیمات کاربر (تب ترنبال)
                 # مبنای خروج است تا عدد ثابت جای تنظیمات کاربر ننشیند.
-                target = Decimal(str(self.settings.turnbal_cashout_min))
+                target = (Decimal(str(self.settings.turnbal_cashout_min))
+                          if turnbal else CASHOUT_MIN_TARGET)
             self._cashout_target = min(max(target, CASHOUT_MIN_TARGET), CASHOUT_MAX_TARGET)
             self._cashout_planned_target = self._cashout_target
             self._cashout_points = [point for _, point in points]
@@ -666,7 +684,7 @@ class AutoClicker:
         reason = (f"{self._simulated_label}: would click" if simulated
                   else "clicked" if ok else "click failed")
         return ClickReport(not simulated and ok, reason, points[0][1], self._clicks,
-                           self._armed, forecast=self.forecaster.forecast().label,
+                           self._armed, forecast=self.forecaster.forecast().label if turnbal else "",
                            target="+".join(colors) or (target_color or ""),
                            rule=rule, detail=row_detail,
                            dry_run=self.settings.autoclick_dry_run,

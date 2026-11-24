@@ -56,7 +56,7 @@ class PredictionManager:
                verdict: SmartVerdict | None) -> bool:
         if source not in ("ROUTER", "OLLAMA", "LOCAL_ENGINE"):
             return False
-        if (verdict is None or verdict.bet not in ("RED", "GREEN", "YELLOW", "SKIP")
+        if (verdict is None or verdict.bet not in ("PLAY", "RED", "GREEN", "YELLOW", "SKIP")
                 or not isinstance(verdict.confidence, (int, float))
                 or not math.isfinite(verdict.confidence)
                 or not 0 <= verdict.confidence <= 1):

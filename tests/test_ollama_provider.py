@@ -50,17 +50,32 @@ def test_success_and_compact_request():
         if isinstance(req, str):
             return Reply({"models": [{"name": "qwen3:1.7b"}]})
         payload = json.loads(req.data)
-        assert payload["format"] == "json"
+        assert payload["format"]["properties"]["bet"]["enum"] == ["RED", "GREEN", "YELLOW", "SKIP"]
+        assert payload["format"]["additionalProperties"] is False
         assert payload["keep_alive"] == "30s"
         assert payload["stream"] is False
         assert payload["think"] is False
         return Reply({"message": {"content": '{"bet":"GREEN","confidence":0.6}'}})
 
     with mock.patch.object(ollama.request, "urlopen", fake_urlopen):
-        verdict = ollama.predict(DesktopSettings(ollama_enabled=True), "next round")
+        verdict = ollama.predict(DesktopSettings(ollama_enabled=True, bot_mode="turnbal"), "next round")
     assert verdict.bet == "GREEN"
     assert len(calls) == 2
     assert calls[1][1] == 4
+
+
+def test_classic_schema_and_response_are_independent_of_colors():
+    def fake(req, timeout=None):
+        if isinstance(req, str):
+            return Reply({"models": [{"name": "qwen3:1.7b"}]})
+        payload = json.loads(req.data)
+        assert payload["format"]["properties"]["bet"]["enum"] == ["PLAY", "SKIP"]
+        return Reply({"message": {"content": '{"bet":"PLAY","confidence":0.6,"reason":"x"}'}})
+
+    with mock.patch.object(ollama.request, "urlopen", fake):
+        assert ollama.predict(DesktopSettings(ollama_enabled=True), "next round").bet == "PLAY"
+    with pytest.raises(ollama.OllamaError):
+        ollama._parse_verdict('{"bet":"RED","confidence":0.6}', ("PLAY", "SKIP"))
 
 
 def test_missing_model_and_unavailable_service():

@@ -60,3 +60,54 @@ def test_rapid_transitions_reject_all_previous_requests():
         assert not manager.submit(f"round-{index}", version, "ROUTER",
                                   SmartVerdict("RED", .6, ""))
     assert manager.freeze("round-19") is None
+
+
+def test_local_answer_is_ready_while_router_is_still_waiting(tmp_path, monkeypatch):
+    from threading import Event, Thread
+    from crash_watcher import StrategyEngine
+    from crash_watcher.desktop.config import DesktopSettings, Region
+    from crash_watcher.desktop import worker as module
+    from crash_watcher.desktop.smart_review import SmartSnapshot
+    monkeypatch.setattr(module, "PROJECT_ROOT", tmp_path)
+    settings = DesktopSettings(ollama_enabled=True, bot_mode="turnbal", result_region=Region(1, 0, 0, 300, 120))
+    worker = module.MonitorWorker(settings, StrategyEngine(settings.strategy()))
+    started, release, local_ready = Event(), Event(), Event()
+    def remote(*args):
+        started.set()
+        assert release.wait(3)
+        return SmartVerdict("RED", .6, "remote"), "", ""
+    def local(*args):
+        local_ready.set()
+        return SmartVerdict("GREEN", .6, "local")
+    monkeypatch.setattr(worker, "_ask", remote)
+    monkeypatch.setattr(module, "predict_ollama", local)
+    version = worker._prediction.begin("next", 10)
+    thread = Thread(target=worker._hybrid_ai, args=(
+        "next", version, SmartSnapshot(recent=("1.5",), current="", rounds_seen=1), settings))
+    thread.start()
+    try:
+        assert started.wait(2) and local_ready.wait(2)
+        # The provider signal is set just before submission; wait for its lock to release.
+        with worker._provider_locks["OLLAMA"]:
+            assert worker._prediction.freeze("next").source == "OLLAMA"
+    finally:
+        release.set()
+        thread.join(3)
+    assert not thread.is_alive()
+
+
+def test_classic_router_prompt_and_verdict_exclude_colors(tmp_path, monkeypatch):
+    from crash_watcher import StrategyEngine
+    from crash_watcher.desktop.config import DesktopSettings, Region
+    from crash_watcher.desktop import worker as module
+    from crash_watcher.desktop.smart_review import SmartSnapshot
+    monkeypatch.setattr(module, "PROJECT_ROOT", tmp_path)
+    settings = DesktopSettings(bot_mode="classic", result_region=Region(1, 0, 0, 300, 120),
+                               smart_review_rules="bet on YELLOW")
+    worker = module.MonitorWorker(settings, StrategyEngine(settings.strategy()))
+    prompts = []
+    monkeypatch.setattr(module, "ask", lambda *args, **kwargs:
+                        prompts.append(args[3]) or '{"bet":"RED","confidence":0.9}')
+    verdict, _, _ = worker._ask("test", SmartSnapshot(recent=("1.20",)), settings, False, None, 1)
+    assert verdict is None
+    assert all(word not in prompts[0] for word in ("RED", "GREEN", "YELLOW"))

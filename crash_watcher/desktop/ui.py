@@ -528,8 +528,8 @@ class MainWindow(QMainWindow):
         self.cashout = QCheckBox("کش‌اوت هوشمند: بعد از هر شرط، مدل تعیین می‌کند کجا خارج شوی")
         self.cashout.setChecked(self.settings.cashout_enabled)
         self.cashout.setToolTip(
-            "در حالت هوشمند مدل هدف خروج را انتخاب می‌کند و در حالت کلاسیک «حداقل کش‌اوت» تب "
-            "ترنبال مبناست. هدف همیشه بین 1.40 و 1.90 می‌ماند و کلیک روی همان دکمهٔ شرط زده می‌شود.")
+            "مدل هدف خروج را انتخاب می‌کند؛ هدف پیش‌فرض کلاسیک 1.40 است. "
+            "کلیک خروج روی همان دکمهٔ شرط زده می‌شود.")
         form.addRow("کش‌اوت هوشمند", self.cashout)
         self.smart_click = QCheckBox("کلیک هوشمند: فقط وقتی پیش‌بینی رنگ به اطمینان برسد")
         self.smart_click.setChecked(self.settings.smart_click_enabled)
@@ -1055,7 +1055,7 @@ class MainWindow(QMainWindow):
 
     def _refresh_smart_play_status(self, report: dict) -> None:
         """مرحلهٔ یادگیری/بازی و دقت اندازه‌گیری‌شدهٔ مدل را بنویس."""
-        names = {"RED": "قرمز", "GREEN": "سبز", "YELLOW": "زرد"}
+        names = {"PLAY": "ورود", "RED": "قرمز", "GREEN": "سبز", "YELLOW": "زرد"}
         parts = []
         phase = report.get("phase")
         if phase == "learning":
@@ -1527,7 +1527,9 @@ class MainWindow(QMainWindow):
         if completed is not None:
             self.confirmed += 1
         self.values["ضریب شناسایی‌شده"].setText(str(reading.value) if reading.value else "—")
-        self.values["دسته"].setText({"RED":"قرمز", "GREEN":"سبز", "YELLOW":"زرد"}.get(reading.category,"نامطمئن"))
+        self.values["دسته"].setText(
+            "—" if self.settings.bot_mode == "classic" else
+            {"RED":"قرمز", "GREEN":"سبز", "YELLOW":"زرد"}.get(reading.category,"نامطمئن"))
         self.values["اطمینان OCR"].setText(f"{reading.confidence:.0%}")
         if result:
             if result.bet_outcome == BetOutcome.WON:
@@ -1543,6 +1545,10 @@ class MainWindow(QMainWindow):
             self._add_history([completed.round_id, str(completed.multiplier), result.category.value,
                                f"{completed.confidence:.0%}", completed.timestamp.isoformat(timespec="seconds"),
                                result.current_state.value, str(result.attempt_number), outcome])
+        elif completed is not None:
+            self._add_history([completed.round_id, str(completed.multiplier), "",
+                               f"{completed.confidence:.0%}", completed.timestamp.isoformat(timespec="seconds"),
+                               "CLASSIC", "", "NONE"])
         self._refresh()
 
     @staticmethod
@@ -1563,7 +1569,7 @@ class MainWindow(QMainWindow):
     def _refresh_toggles(self):
         real = not self.settings.autoclick_dry_run
         self.mode_button.setText("حالت واقعی ⚡" if real else "حالت شبیه‌سازی")
-        self.mode_button.setToolTip("کلیک روی بازی در هر دو حالت انجام می‌شود؛ این دکمه برچسب گزارش را عوض می‌کند")
+        self.mode_button.setToolTip("در حالت شبیه‌سازی کلیک واقعی ارسال نمی‌شود.")
         self.mode_button.setStyleSheet(self._toggle_style(real))
         on = self.settings.autoclick_enabled
         self.autoclick_button.setText("کلیک خودکار: روشن" if on else "کلیک خودکار: خاموش")
@@ -1599,6 +1605,10 @@ class MainWindow(QMainWindow):
 
     def toggle_bot_mode(self):
         """کلیک روی زنگ: کلاسیک ↔ ترنبال؛ انتخاب در settings.json می‌ماند."""
+        if self.worker and self.worker.isRunning():
+            self.bell.set_on(self.settings.bot_mode == "turnbal")
+            self.note.setText("برای تغییر حالت، ابتدا پایش را متوقف کنید.")
+            return
         new_mode = "classic" if self.settings.bot_mode == "turnbal" else "turnbal"
         self.apply_settings(bot_mode=new_mode)
         self._refresh_bot_mode()
@@ -1606,6 +1616,12 @@ class MainWindow(QMainWindow):
     def _refresh_bot_mode(self):
         """زنگ، برچسب حالت و متن راهنمای تب ترنبال را با حالت فعلی همگام کن."""
         turnbal = self.settings.bot_mode == "turnbal"
+        self.tabs.setTabEnabled(3, turnbal)
+        for name in ("threshold", "attempts", "click_threshold", "click_wait", "click_burst", "pair_flip",
+                     "row_signal", "row_gap", "row_limit", "streak_signal",
+                     "streak_length", "streak_clicks", "value_bets_edit", "smart_click",
+                     "prediction_confidence", "smart_two", "smart_rules"):
+            getattr(self, name).setEnabled(turnbal)
         if hasattr(self, "bell"):
             self.bell.set_on(turnbal)
             self.mode_chip.setText("حالت: ترنبال" if turnbal else "حالت: کلاسیک")
@@ -1652,7 +1668,9 @@ class MainWindow(QMainWindow):
         self.resume_button.setEnabled(active)
         if not active:
             self.values["وضعیت پایش"].setText("متوقف")
-        self.values["وضعیت استراتژی"].setText("در انتظار ضریب زرد" if self.strategy.state == StrategyState.WAITING_FOR_YELLOW else "چرخهٔ فعال")
+        self.values["وضعیت استراتژی"].setText(
+            "کلاسیک" if self.settings.bot_mode == "classic" else
+            "در انتظار ضریب زرد" if self.strategy.state == StrategyState.WAITING_FOR_YELLOW else "چرخهٔ فعال")
         self.values["شماره چرخه"].setText(str(self.strategy._cycle_id))
         self.values["شماره تلاش"].setText(str(self.strategy.attempt_number))
         self.values["تلاش‌های باقی‌مانده"].setText(str(self.strategy.remaining_attempts))
@@ -1663,7 +1681,10 @@ class MainWindow(QMainWindow):
         self.values["برد شبیه‌سازی"].setText(str(self.wins))
         self.values["باخت شبیه‌سازی"].setText(str(self.losses))
         self.values["دور تأییدشده"].setText(str(self.confirmed))
-        if self.settings.autoclick_enabled and self.settings.smart_click_enabled:
+        if self.settings.bot_mode == "classic" and self.settings.autoclick_enabled:
+            self.note.setText("حالت کلاسیک: قواعد زرد و رنگ‌های ترنبال غیرفعال‌اند؛ "
+                              "ورود بر اساس تنظیمات تصمیم هوشمند انجام می‌شود.")
+        elif self.settings.autoclick_enabled and self.settings.smart_click_enabled:
             self.note.setText(f"کلیک هوشمند فعال: فقط وقتی احتمال رنگ بعدی ≥ "
                               f"{self.settings.prediction_min_confidence:.0%} باشد کلیک می‌شود؛ "
                               f"دورهای کم‌اطمینان رد می‌شوند. قانون «{self.settings.autoclick_skip_rounds} "

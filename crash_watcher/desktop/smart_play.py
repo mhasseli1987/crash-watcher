@@ -147,7 +147,7 @@ class SmartPlanner:
             bets = self._latest.bets
             if bets:
                 self.tries += 1
-                hit = color == bets[0]
+                hit = (color == "SUCCESS" if bets[0] == "PLAY" else color == bets[0])
                 if hit:
                     self.hits += 1
                 elif color in bets[1:]:

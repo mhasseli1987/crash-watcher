@@ -1,10 +1,10 @@
 """Qt worker: screenshots and OCR stay off the GUI thread."""
 from collections import deque
 from copy import deepcopy
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
 from datetime import datetime, timezone
 import re
-from threading import Event, Thread
+from threading import Event, Lock, Thread
 from time import perf_counter
 import cv2
 import numpy as np
@@ -24,7 +24,7 @@ from .smart_play import SmartPlanner
 from .prediction_manager import PredictionManager
 from .ollama_provider import predict as predict_ollama, OllamaError
 from .smart_review import SmartVerdict
-from .smart_review import SmartSnapshot, append_log, build_prompt, grid_columns, review
+from .smart_review import SmartSnapshot, append_log, ask, build_prompt, grid_columns, parse_verdict, review
 from .turnbal import TurnbalCalibration, TurnbalGuard, build_prompt as build_turnbal_prompt
 from .turnbal import review as review_turnbal
 
@@ -54,6 +54,18 @@ def has_win_message(lines):
                for text, score in lines)
 
 
+def resolve_win_ocr(future, clicker, round_id, after_attempt, timeout=0):
+    """Consume a completed OCR result only for the bet it was captured for."""
+    try:
+        lines = future.result(timeout=timeout)
+    except FutureTimeout:
+        return False
+    if (round_id == clicker._last_id and clicker._pending_rule is not None
+            and after_attempt and clicker._cashout_attempted and has_win_message(lines)):
+        clicker.confirm_cashout(clicker._cashout_attempt_multiplier)
+    return True
+
+
 class MonitorWorker(QThread):
     observation = Signal(object, object, object)
     preview = Signal(object)
@@ -73,7 +85,7 @@ class MonitorWorker(QThread):
         self._stop = Event()
         self._pause = Event()
         self._resync_on_resume = Event()
-        self.detector = BangDetector()
+        self.detector = BangDetector(history_timeout_frames=3)
         self._clicker: AutoClicker | None = None
         self._recent: deque[str] = deque(maxlen=30)
         self._smart_seen = 0
@@ -82,7 +94,8 @@ class MonitorWorker(QThread):
         self._planner: SmartPlanner | None = None
         self._guard: TurnbalGuard | None = None
         # Brier هر مدل بین جلسه‌ها ذخیره می‌شود تا انتخاب خودکار واقعی باشد.
-        self._leaderboard = ModelLeaderboard(PROJECT_ROOT / "logs" / "model-scores.json")
+        score_file = "model-scores.json" if settings.bot_mode == "turnbal" else "classic-model-scores.json"
+        self._leaderboard = ModelLeaderboard(PROJECT_ROOT / "logs" / score_file)
         self._compare_pending: list[tuple[str, tuple[str, ...], float]] = []
         self._chart_backend = None
         self._prediction = PredictionManager()
@@ -90,6 +103,7 @@ class MonitorWorker(QThread):
         self._prediction_version = 0
         self._prediction_sequence = 0
         self._frozen_pending = None
+        self._provider_locks = {source: Lock() for source in ("ROUTER", "OLLAMA")}
 
     def configure(self, settings: DesktopSettings) -> None:
         """Apply click settings from the window while the loop is running."""
@@ -134,6 +148,10 @@ class MonitorWorker(QThread):
             recognizer = BangRecognizer(reader, self.settings.ocr_confidence)
             from rapidocr import RapidOCR
             screen_engine = RapidOCR()
+            warmup = np.zeros((64, 240, 3), dtype=np.uint8)
+            cv2.putText(warmup, "You Won", (4, 43),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.9, (255, 255, 255), 2)
+            screen_engine(warmup)
             win_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="cashout-ocr")
             history_engine = None
             if self.settings.history_region:
@@ -161,7 +179,6 @@ class MonitorWorker(QThread):
                     history_id = None
                     history_value = None
                     cashout_wait_for_live = False
-                    win_message_cleared = False
                     win_future = None
                     win_round = None
                     win_after_attempt = False
@@ -199,18 +216,18 @@ class MonitorWorker(QThread):
                             else:
                                 reading = previous_reading
                             if win_future is not None and win_future.done():
-                                lines = win_future.result()
-                                if win_round == clicker._last_id and clicker._pending_rule is not None:
-                                    if not has_win_message(lines):
-                                        win_message_cleared = True
-                                    elif win_message_cleared and win_after_attempt and clicker._cashout_attempted:
-                                        clicker.confirm_cashout(clicker._cashout_attempt_multiplier)
-                                win_future = None
+                                finished, win_future = win_future, None
+                                try:
+                                    resolve_win_ocr(finished, clicker, win_round, win_after_attempt)
+                                except Exception as exc:
+                                    self.problem.emit("Cashout confirmation OCR failed: " + str(exc))
                             if (win_future is None and clicker._pending_rule is not None
-                                    and self.settings.cashout_enabled and not clicker._cashout_confirmed):
+                                    and self.settings.cashout_enabled and clicker._cashout_attempted
+                                    and not clicker._cashout_confirmed):
                                 win_round = clicker._last_id
                                 win_after_attempt = clicker._cashout_attempted
-                                win_future = win_executor.submit(detected_lines, screen_engine, frame.image.copy())
+                                win_future = win_executor.submit(detected_lines, screen_engine,
+                                                                 frame.image.copy())
                             # The site updates history after the Bang screen is
                             # replaced by the countdown, so observe history in
                             # every phase (OCR still runs only when it changes).
@@ -232,13 +249,17 @@ class MonitorWorker(QThread):
                                     and self.detector.state.name == "ROUND_IN_PROGRESS"):
                                 self._start_hybrid(clicker)
                             strategy_result = (self.strategy.process_round(completed.round_id, completed.multiplier)
-                                               if completed else None)
+                                               if completed and self.settings.bot_mode == "turnbal" else None)
                             self.observation.emit(reading, completed, strategy_result)
                             if completed is not None:
                                 # اول نتیجهٔ دست تازه ثبت و پیش‌بینی قبلی سنجیده
                                 # می‌شود، بعد تصمیمِ آمادهٔ مدل برای دست بعد به
                                 # کلیکر داده می‌شود تا در پنجرهٔ کوتاه فقط کلیک کند.
-                                color = clicker.color(completed.multiplier)
+                                turnbal = self.settings.bot_mode == "turnbal"
+                                color = clicker.color(completed.multiplier) if turnbal else None
+                                scoring_target = (self._frozen_pending or {}).get("cashout") or 1.4
+                                outcome = (color if turnbal else
+                                           "SUCCESS" if float(completed.multiplier) >= scoring_target else "FAIL")
                                 if self._frozen_pending is not None:
                                     pending = self._frozen_pending
                                     self._frozen_pending = None
@@ -248,21 +269,25 @@ class MonitorWorker(QThread):
                                                 "source": pending["source"],
                                                 "prediction": pending["prediction"],
                                                 "confidence": pending["confidence"],
-                                                "actual_result": color,
-                                                "prediction_correct": pending["prediction"] == color,
+                                                "actual_result": outcome,
+                                                "prediction_correct": (pending["prediction"] == color if turnbal else
+                                                                       outcome == "SUCCESS" if pending["prediction"] == "PLAY" else None),
                                                 "context_version": pending["context_version"],
                                                 "status": "SCORED",
                                                 "deadline_met": pending["source"] != "NO_PREDICTION",
                                                 "total_latency_ms": pending["total_latency_ms"],
                                                 "providers": {source: {"prediction": answer.verdict.bet,
                                                                        "confidence": answer.verdict.confidence,
-                                                                       "correct": answer.verdict.bet == color}
+                                                                       "correct": (answer.verdict.bet == color if turnbal else
+                                                                                   float(completed.multiplier) >= (answer.verdict.cashout or 1.4)
+                                                                                   if answer.verdict.bet == "PLAY" else None)}
                                                               for source, answer in pending["answers"].items()},
                                                 **pending["latencies"]})
-                                self._score_models(color)
+                                if turnbal:
+                                    self._score_models(color)
                                 if self._guard is not None:
                                     self._guard.observe(color)
-                                planner.observe(completed.round_id, color)
+                                planner.observe(completed.round_id, outcome)
                                 if self._smart_play_active() and self._prediction_target is not None:
                                     self._local_prediction(clicker, color)
                                     chosen = self._prediction.freeze(self._prediction_target)
@@ -275,6 +300,7 @@ class MonitorWorker(QThread):
                                         "context_version": chosen.context_version if chosen else self._prediction_version,
                                         "source": chosen.source if chosen else "NO_PREDICTION",
                                         "prediction": chosen.verdict.bet if chosen else None,
+                                        "cashout": chosen.verdict.cashout if chosen else None,
                                         "confidence": chosen.verdict.confidence if chosen else None,
                                         "answers": frozen_answers,
                                         "total_latency_ms": frozen_total_ms,
@@ -298,17 +324,25 @@ class MonitorWorker(QThread):
                                     # می‌شود، نه فقط در متن پرامپت.
                                     cashout = self._guard.cap_cashout(cashout)
                                 clicker.set_smart_play(ready.bets if ready else (), cashout)
+                                # A frame captured before the round ended may still be
+                                # undergoing OCR. Allow it to finish before settling.
+                                if win_future is not None and clicker._cashout_attempted:
+                                    try:
+                                        if resolve_win_ocr(win_future, clicker, win_round,
+                                                           win_after_attempt, timeout=2.0):
+                                            win_future = None
+                                    except Exception as exc:
+                                        win_future = None
+                                        self.problem.emit("Cashout confirmation OCR failed: " + str(exc))
                                 report = clicker.fire(completed.round_id,
                                                       completed.multiplier)
-                                if report.clicked:
-                                    win_message_cleared = False
                                 if report.clicked and clicker.wants_cashout():
                                     cashout_wait_for_live = True
                                 if (ready is not None and self._guard is not None
                                         and report.rule == "smart-play"):
                                     self._guard.begin(ready.bets)
                                 self.click_report.emit(report)
-                                review = clicker.take_review()
+                                review = clicker.take_review() if turnbal else None
                                 if review is not None:
                                     self.review_report.emit(review)
                                 self._recent.append(str(completed.multiplier))
@@ -398,6 +432,9 @@ class MonitorWorker(QThread):
         target = self._prediction_target
         if target is None:
             return
+        if self.settings.bot_mode == "classic":
+            self._prediction.clear_local(target, self._prediction_version)
+            return
         forecaster = deepcopy(clicker.forecaster) if confirmed_color else clicker.forecaster
         if confirmed_color:
             forecaster.observe(confirmed_color)
@@ -412,34 +449,60 @@ class MonitorWorker(QThread):
 
     def _hybrid_ai(self, target: str, version: int, snapshot: SmartSnapshot,
                    settings: DesktopSettings) -> None:
-        """Bounded sequential providers avoid loading Ollama alongside Router work."""
+        """Run local inference without waiting for the remote network timeout."""
+        if settings.ollama_enabled:
+            Thread(target=self._hybrid_ollama, args=(target, version, snapshot, settings),
+                   daemon=True).start()
         turnbal = settings.bot_mode == "turnbal"
-        calibration = TurnbalCalibration.from_settings(settings)
-        if self._prediction.reserve(target, version, "ROUTER"):
+        calibration = TurnbalCalibration.from_settings(settings) if turnbal else None
+        lock = self._provider_locks["ROUTER"]
+        if not lock.acquire(blocking=False):
+            return
+        try:
+            if not self._prediction.reserve(target, version, "ROUTER"):
+                return
             try:
                 verdict, _, _ = self._ask(settings.smart_review_model, snapshot, settings,
                                           turnbal, calibration,
                                           min(settings.smart_review_timeout_s,
                                               settings.smart_latency_budget_ms / 1000))
-                if verdict is not None and self._prediction.submit(target, version, "ROUTER", verdict):
+                allowed = ("RED", "GREEN", "YELLOW", "SKIP") if turnbal else ("PLAY", "SKIP")
+                if verdict is not None and verdict.bet in allowed and self._prediction.submit(target, version, "ROUTER", verdict):
                     return
-            except Exception:
-                pass
-        if settings.ollama_enabled and self._prediction.reserve(target, version, "OLLAMA"):
+            except Exception as exc:
+                self.problem.emit("Router prediction failed: " + str(exc))
+        finally:
+            lock.release()
+
+    def _hybrid_ollama(self, target, version, snapshot, settings):
+        lock = self._provider_locks["OLLAMA"]
+        if not lock.acquire(blocking=False):
+            return
+        try:
+            if not self._prediction.reserve(target, version, "OLLAMA"):
+                return
+            turnbal = settings.bot_mode == "turnbal"
+            calibration = TurnbalCalibration.from_settings(settings) if turnbal else None
             try:
                 prompt = (build_turnbal_prompt(snapshot, calibration,
                                                settings.autoclick_threshold,
                                                settings.smart_review_rules,
                                                allow_two=settings.smart_play_two_colors)
-                          if turnbal else build_prompt(
-                              snapshot, settings.autoclick_threshold,
-                              settings.smart_review_rules,
-                              min_confidence=settings.smart_play_min_confidence,
-                              allow_two=settings.smart_play_two_colors))
+                          if turnbal else (
+                              "Evaluate whether to enter the NEXT crash round. "
+                              "Choose PLAY or SKIP. Recent confirmed multipliers, oldest first: "
+                              + ",".join(snapshot.recent[-40:])
+                              + ". Choose SKIP if evidence is insufficient. "
+                              "History does not guarantee future outcomes. Confidence must be calibrated. "
+                              "Use a short English reason."))
                 verdict = predict_ollama(settings, prompt)
-                self._prediction.submit(target, version, "OLLAMA", verdict)
-            except (OllamaError, ValueError):
-                pass
+                allowed = ("RED", "GREEN", "YELLOW", "SKIP") if turnbal else ("PLAY", "SKIP")
+                if verdict.bet in allowed:
+                    self._prediction.submit(target, version, "OLLAMA", verdict)
+            except Exception as exc:
+                self.problem.emit("Ollama prediction failed: " + str(exc))
+        finally:
+            lock.release()
 
     def _ask(self, model, snapshot, settings, turnbal, calibration, timeout):
         """یک درخواست مدل؛ همین تابع در مقایسهٔ موازی هم استفاده می‌شود."""
@@ -449,10 +512,13 @@ class MonitorWorker(QThread):
                                   calibration, timeout, settings.autoclick_threshold,
                                   settings.smart_review_rules,
                                   allow_two=settings.smart_play_two_colors)
-        return review(settings.smart_review_url, key, model, snapshot, timeout,
-                      settings.autoclick_threshold, settings.smart_review_rules,
-                      min_confidence=settings.smart_play_min_confidence,
-                      allow_two=settings.smart_play_two_colors)
+        prompt = ("Analyze the next crash round using only this history, oldest first: "
+                  + ", ".join(snapshot.recent[-30:])
+                  + ". Choose PLAY or SKIP; use SKIP when evidence is insufficient. "
+                    "Return JSON with bet (PLAY or SKIP), confidence, reason, and optional cashout (1.40 to 1.90).")
+        raw = ask(settings.smart_review_url, key, model, prompt, timeout)
+        verdict = parse_verdict(raw)
+        return (verdict if verdict and verdict.bet in ("PLAY", "SKIP") else None), raw, prompt
 
     def _smart_play_active(self) -> bool:
         """ورود هوشمند فقط وقتی معنا دارد که بررسی هوشمند هم روشن باشد."""
@@ -466,14 +532,15 @@ class MonitorWorker(QThread):
             return
         self._smart_busy = True
         snapshot = SmartSnapshot(recent=tuple(self._recent), current=current,
-                                 grid_columns=self._chart_grid(), rounds_seen=self._smart_seen)
+                                 grid_columns=self._chart_grid() if self.settings.bot_mode == "turnbal" else (),
+                                 rounds_seen=self._smart_seen)
         Thread(target=self._smart_review_thread, args=(snapshot, self.settings),
                daemon=True).start()
 
     def _smart_review_thread(self, snapshot: SmartSnapshot, settings: DesktopSettings) -> None:
         started = perf_counter()
         turnbal = settings.bot_mode == "turnbal"
-        calibration = TurnbalCalibration.from_settings(settings)
+        calibration = TurnbalCalibration.from_settings(settings) if turnbal else None
         log_path = PROJECT_ROOT / "logs" / ("turnbal-review.jsonl" if turnbal
                                            else "smart-review.jsonl")
         models = parse_models(settings.smart_compare_models)
@@ -525,10 +592,7 @@ class MonitorWorker(QThread):
                                              settings.smart_review_rules,
                                              allow_two=settings.smart_play_two_colors)
                         if turnbal else
-                        build_prompt(snapshot, settings.autoclick_threshold,
-                                     settings.smart_review_rules,
-                                     min_confidence=settings.smart_play_min_confidence,
-                                     allow_two=settings.smart_play_two_colors))
+                        "Classic: PLAY or SKIP based on recent multipliers.")
             self.smart_report.emit({"ok": False, "round": snapshot.current,
                                     "mode": settings.bot_mode,
                                     "error": str(exc),
@@ -556,7 +620,7 @@ class MonitorWorker(QThread):
         if planner is not None:
             # تصمیم برای دست بعد آماده می‌شود، پیش از بسته‌شدن ضریب جاری.
             planner.store(verdict, snapshot.current)
-        if len(attempts) > 1 and verdict is not None:
+        if turnbal and len(attempts) > 1 and verdict is not None:
             # پیش‌بینی همهٔ مدل‌ها با دور بعد سنجیده می‌شود تا Brier هرکدام واقعی باشد.
             self._compare_pending = [(item.model, item.verdict.bets, item.verdict.confidence)
                                      for item in attempts
