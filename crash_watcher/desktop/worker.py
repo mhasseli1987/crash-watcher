@@ -1,5 +1,6 @@
 """Qt worker: screenshots and OCR stay off the GUI thread."""
 from collections import deque
+from copy import deepcopy
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 import re
@@ -20,6 +21,9 @@ from .final_result import BangDetector, BangRecognizer, parse_history_entry
 from .model_compare import (ModelAttempt, ModelLeaderboard, compare as compare_models,
                             parse_models)
 from .smart_play import SmartPlanner
+from .prediction_manager import PredictionManager
+from .ollama_provider import predict as predict_ollama, OllamaError
+from .smart_review import SmartVerdict
 from .smart_review import SmartSnapshot, append_log, build_prompt, grid_columns, review
 from .turnbal import TurnbalCalibration, TurnbalGuard, build_prompt as build_turnbal_prompt
 from .turnbal import review as review_turnbal
@@ -81,6 +85,11 @@ class MonitorWorker(QThread):
         self._leaderboard = ModelLeaderboard(PROJECT_ROOT / "logs" / "model-scores.json")
         self._compare_pending: list[tuple[str, tuple[str, ...], float]] = []
         self._chart_backend = None
+        self._prediction = PredictionManager()
+        self._prediction_target: str | None = None
+        self._prediction_version = 0
+        self._prediction_sequence = 0
+        self._frozen_pending = None
 
     def configure(self, settings: DesktopSettings) -> None:
         """Apply click settings from the window while the loop is running."""
@@ -160,6 +169,8 @@ class MonitorWorker(QThread):
                         if self._resync_on_resume.is_set():
                             self._resync_on_resume.clear()
                             self.detector.reset()
+                            self._prediction_target = None
+                            self._frozen_pending = None
                             previous = previous_reading = None
                             if self.strategy.state == StrategyState.ACTIVE_CYCLE:
                                 self.strategy.reset()
@@ -172,6 +183,8 @@ class MonitorWorker(QThread):
                             frame, events = capture.capture()
                             if events:
                                 self.detector.reset()
+                                self._prediction_target = None
+                                self._frozen_pending = None
                                 if self.strategy.state == StrategyState.ACTIVE_CYCLE:
                                     self.strategy.reset()
                                 previous = previous_reading = None
@@ -214,6 +227,10 @@ class MonitorWorker(QThread):
                             completed = self.detector.observe(frame.image, reading, frame.captured_at,
                                                               history_id, history_value,
                                                               require_history=history_capture is not None)
+                            if (self._smart_play_active()
+                                    and completed is None and self._prediction_target is None
+                                    and self.detector.state.name == "ROUND_IN_PROGRESS"):
+                                self._start_hybrid(clicker)
                             strategy_result = (self.strategy.process_round(completed.round_id, completed.multiplier)
                                                if completed else None)
                             self.observation.emit(reading, completed, strategy_result)
@@ -222,10 +239,57 @@ class MonitorWorker(QThread):
                                 # می‌شود، بعد تصمیمِ آمادهٔ مدل برای دست بعد به
                                 # کلیکر داده می‌شود تا در پنجرهٔ کوتاه فقط کلیک کند.
                                 color = clicker.color(completed.multiplier)
+                                if self._frozen_pending is not None:
+                                    pending = self._frozen_pending
+                                    self._frozen_pending = None
+                                    append_log(PROJECT_ROOT / "logs" / "hybrid-predictions.jsonl",
+                                               {"target_round_id": pending["target_round_id"],
+                                                "actual_round_id": completed.round_id,
+                                                "source": pending["source"],
+                                                "prediction": pending["prediction"],
+                                                "confidence": pending["confidence"],
+                                                "actual_result": color,
+                                                "prediction_correct": pending["prediction"] == color,
+                                                "context_version": pending["context_version"],
+                                                "status": "SCORED",
+                                                "deadline_met": pending["source"] != "NO_PREDICTION",
+                                                "total_latency_ms": pending["total_latency_ms"],
+                                                "providers": {source: {"prediction": answer.verdict.bet,
+                                                                       "confidence": answer.verdict.confidence,
+                                                                       "correct": answer.verdict.bet == color}
+                                                              for source, answer in pending["answers"].items()},
+                                                **pending["latencies"]})
                                 self._score_models(color)
                                 if self._guard is not None:
                                     self._guard.observe(color)
                                 planner.observe(completed.round_id, color)
+                                if self._smart_play_active() and self._prediction_target is not None:
+                                    self._local_prediction(clicker, color)
+                                    chosen = self._prediction.freeze(self._prediction_target)
+                                    frozen_answers = self._prediction.answers()
+                                    frozen_latencies = self._prediction.latencies_ms()
+                                    frozen_total_ms = self._prediction.elapsed_ms()
+                                    self._prediction_target = None
+                                    self._frozen_pending = {
+                                        "target_round_id": chosen.target_round_id if chosen else f"session-next-{self._prediction_sequence}",
+                                        "context_version": chosen.context_version if chosen else self._prediction_version,
+                                        "source": chosen.source if chosen else "NO_PREDICTION",
+                                        "prediction": chosen.verdict.bet if chosen else None,
+                                        "confidence": chosen.verdict.confidence if chosen else None,
+                                        "answers": frozen_answers,
+                                        "total_latency_ms": frozen_total_ms,
+                                        "latencies": frozen_latencies}
+                                    verdict = chosen.verdict if chosen else None
+                                    if verdict is not None and self._guard is not None:
+                                        verdict, _ = self._guard.check(verdict)
+                                    planner.store(verdict, completed.round_id)
+                                    self.smart_report.emit({"ok": bool(chosen), "round": completed.round_id,
+                                                            "target_round_id": chosen.target_round_id if chosen else None,
+                                                            "source": chosen.source if chosen else "NO_PREDICTION",
+                                                            "status": "FROZEN", "frozen": True,
+                                                            "verdict": verdict,
+                                                            **frozen_latencies,
+                                                            **planner.stats()})
                                 ready = (planner.take() if self._smart_play_active()
                                          else None)
                                 cashout = ready.cashout if ready else None
@@ -250,7 +314,7 @@ class MonitorWorker(QThread):
                                 self._recent.append(str(completed.multiplier))
                                 self._smart_seen += 1
                                 self._smart_rounds += 1
-                                if (self.settings.smart_review_enabled
+                                if (not self._smart_play_active() and self.settings.smart_review_enabled
                                         and self._smart_rounds >= self.settings.smart_review_every_rounds):
                                     self._smart_rounds = 0
                                     self._start_smart_review(str(completed.multiplier))
@@ -269,6 +333,8 @@ class MonitorWorker(QThread):
                             self.preview.emit(frame.image.copy())
                         except Exception as exc:
                             self.detector.reset()
+                            self._prediction_target = None
+                            self._frozen_pending = None
                             previous = previous_reading = None
                             if self.strategy.state == StrategyState.ACTIVE_CYCLE:
                                 self.strategy.reset()
@@ -314,6 +380,66 @@ class MonitorWorker(QThread):
                 continue
             self._leaderboard.record(model, confidence, color == bets[0])
         self._leaderboard.save()
+
+    def _start_hybrid(self, clicker: AutoClicker) -> None:
+        """Prepare a provisional next-round decision from confirmed history."""
+        self._prediction_sequence += 1
+        target = f"session-next-{self._prediction_sequence}"
+        version = self._prediction.begin(target, 120.0)
+        self._prediction_target, self._prediction_version = target, version
+        self._local_prediction(clicker)
+        settings = self.settings
+        snapshot = SmartSnapshot(recent=tuple(self._recent), current="",
+                                 rounds_seen=self._smart_seen)
+        Thread(target=self._hybrid_ai, args=(target, version, snapshot, settings),
+               daemon=True).start()
+
+    def _local_prediction(self, clicker: AutoClicker, confirmed_color: str | None = None) -> None:
+        target = self._prediction_target
+        if target is None:
+            return
+        forecaster = deepcopy(clicker.forecaster) if confirmed_color else clicker.forecaster
+        if confirmed_color:
+            forecaster.observe(confirmed_color)
+        forecast = forecaster.forecast()
+        if (forecast.samples < forecaster.min_samples
+                or forecast.probability < self.settings.prediction_min_confidence):
+            self._prediction.clear_local(target, self._prediction_version)
+            return
+        verdict = SmartVerdict(forecast.color, forecast.probability,
+                               f"local {forecast.model}")
+        self._prediction.submit(target, self._prediction_version, "LOCAL_ENGINE", verdict)
+
+    def _hybrid_ai(self, target: str, version: int, snapshot: SmartSnapshot,
+                   settings: DesktopSettings) -> None:
+        """Bounded sequential providers avoid loading Ollama alongside Router work."""
+        turnbal = settings.bot_mode == "turnbal"
+        calibration = TurnbalCalibration.from_settings(settings)
+        if self._prediction.reserve(target, version, "ROUTER"):
+            try:
+                verdict, _, _ = self._ask(settings.smart_review_model, snapshot, settings,
+                                          turnbal, calibration,
+                                          min(settings.smart_review_timeout_s,
+                                              settings.smart_latency_budget_ms / 1000))
+                if verdict is not None and self._prediction.submit(target, version, "ROUTER", verdict):
+                    return
+            except Exception:
+                pass
+        if settings.ollama_enabled and self._prediction.reserve(target, version, "OLLAMA"):
+            try:
+                prompt = (build_turnbal_prompt(snapshot, calibration,
+                                               settings.autoclick_threshold,
+                                               settings.smart_review_rules,
+                                               allow_two=settings.smart_play_two_colors)
+                          if turnbal else build_prompt(
+                              snapshot, settings.autoclick_threshold,
+                              settings.smart_review_rules,
+                              min_confidence=settings.smart_play_min_confidence,
+                              allow_two=settings.smart_play_two_colors))
+                verdict = predict_ollama(settings, prompt)
+                self._prediction.submit(target, version, "OLLAMA", verdict)
+            except (OllamaError, ValueError):
+                pass
 
     def _ask(self, model, snapshot, settings, turnbal, calibration, timeout):
         """یک درخواست مدل؛ همین تابع در مقایسهٔ موازی هم استفاده می‌شود."""

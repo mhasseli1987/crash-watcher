@@ -67,6 +67,11 @@ class DesktopSettings:
     smart_latency_budget_ms: int = 4000
     smart_review_every_rounds: int = 1
     smart_review_rules: str = ""
+    ollama_enabled: bool = False
+    ollama_base_url: str = "http://127.0.0.1:11434"
+    ollama_model: str = "qwen3:1.7b"
+    ollama_timeout_ms: int = 4000
+    ollama_keep_alive: str = "30s"
     # «ورود هوشمند به بازی»: اول یادگیری، بعد شرط‌بندی بر پایهٔ تصمیم آمادهٔ مدل.
     smart_play_enabled: bool = False
     smart_play_learning_minutes: int = 30
@@ -190,6 +195,23 @@ class DesktopSettings:
             raise ValueError("prediction_min_confidence must be between 0.5 and 1")
         if type(self.smart_review_enabled) is not bool:
             raise ValueError("smart_review_enabled must be a boolean")
+        if type(self.ollama_enabled) is not bool:
+            raise ValueError("ollama_enabled must be a boolean")
+        from urllib.parse import urlsplit
+        ollama_url = None
+        try:
+            ollama_url = urlsplit(self.ollama_base_url)
+            local_host = ollama_url.hostname in ("127.0.0.1", "localhost", "::1")
+        except (TypeError, ValueError, AttributeError):
+            local_host = False
+        if not local_host or ollama_url.scheme != "http" or ollama_url.username or ollama_url.password or ollama_url.path.strip("/") or ollama_url.query or ollama_url.fragment:
+            raise ValueError("ollama_base_url must be a local HTTP origin")
+        if not isinstance(self.ollama_model, str) or not self.ollama_model.strip():
+            raise ValueError("ollama_model must be nonempty text")
+        if type(self.ollama_timeout_ms) is not int or not 100 <= self.ollama_timeout_ms <= 120000:
+            raise ValueError("ollama_timeout_ms must be between 100 and 120000")
+        if not isinstance(self.ollama_keep_alive, str) or not self.ollama_keep_alive.strip():
+            raise ValueError("ollama_keep_alive must be nonempty text")
         if (not isinstance(self.smart_review_url, str)
                 or not self.smart_review_url.strip().lower().startswith(("http://", "https://"))):
             raise ValueError("smart_review_url must start with http:// or https://")

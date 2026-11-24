@@ -20,6 +20,7 @@ import argparse
 import json
 import math
 import sys
+from collections import Counter
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -159,6 +160,61 @@ def report(summary: dict) -> str:
     return "\n".join(lines)
 
 
+def summarise_hybrid(predictions: list[dict], rounds: list[dict]) -> dict:
+    """Score only frozen predictions against their recorded actual round."""
+    actual = {str(row.get("round")): row.get("color") for row in rounds
+              if row.get("round") and row.get("color")}
+    seen = Counter()
+    baseline = {}
+    for row in rounds:
+        rid, color = str(row.get("round")), row.get("color")
+        if rid not in actual or color not in ("RED", "GREEN", "YELLOW"):
+            continue
+        baseline[rid] = max(seen, key=seen.get) if seen else None
+        seen[color] += 1
+    buckets = {name: {"n": 0, "hits": 0, "latency_ms": []}
+               for name in ("ROUTER", "OLLAMA", "LOCAL_ENGINE", "HYBRID", "BASELINE")}
+    fallback = 0
+    matched = 0
+    deadline_met = 0
+    for row in predictions:
+        rid = str(row.get("actual_round_id"))
+        color = actual.get(rid)
+        if color is None or color != row.get("actual_result") or row.get("status") != "SCORED":
+            continue
+        matched += 1
+        deadline_met += bool(row.get("deadline_met"))
+        source = row.get("source")
+        if source not in ("ROUTER", "OLLAMA", "LOCAL_ENGINE"):
+            continue
+        fallback += source != "ROUTER"
+        for name, bet in (("HYBRID", row.get("prediction")),
+                          ("BASELINE", baseline.get(rid))):
+            if bet in ("RED", "GREEN", "YELLOW"):
+                buckets[name]["n"] += 1
+                buckets[name]["hits"] += bet == color
+        for name, value in (row.get("providers") or {}).items():
+            if name not in buckets or not isinstance(value, dict):
+                continue
+            if value.get("prediction") not in ("RED", "GREEN", "YELLOW"):
+                continue
+            bucket = buckets[name]
+            bucket["n"] += 1
+            bucket["hits"] += value["prediction"] == color
+            latency = row.get(name.lower() + "_latency_ms")
+            if isinstance(latency, (int, float)) and math.isfinite(latency):
+                bucket["latency_ms"].append(latency)
+    for bucket in buckets.values():
+        values = sorted(bucket.pop("latency_ms"))
+        bucket["accuracy"] = bucket["hits"] / bucket["n"] if bucket["n"] else None
+        bucket["mean_latency_ms"] = sum(values) / len(values) if values else None
+        bucket["p95_latency_ms"] = values[math.ceil(.95 * len(values)) - 1] if values else None
+    total = buckets["HYBRID"]["n"]
+    return {"sources": buckets, "fallback_rate": fallback / total if total else None,
+            "deadline_success_rate": deadline_met / matched if matched else None,
+            "scored": total, "matched_rounds": matched}
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description="سنجش دقت و Brier مدل از لاگ‌ها")
     parser.add_argument("--reviews", type=Path, default=None,
@@ -167,6 +223,7 @@ def main(argv=None) -> int:
                         help="لاگ دورها با رنگ واقعی")
     parser.add_argument("--json", type=Path, default=None,
                         help="نوشتن خلاصهٔ ماشین‌خوان در این مسیر")
+    parser.add_argument("--hybrid", action="store_true", help="سنجش لاگ پیش‌بینی ترکیبی")
     args = parser.parse_args(argv)
     reviews_path = args.reviews
     if reviews_path is None:
@@ -174,8 +231,12 @@ def main(argv=None) -> int:
         candidates = (ROOT / "logs" / "turnbal-review.jsonl",
                       ROOT / "logs" / "smart-review.jsonl")
         reviews_path = next((path for path in candidates if path.exists()), candidates[0])
-    reviews = read_jsonl(reviews_path)
     rounds = read_jsonl(args.rounds)
+    if args.hybrid:
+        summary = summarise_hybrid(read_jsonl(ROOT / "logs" / "hybrid-predictions.jsonl"), rounds)
+        print(json.dumps(summary, indent=2, ensure_ascii=False))
+        return 0
+    reviews = read_jsonl(reviews_path)
     summary = summarise(pair_predictions(reviews, rounds))
     print(report(summary))
     if args.json is not None:

@@ -671,6 +671,9 @@ class MainWindow(QMainWindow):
         self.smart_play_status.setWordWrap(True)
         self.smart_play_status.setStyleSheet("color:#c7d0dc;")
         layout.addWidget(self.smart_play_status)
+        self.ollama_enabled = QCheckBox("پشتیبان محلی Ollama")
+        self.ollama_enabled.setChecked(self.settings.ollama_enabled)
+        layout.addWidget(self.ollama_enabled)
         form = QFormLayout()
         self.smart_url = QLineEdit(self.settings.smart_review_url or DEFAULT_BASE_URL)
         self.smart_url.setPlaceholderText(DEFAULT_BASE_URL)
@@ -992,6 +995,11 @@ class MainWindow(QMainWindow):
                        smart_review_timeout_s=self.smart_timeout.value(),
                        smart_review_every_rounds=self.smart_every.value(),
                        smart_review_rules=self.smart_rules.text().strip(),
+                        ollama_enabled=self.ollama_enabled.isChecked(),
+                        ollama_base_url=self.settings.ollama_base_url,
+                        ollama_model=self.settings.ollama_model,
+                        ollama_timeout_ms=self.settings.ollama_timeout_ms,
+                        ollama_keep_alive=self.settings.ollama_keep_alive,
                        smart_play_enabled=self.smart_play.isChecked(),
                        smart_play_learning_minutes=self.smart_learning.value(),
                        smart_play_min_confidence=self.smart_min_conf.value() / 100,
@@ -1064,6 +1072,13 @@ class MainWindow(QMainWindow):
         selection = report.get("selection")
         if selection:
             parts.append(selection)
+        if report.get("frozen"):
+            parts.append(f"منبع: {report.get('source', '—')} | هدف: {report.get('target_round_id', '—')} | قفل‌شده")
+            times = [f"{name}: {report[key]:.0f}ms" for name, key in
+                     (("Router", "router_latency_ms"), ("Ollama", "ollama_latency_ms"),
+                      ("Local", "local_engine_latency_ms")) if report.get(key) is not None]
+            if times:
+                parts.append("، ".join(times))
         bets = report.get("bets") or ()
         if report.get("ok") and bets:
             parts.append("انتخاب برای دست بعد: " + " + ".join(names.get(bet, bet) for bet in bets))
@@ -1113,6 +1128,9 @@ class MainWindow(QMainWindow):
 
     def test_smart_connection(self):
         """اتصال، پورت و کلید را قبل از شروع پایش آزمایش کن."""
+        if getattr(self, "smart_probe", None) is not None and self.smart_probe.isRunning():
+            self.smart_probe_status.setText("آزمایش اتصال قبلی هنوز در حال اجراست…")
+            return
         try:
             chat_completions_url(self.smart_url.text())
         except Exception as exc:
@@ -1401,6 +1419,7 @@ class MainWindow(QMainWindow):
         self.smart_click.setChecked(self.settings.smart_click_enabled)
         self.smart_enabled.blockSignals(True)
         self.smart_enabled.setChecked(self.settings.smart_review_enabled)
+        self.ollama_enabled.setChecked(self.settings.ollama_enabled)
         self.smart_enabled.blockSignals(False)
         self._refresh_smart_label()
         self.smart_url.setText(self.settings.smart_review_url)
@@ -1699,4 +1718,8 @@ class MainWindow(QMainWindow):
             if self.calibration.isRunning():
                 event.ignore()
                 return
+        if getattr(self, "smart_probe", None) is not None and self.smart_probe.isRunning():
+            self.smart_probe_status.setText("برای بستن برنامه، منتظر پایان آزمایش اتصال بمانید…")
+            event.ignore()
+            return
         event.accept()
