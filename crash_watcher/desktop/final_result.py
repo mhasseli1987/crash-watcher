@@ -15,10 +15,40 @@ from crash_watcher.vision.recognition import parse_multiplier
 # Keep the prefix and exactly two decimal places mandatory so live multipliers,
 # payout labels and countdown text still cannot be accepted as final results.
 _BANG = re.compile(r"^Bang\s*@\s*(\d{1,4}\.\d{2})\s*[xX×]?$", re.IGNORECASE | re.ASCII)
-_HISTORY_ID = re.compile(r"\b(\d{6,12})\b")
-_HISTORY_VALUE = re.compile(r"(?<![\d.])\d{1,4}\.\d{2}[xX×](?!\w)")
-_HISTORY_VALUE_DROPPED_DOT = re.compile(r"(?<!\d)(\d{1,4})\s+(\d{2})[xX×](?!\w)")
-_HISTORY_VALUE_COMPACT = re.compile(r"(?<!\d)(\d{1,4})(\d{2})[xX×](?!\w)")
+# یک پاس OCR روی نوار تاریچه همهٔ نشان‌ها را پشت سر هم می‌دهد؛ توکن‌ها به ترتیب
+# خوانده می‌شوند تا هر شناسه با ضریب بعدی خودش جفت شود. هر شکل خرابی OCR که
+# قبلاً جدا جدا وصله می‌شد (نقطهٔ اعشار به‌جای فاصله یا حذف‌شده) اینجا پوشش دارد.
+_HISTORY_TOKEN = re.compile(r"\d{6,12}(?!\d)"
+                            r"|\d{1,4}\.\d{2}\s*[xX×]?"
+                            r"|\d{1,4}\s+\d{2}\s*[xX×]"
+                            r"|\d{1,4}\d{2}[xX×]")
+
+
+def _history_pairs(text: str) -> list[tuple[str, Decimal]]:
+    """جفت‌های (شناسه، ضریب) به همان ترتیبی که روی نوار دیده می‌شوند."""
+    pairs: list[tuple[str, Decimal]] = []
+    pending: str | None = None
+    for match in _HISTORY_TOKEN.finditer(text):
+        token = match.group(0)
+        digits = re.sub(r"\D", "", token)
+        if "." not in token and len(digits) >= 6:
+            pending = token
+            continue
+        if pending is None:
+            continue
+        if "." in token:
+            raw = token
+        elif " " in token.strip():
+            whole, fraction = token.split()
+            raw = f"{whole}.{fraction}"
+        else:
+            raw = f"{digits[:-2]}.{digits[-2:]}x"
+        value = parse_multiplier(raw)
+        if value is None:
+            continue
+        pairs.append((pending, value))
+        pending = None
+    return pairs
 
 def parse_bang(text: str) -> Decimal | None:
     match = _BANG.fullmatch(text.strip()) if isinstance(text, str) else None
@@ -27,27 +57,10 @@ def parse_bang(text: str) -> Decimal | None:
     value = Decimal(match[1])
     return value if value > 0 else None
 
-def parse_history_id(text: str) -> str | None:
-    ids = _HISTORY_ID.findall(text)
-    return ids[0] if len(ids) == 1 else None
-
 def parse_history_entry(text: str) -> tuple[str, Decimal] | None:
-    round_id = parse_history_id(text)
-    values = _HISTORY_VALUE.findall(text)
-    # At the site's small history-badge size RapidOCR can see the decimal dot
-    # as whitespace (for example ``1 89x``). Only repair this exact shape: the
-    # round id and trailing x remain mandatory and exactly two fractional
-    # digits are required.
-    if not values:
-        dropped_dot = _HISTORY_VALUE_DROPPED_DOT.findall(text)
-        values = [f"{whole}.{fraction}x" for whole, fraction in dropped_dot]
-    if not values:
-        compact = _HISTORY_VALUE_COMPACT.findall(text)
-        values = [f"{whole}.{fraction}x" for whole, fraction in compact]
-    if not round_id or len(values) != 1:
-        return None
-    value = parse_multiplier(values[0])
-    return (round_id, value) if value is not None else None
+    """تازه‌ترین نشان نوار تاریچه؛ نشان با ضریب ناقص نادیده گرفته می‌شود."""
+    pairs = _history_pairs(text)
+    return max(pairs, key=lambda item: int(item[0])) if pairs else None
 
 @dataclass(frozen=True)
 class FinalReading:
@@ -63,10 +76,35 @@ class BangRecognizer:
         self.min_confidence = min_confidence
 
     def recognize(self, image: np.ndarray) -> FinalReading:
-        readings = [self.reader(variant) for variant in preprocess(image)]
+        readings = []
+        for index, variant in enumerate(preprocess(image)):
+            try:
+                text, confidence = self.reader(variant)
+            except Exception:
+                text, confidence = "", 0.0
+            readings.append((text, confidence))
+            if index:
+                continue
+            # The enhanced (CLAHE) variant is the reliable one. A strict, high
+            # confidence ``Bang @`` reading there ends the pass at once: the
+            # final screen lasts only a moment, and two extra OCR runs per
+            # frame are what used to make detection miss round after round.
+            value = parse_bang(text)
+            if value is not None and np.isfinite(confidence) and confidence >= self.min_confidence:
+                return FinalReading(value, confidence, text, category_for(value).value, False)
         accepted = [(parse_bang(text), text, confidence) for text, confidence in readings
                     if np.isfinite(confidence) and confidence >= self.min_confidence]
         valid = [(value, text, confidence) for value, text, confidence in accepted if value is not None]
+        # A viewport with chart axes/blank padding is not one text line. If the
+        # fast reader sees non-multiplier text, locate the actual text line
+        # and read it; never repair a guessed number or weaken parse_bang.
+        detect = getattr(self.reader, "detect_lines", None)
+        if not valid and detect is not None and any(
+                re.search(r"[a-wy-z@]", text, re.I) for text, _ in readings):
+            lines = detect(image)
+            valid = [(parse_bang(text), text, confidence) for text, confidence in lines
+                     if parse_bang(text) is not None and np.isfinite(confidence)
+                     and confidence >= max(0.8, self.min_confidence)]
         if not valid or len({value for value, _, _ in valid}) != 1:
             text, confidence = max(readings, key=lambda item: item[1], default=("", 0.0))
             return FinalReading(None, confidence, text, None, True)

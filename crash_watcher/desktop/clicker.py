@@ -24,6 +24,9 @@ CASHOUT_MAX_TARGET = Decimal("1.90")
 # ضریب زندهٔ واقعی بین دو نمونهٔ پشت‌سرهم حداکثر دو برابر می‌شود؛ جهش بزرگ‌تر
 # عدد ثابتِ پایان دست (Bang) است که دیر خوانده شده.
 CASHOUT_MAX_STEP = Decimal("2.00")
+# برای پذیرش خروج بدون پیام سایت، ضریب پایان دست باید دست‌کم این‌قدر بالای ضریب
+# لحظهٔ کلیک باشد؛ عدد برابر با هدف می‌تواند کرش همان لحظه باشد.
+CASHOUT_CONFIRM_MARGIN = Decimal("1.02")
 _UP = 0x0004
 try:
     _user32 = ctypes.windll.user32
@@ -146,6 +149,7 @@ class AutoClicker:
         self._cashout_prev: Decimal | None = None
         self._cashout_confirmed = False
         self._cashout_attempted = False
+        self._cashout_attempt_multiplier: Decimal | None = None
         self._cashout_planned_target: Decimal | None = None
         self._window = {"rounds": 0, "clicks": 0, "skipped": 0,
                         "gated_correct": 0, "gated_total": 0}
@@ -475,8 +479,9 @@ class AutoClicker:
         color = self._color(value) if turnbal else None
         if self._pending_rule is not None:
             target_colors, rule, stake, payouts = self._pending_rule
+            settled = self._cashout_settled(value)
             if (self.settings.cashout_enabled and not self.settings.simulated
-                    and not self._cashout_confirmed and
+                    and not settled and
                     (self._cashout_attempted or self._cashout_planned_target is None
                      or value >= self._cashout_planned_target)):
                 return ClickReport(False, "cashout unconfirmed: check site and restart monitoring",
@@ -487,8 +492,10 @@ class AutoClicker:
                 self._rule_stats.setdefault(rule, [0, 0])[0] += 1
             outcome = None
             if target_colors:
-                # برد رنگ اصلی، پوشش رنگ دوم (سربه‌سر) یا باخت.
-                outcome = (True if self._cashout_confirmed else False
+                # برد رنگ اصلی، پوشش رنگ دوم (سربه‌سر) یا باخت. خروج فقط وقتی
+                # برد است که «settled» باشد: پیام سایت یا بسته‌شدن روشن بالای
+                # ضریب کلیک؛ در حالت نامعلوم شرط بعدی بسته نمی‌شود.
+                outcome = (True if settled else False
                            if self.settings.cashout_enabled and not self.settings.simulated
                            else True if turnbal and color == target_colors[0]
                            else None if not turnbal or color in target_colors[1:] else False)
@@ -697,6 +704,15 @@ class AutoClicker:
         return bool(self.settings.cashout_enabled and self._cashout_points
                     and self._cashout_target is not None)
 
+    def _cashout_settled(self, value: Decimal) -> bool:
+        """آیا خروج انجام شده است؟ فقط با تأیید سایت یا بسته‌شدن روشن بالای ضریب
+        کلیک؛ در حالت نامعلوم دست بعد بسته نمی‌شود تا شرطی بیهوده باز نماند."""
+        if self._cashout_confirmed:
+            return True
+        attempt = self._cashout_attempt_multiplier
+        return bool(self._cashout_attempted and attempt is not None
+                    and value >= attempt * CASHOUT_CONFIRM_MARGIN)
+
     def confirm_cashout(self, multiplier: Decimal) -> None:
         """Only an observed site win message can confirm an attempted cashout."""
         if self._pending_rule is not None and self._cashout_attempted and not self._cashout_confirmed:
@@ -748,8 +764,7 @@ class AutoClicker:
             ok = self.sender(point[0], point[1],
                              restore=self.settings.autoclick_restore_cursor) and ok
         self._cashout_attempted = bool(ok and not simulated)
-        if self._cashout_attempted:
-            self._cashout_attempt_multiplier = value
+        self._cashout_attempt_multiplier = value if self._cashout_attempted else None
         reason = (f"smart cashout target {target} on the bet button" if not simulated else
                   f"{self._simulated_label}: would cash out at {target}")
         self._log_cashout(value, ok and not simulated, reason, points)

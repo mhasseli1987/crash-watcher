@@ -73,6 +73,12 @@ class RapidOCRReader:
             return "", 0.0
         return str(result.txts[0]), float(result.scores[0])
 
+    def detect_lines(self, image: np.ndarray) -> list[tuple[str, float]]:
+        """Locate text before recognition when a viewport was read as one line."""
+        result = self._engine(image, use_det=True, use_cls=False)
+        return [(str(text), float(score)) for text, score in
+                zip(result.txts or (), result.scores or ())]
+
 class MultiplierRecognizer:
     def __init__(self, reader: Callable[[np.ndarray], tuple[str, float]] = tesseract_reader,
                  min_confidence: float = 0.80, red: Decimal = Decimal("2"), yellow: Decimal = Decimal("10")) -> None:

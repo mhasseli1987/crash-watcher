@@ -1,6 +1,7 @@
 """Qt worker: screenshots and OCR stay off the GUI thread."""
 from collections import deque
 from copy import deepcopy
+from dataclasses import replace
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
@@ -16,7 +17,7 @@ from crash_watcher.vision.capture import ScreenCapture, ScreenUnavailable
 from crash_watcher.vision.recognition import (RapidOCRReader, parse_multiplier, preprocess,
                                               tesseract_reader)
 from .config import DesktopSettings, PROJECT_ROOT
-from .clicker import AutoClicker
+from .clicker import AutoClicker, ClickReport
 from .color_grid import read_grid
 from .final_result import BangDetector, BangRecognizer, parse_history_entry
 from .model_compare import (ModelAttempt, ModelLeaderboard, compare as compare_models,
@@ -28,6 +29,14 @@ from .smart_review import SmartVerdict
 from .smart_review import SmartSnapshot, append_log, ask, build_prompt, grid_columns, parse_verdict, review
 from .turnbal import TurnbalCalibration, TurnbalGuard, build_prompt as build_turnbal_prompt
 from .turnbal import review as review_turnbal
+
+
+# تصمیم دست بعد باید پیش از بازشدن پنجرهٔ شرط آماده باشد؛ انتظار ۱۰ تا ۷۰ ثانیه‌ای
+# مدل، پاسخ را برای همان دست کهنه می‌کرد. سقف بودجهٔ تصمیم این عدد است.
+DECISION_TIMEOUT_S = 3.5
+# پنجرهٔ شرط دست بعد بعد از بسته‌شدن ضریب چند ثانیه باز است؛ کلیکی که دیرتر
+# برسد شرطی برای دست گذشته می‌بندد و فقط پول می‌سوزاند.
+CLICK_WINDOW_MS = 4000.0
 
 
 def live_multiplier(reader, image, minimum: float = 0.55):
@@ -78,7 +87,6 @@ def classic_prompt(snapshot: SmartSnapshot) -> str:
               "optional cashout from 1.40 to 1.90.")
 
 
-
 def resolve_win_ocr(future, clicker, round_id, after_attempt, timeout=0):
     """Consume a completed OCR result only for the bet it was captured for."""
     try:
@@ -110,7 +118,9 @@ class MonitorWorker(QThread):
         self._stop = Event()
         self._pause = Event()
         self._resync_on_resume = Event()
-        self.detector = BangDetector(history_timeout_frames=3)
+        # دو فریم پایدار کافی است و انتظار تاریخچه یک فریم است: صفحهٔ پایان دست
+        # چند ثانیه بیشتر نمی‌ماند و هر فریم اضافه یعنی یک دورِ از دست رفته.
+        self.detector = BangDetector(stable_frames=2, history_timeout_frames=1)
         self._clicker: AutoClicker | None = None
         self._recent: deque[str] = deque(maxlen=30)
         self._smart_seen = 0
@@ -155,6 +165,7 @@ class MonitorWorker(QThread):
     def run(self) -> None:
         clicker = self._clicker = AutoClicker(self.settings)
         win_executor = None
+        history_pool = None
         self._guard = (TurnbalGuard(TurnbalCalibration.from_settings(self.settings))
                        if self.settings.bot_mode == "turnbal" else None)
         # دورهٔ یادگیری از همین لحظهٔ شروع پایش شمرده می‌شود.
@@ -170,13 +181,23 @@ class MonitorWorker(QThread):
                 reader = tesseract_reader
             else:
                 reader = RapidOCRReader()
+            if self._stop.is_set():
+                return
             recognizer = BangRecognizer(reader, self.settings.ocr_confidence)
             from rapidocr import RapidOCR
             screen_engine = RapidOCR()
+            if self._stop.is_set():
+                return
             warmup = np.zeros((64, 240, 3), dtype=np.uint8)
             cv2.putText(warmup, "You Won", (4, 43),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.9, (255, 255, 255), 2)
             screen_engine(warmup)
+            if self._stop.is_set():
+                return
+            if hasattr(reader, "detect_lines"):
+                reader.detect_lines(warmup)
+            if self._stop.is_set():
+                return
             win_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="cashout-ocr")
             history_engine = None
             if self.settings.history_region:
@@ -190,6 +211,10 @@ class MonitorWorker(QThread):
                 cv2.putText(warmup, "1234567 1.23x", (4, 43),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.9, (255, 255, 255), 2)
                 history_engine(warmup)
+                # OCR نوار تاریخچه با مدل تشخیص حدود سه ثانیه طول می‌کشد؛ اگر در
+                # حلقه اجرا شود، دقیقاً وقتی «Bang» ظاهر می‌شود حلقه را قفل می‌کند
+                # و دور از دست می‌رود. پس در رشتهٔ جدا اجرا می‌شود.
+                history_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="history-ocr")
             with ScreenCapture(self.settings.result_region.capture(self.settings.interval_ms)) as capture:
                 history_capture = (ScreenCapture(self.settings.history_region.capture(self.settings.interval_ms))
                                    if self.settings.history_region else None)
@@ -203,6 +228,7 @@ class MonitorWorker(QThread):
                     history_previous = None
                     history_id = None
                     history_value = None
+                    history_future = None
                     cashout_wait_for_live = False
                     win_future = None
                     win_round = None
@@ -261,13 +287,25 @@ class MonitorWorker(QThread):
                             if history_capture:
                                 strip, _ = history_capture.capture()
                                 hthumb = cv2.resize(cv2.cvtColor(strip.image, cv2.COLOR_BGR2GRAY), (64, 32))
-                                if history_previous is None or float(np.mean(cv2.absdiff(hthumb, history_previous))) >= 1:
-                                    parsed = history_engine(strip.image)
-                                    history_text = " ".join(parsed.txts or ())
-                                    entry = parse_history_entry(history_text)
-                                    history_id, history_value = entry if entry else (None, None)
-                                    self.history_observation.emit(history_id, history_value, history_text)
+                                unchanged = (history_previous is not None and float(
+                                    np.mean(cv2.absdiff(hthumb, history_previous))) < 1)
+                                if history_future is None and not unchanged:
                                     history_previous = hthumb
+                                    history_future = history_pool.submit(history_engine,
+                                                                         strip.image.copy())
+                                if history_future is not None and history_future.done():
+                                    finished, history_future = history_future, None
+                                    try:
+                                        parsed = finished.result()
+                                    except Exception as exc:
+                                        parsed = None
+                                        self.problem.emit("History OCR failed: " + str(exc))
+                                    if parsed is not None:
+                                        history_text = " ".join(parsed.txts or ())
+                                        entry = parse_history_entry(history_text)
+                                        if entry is not None:
+                                            history_id, history_value = entry
+                                        self.history_observation.emit(history_id, history_value, history_text)
                             completed = self.detector.observe(frame.image, reading, frame.captured_at,
                                                               history_id, history_value,
                                                               require_history=history_capture is not None)
@@ -371,13 +409,23 @@ class MonitorWorker(QThread):
                                 if win_future is not None and clicker._cashout_attempted:
                                     try:
                                         if resolve_win_ocr(win_future, clicker, win_round,
-                                                           win_after_attempt, timeout=2.0):
+                                                           win_after_attempt, timeout=0.25):
                                             win_future = None
                                     except Exception as exc:
                                         win_future = None
                                         self.problem.emit("Cashout confirmation OCR failed: " + str(exc))
-                                report = clicker.fire(completed.round_id,
-                                                      completed.multiplier)
+                                age_ms = (datetime.now(timezone.utc)
+                                          - completed.timestamp).total_seconds() * 1000
+                                if age_ms > CLICK_WINDOW_MS:
+                                    # تشخیص دیر رسیده است: کلیک روی دکمهٔ شرط شرطی برای
+                                    # دستی می‌بندد که در حال اجراست؛ به‌جای آن این دور
+                                    # رد می‌شود تا آمار خراب نشود.
+                                    report = ClickReport(False,
+                                                         f"late detection {age_ms:.0f} ms; no click",
+                                                         count=clicker.clicks)
+                                else:
+                                    report = clicker.fire(completed.round_id,
+                                                          completed.multiplier)
                                 if report.clicked and clicker.wants_cashout():
                                     cashout_wait_for_live = True
                                 if (ready is not None and self._guard is not None
@@ -424,6 +472,8 @@ class MonitorWorker(QThread):
         finally:
             if win_executor is not None:
                 win_executor.shutdown(wait=False, cancel_futures=True)
+            if history_pool is not None:
+                history_pool.shutdown(wait=False, cancel_futures=True)
             clicker.close()
             self._clicker = None
             if self._chart_backend is not None:
@@ -459,6 +509,8 @@ class MonitorWorker(QThread):
 
     def _start_hybrid(self, clicker: AutoClicker) -> None:
         """Prepare a provisional next-round decision from confirmed history."""
+        if not self._recent:
+            return
         self._prediction_sequence += 1
         target = f"session-next-{self._prediction_sequence}"
         version = self._prediction.begin(target, 120.0)
@@ -510,7 +562,8 @@ class MonitorWorker(QThread):
                 verdict, _, _ = self._ask(settings.smart_review_model, snapshot, settings,
                                           turnbal, calibration,
                                           min(settings.smart_review_timeout_s,
-                                              settings.smart_latency_budget_ms / 1000))
+                                              settings.smart_latency_budget_ms / 1000,
+                                              DECISION_TIMEOUT_S))
                 allowed = ("RED", "GREEN", "YELLOW", "SKIP") if turnbal else ("PLAY", "SKIP")
                 if verdict is not None and verdict.bet in allowed and self._prediction.submit(target, version, "ROUTER", verdict):
                     self._provider_ready(target, "ROUTER", verdict)
@@ -535,7 +588,10 @@ class MonitorWorker(QThread):
                                                settings.smart_review_rules,
                                                allow_two=settings.smart_play_two_colors)
                           if turnbal else classic_prompt(snapshot))
-                verdict = predict_ollama(settings, prompt)
+                local_settings = (settings if settings.ai_provider == "local" else
+                                  replace(settings, ollama_timeout_ms=min(settings.ollama_timeout_ms,
+                                                                          int(DECISION_TIMEOUT_S * 1000))))
+                verdict = predict_ollama(local_settings, prompt)
                 allowed = ("RED", "GREEN", "YELLOW", "SKIP") if turnbal else ("PLAY", "SKIP")
                 if verdict.bet in allowed and self._prediction.submit(target, version, "OLLAMA", verdict):
                     self._provider_ready(target, "OLLAMA", verdict)
@@ -554,7 +610,6 @@ class MonitorWorker(QThread):
                    {"target_round_id": target, "source": source, "status": "PREPARED",
                     "bet": verdict.bet, "confidence": verdict.confidence, "reason": verdict.reason})
 
-
     def _provider_failed(self, target, source, error):
         message = source + ": " + str(error)
         self.problem.emit(message)
@@ -562,7 +617,6 @@ class MonitorWorker(QThread):
                                 "status": "ERROR", "target_round_id": target})
         append_log(PROJECT_ROOT / "logs" / "provider-results.jsonl",
                    {"target_round_id": target, "source": source, "status": "ERROR", "error": str(error)})
-
 
     def _ask(self, model, snapshot, settings, turnbal, calibration, timeout):
         """یک درخواست مدل؛ همین تابع در مقایسهٔ موازی هم استفاده می‌شود."""

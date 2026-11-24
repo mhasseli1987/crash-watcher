@@ -38,7 +38,13 @@ def test_history_entry_is_unambiguous():
     assert parse_history_entry("9342414 5.52x") == ("9342414", Decimal("5.52"))
     assert parse_history_entry("9356780 1 89x") == ("9356780", Decimal("1.89"))
     assert parse_history_entry("9356780 189x") == ("9356780", Decimal("1.89"))
-    assert parse_history_entry("9342414 5.52x 9342413 2.02x") is None
+    # نوار تاریخچه چند نشان را در یک خط می‌دهد؛ تازه‌ترین (بزرگ‌ترین شناسه) برگردانده می‌شود.
+    assert parse_history_entry("9342413 2.02x 9342414 5.52x") == ("9342414", Decimal("5.52"))
+    assert parse_history_entry("9342410 5.31x 9342411 1.23x 9342414 5.52x") == ("9342414",
+                                                                                Decimal("5.52"))
+    assert parse_history_entry("9342414 5.52x 9342413") == ("9342414", Decimal("5.52"))
+    # نشان آخر که ضریبش ناقص خوانده شده، جفت ناقص نمی‌سازد.
+    assert parse_history_entry("9342413 2.02x 9342414") == ("9342413", Decimal("2.02"))
 
 def test_real_ocr_bang_and_countdown():
     import cv2
@@ -48,6 +54,31 @@ def test_real_ocr_bang_and_countdown():
         image = np.zeros((120, 500, 3), np.uint8)
         cv2.putText(image, text, (10, 85), cv2.FONT_HERSHEY_SIMPLEX, 1.5, (255, 255, 255), 3)
         assert recognizer.recognize(image).value == value
+
+
+def test_misread_bang_uses_detected_line_without_guessing_digits():
+    class ViewportReader:
+        def __call__(self, image):
+            return "Bearg 66。", 0.55
+
+        def detect_lines(self, image):
+            return [("Bang @6.60x", 0.99), ("House Edge 1%", 0.95)]
+
+    recognizer = BangRecognizer(ViewportReader())
+    assert recognizer.recognize(np.zeros((194, 410, 3), np.uint8)).value == Decimal("6.60")
+    recognizer.reader.detect_lines = lambda image: [("Bearg 66。", 0.99)]
+    assert recognizer.recognize(np.zeros((194, 410, 3), np.uint8)).value is None
+    recognizer.reader.detect_lines = lambda image: [("Bang @6.60x", 0.7)]
+    assert recognizer.recognize(np.zeros((194, 410, 3), np.uint8)).value is None
+
+
+def test_real_ocr_reads_a_padded_chart_viewport():
+    import cv2
+    image = np.full((194, 410, 3), 24, np.uint8)
+    cv2.line(image, (20, 170), (390, 170), (55, 55, 55), 1)
+    cv2.putText(image, "Bang @6.60x", (70, 82), cv2.FONT_HERSHEY_SIMPLEX,
+                0.85, (230, 230, 230), 2)
+    assert BangRecognizer(RapidOCRReader()).recognize(image).value == Decimal("6.60")
 
 def test_supplied_screenshots_do_not_create_false_final_results():
     import cv2
@@ -345,9 +376,17 @@ def test_unconfirmed_cashout_blocks_next_bet(no_detection, tmp_path):
     clicker.tick(Decimal("1.40"))
     clicker.tick(Decimal("1.50"))
     count = len(sender.calls)
-    result = clicker.fire("r2", Decimal("3.00"))
+    # دست زیر ضریب کلیک خروج بسته شد: خروج قطعی نیست، پس شرط تازه بسته نمی‌شود.
+    result = clicker.fire("r2", Decimal("1.20"))
     assert not result.clicked and "unconfirmed" in result.reason
     assert len(sender.calls) == count
+    # برابر با ضریب کلیک («1.50») هنوز نامعلوم است: می‌تواند کرش همان لحظه باشد.
+    equal = clicker.fire("r2a", Decimal("1.50"))
+    assert not equal.clicked and "unconfirmed" in equal.reason
+    # دست بعدی روشن بالای همان ضریب بسته شد: خروج انجام شده، مبلغ به پایه برمی‌گردد
+    # و شرط تازه بسته می‌شود (انتظار برای پیام سایت هر دست یک شرط را می‌سوزاند).
+    settled = clicker.fire("r2b", Decimal("3.00"))
+    assert settled.clicked and clicker.double_level == 0
 
 
 def test_inflight_win_ocr_is_settled_before_next_bet(no_detection, tmp_path):

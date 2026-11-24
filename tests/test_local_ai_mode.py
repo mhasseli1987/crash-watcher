@@ -42,6 +42,16 @@ def test_local_failure_is_visible_before_round_freeze(tmp_path, monkeypatch):
     assert reports[-1]["status"] == "ERROR" and "slow model" in reports[-1]["error"]
 
 
+def test_no_prediction_is_requested_without_confirmed_history(tmp_path, monkeypatch):
+    monkeypatch.setattr(module, "PROJECT_ROOT", tmp_path)
+    settings = DesktopSettings(ai_provider="local", result_region=Region(1, 0, 0, 300, 100))
+    worker = module.MonitorWorker(settings, StrategyEngine(settings.strategy()))
+    launch = Mock(side_effect=AssertionError("request without confirmed data"))
+    monkeypatch.setattr(module, "Thread", launch)
+    worker._start_hybrid(Mock())
+    assert not launch.called and worker._prediction_target is None
+
+
 def test_local_provider_selection_persists(tmp_path):
     settings = DesktopSettings(ai_provider="local", ollama_model="qwen3:1.7b")
     path = tmp_path / "settings.json"
