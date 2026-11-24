@@ -26,14 +26,19 @@ def _get_json(url: str, timeout: float) -> dict:
 
 def model_available(settings: DesktopSettings) -> bool:
     """Return whether the configured model is installed; never download it."""
+    return settings.ollama_model in installed_models(settings)
+
+
+def installed_models(settings: DesktopSettings) -> list[str]:
+    """Discover installed models from the local service only."""
     settings.validate()
     url = settings.ollama_base_url.rstrip("/") + "/api/tags"
     data = _get_json(url, min(settings.ollama_timeout_ms / 1000, 3.0))
     models = data.get("models")
     if not isinstance(models, list):
         raise OllamaError("Ollama model list is invalid")
-    return any(isinstance(item, dict) and item.get("name") == settings.ollama_model
-               for item in models)
+    return [item["name"] for item in models
+            if isinstance(item, dict) and isinstance(item.get("name"), str)]
 
 
 def _parse_verdict(content: str, allowed_bets=("RED", "GREEN", "YELLOW", "SKIP")) -> SmartVerdict:
@@ -65,7 +70,7 @@ def _parse_verdict(content: str, allowed_bets=("RED", "GREEN", "YELLOW", "SKIP")
 def predict(settings: DesktopSettings, prompt: str) -> SmartVerdict:
     """Request one compact JSON verdict from an installed local model."""
     settings.validate()
-    if not settings.ollama_enabled:
+    if not settings.ollama_enabled and settings.ai_provider != "local":
         raise OllamaError("Ollama is disabled")
     if not model_available(settings):
         raise OllamaError(f"Ollama model {settings.ollama_model} is not installed")

@@ -3,6 +3,7 @@ from collections import deque
 from copy import deepcopy
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
 from datetime import datetime, timezone
+from decimal import Decimal, InvalidOperation
 import re
 from threading import Event, Lock, Thread
 from time import perf_counter
@@ -52,6 +53,30 @@ def detected_lines(engine, image):
 def has_win_message(lines):
     return any(score >= 0.8 and re.search(r"\byou\s+won\b", text, re.I)
                for text, score in lines)
+
+
+def classic_prompt(snapshot: SmartSnapshot) -> str:
+    """Use the confirmed multiplier history for a single play/skip decision."""
+    history = []
+    for raw in snapshot.recent[-30:]:
+        try:
+            value = Decimal(str(raw))
+            if not value.is_finite() or value <= 0:
+                continue
+        except (InvalidOperation, ValueError, TypeError):
+            continue
+        color = "RED" if value < 2 else "GREEN" if value < 10 else "YELLOW"
+        history.append(f"{value}={color}")
+    return ("Evaluate whether to enter the NEXT classic crash round. "
+            "Recent confirmed multipliers with historical color labels, oldest first: "
+            + (", ".join(history) or "none")
+            + ". Below 2 is a low round, 2 up to 10 is a mid round and 10 or more is a "
+              "high round; the order of these values is context only and does not "
+              "guarantee future outcomes. The classic game has a single bet button: do "
+              "not pick a label. Choose SKIP if evidence is insufficient. Return JSON "
+              "with bet PLAY or SKIP, confidence between 0 and 1, a short reason, and "
+              "optional cashout from 1.40 to 1.90.")
+
 
 
 def resolve_win_ocr(future, clicker, round_id, after_attempt, timeout=0):
@@ -450,6 +475,9 @@ class MonitorWorker(QThread):
     def _hybrid_ai(self, target: str, version: int, snapshot: SmartSnapshot,
                    settings: DesktopSettings) -> None:
         """Run local inference without waiting for the remote network timeout."""
+        if settings.ai_provider == "local":
+            self._hybrid_ollama(target, version, snapshot, settings)
+            return
         if settings.ollama_enabled:
             Thread(target=self._hybrid_ollama, args=(target, version, snapshot, settings),
                    daemon=True).start()
@@ -488,13 +516,7 @@ class MonitorWorker(QThread):
                                                settings.autoclick_threshold,
                                                settings.smart_review_rules,
                                                allow_two=settings.smart_play_two_colors)
-                          if turnbal else (
-                              "Evaluate whether to enter the NEXT crash round. "
-                              "Choose PLAY or SKIP. Recent confirmed multipliers, oldest first: "
-                              + ",".join(snapshot.recent[-40:])
-                              + ". Choose SKIP if evidence is insufficient. "
-                              "History does not guarantee future outcomes. Confidence must be calibrated. "
-                              "Use a short English reason."))
+                          if turnbal else classic_prompt(snapshot))
                 verdict = predict_ollama(settings, prompt)
                 allowed = ("RED", "GREEN", "YELLOW", "SKIP") if turnbal else ("PLAY", "SKIP")
                 if verdict.bet in allowed:
@@ -506,16 +528,20 @@ class MonitorWorker(QThread):
 
     def _ask(self, model, snapshot, settings, turnbal, calibration, timeout):
         """یک درخواست مدل؛ همین تابع در مقایسهٔ موازی هم استفاده می‌شود."""
+        if settings.ai_provider == "local":
+            prompt = (build_turnbal_prompt(snapshot, calibration, settings.autoclick_threshold,
+                                           settings.smart_review_rules,
+                                           allow_two=settings.smart_play_two_colors)
+                      if turnbal else classic_prompt(snapshot))
+            verdict = predict_ollama(settings, prompt)
+            return verdict, verdict.reason, prompt
         key = settings.resolved_key()
         if turnbal:
             return review_turnbal(settings.smart_review_url, key, model, snapshot,
                                   calibration, timeout, settings.autoclick_threshold,
                                   settings.smart_review_rules,
                                   allow_two=settings.smart_play_two_colors)
-        prompt = ("Analyze the next crash round using only this history, oldest first: "
-                  + ", ".join(snapshot.recent[-30:])
-                  + ". Choose PLAY or SKIP; use SKIP when evidence is insufficient. "
-                    "Return JSON with bet (PLAY or SKIP), confidence, reason, and optional cashout (1.40 to 1.90).")
+        prompt = classic_prompt(snapshot)
         raw = ask(settings.smart_review_url, key, model, prompt, timeout)
         verdict = parse_verdict(raw)
         return (verdict if verdict and verdict.bet in ("PLAY", "SKIP") else None), raw, prompt
@@ -544,7 +570,9 @@ class MonitorWorker(QThread):
         log_path = PROJECT_ROOT / "logs" / ("turnbal-review.jsonl" if turnbal
                                            else "smart-review.jsonl")
         models = parse_models(settings.smart_compare_models)
-        if len(models) < 2:
+        if settings.ai_provider == "local":
+            models = [settings.ollama_model]
+        if len(models) < 2 and settings.ai_provider != "local":
             models = [settings.smart_review_model or "auto"]
         # بودجه فقط تعیین می‌کند پاسخِ دیر برای دست بعد استفاده شود یا نه؛
         # timeout همان مقدار تنظیمات می‌ماند تا تماس عادی قطع نشود.
@@ -592,7 +620,7 @@ class MonitorWorker(QThread):
                                              settings.smart_review_rules,
                                              allow_two=settings.smart_play_two_colors)
                         if turnbal else
-                        "Classic: PLAY or SKIP based on recent multipliers.")
+                        classic_prompt(snapshot))
             self.smart_report.emit({"ok": False, "round": snapshot.current,
                                     "mode": settings.bot_mode,
                                     "error": str(exc),

@@ -26,6 +26,7 @@ from .preflight import failed as preflight_failed
 from .preflight import run_preflight, summary as preflight_summary
 from .smart_review import DEFAULT_BASE_URL, DEFAULT_MODEL, chat_completions_url, probe_models
 from .worker import MonitorWorker
+from .ollama_provider import installed_models
 
 _FA_DIGITS = str.maketrans("0123456789", "۰۱۲۳۴۵۶۷۸۹")
 
@@ -289,6 +290,21 @@ class SmartProbeWorker(QThread):
     def run(self):
         try:
             self.done.emit(probe_models(self.url, self.key, self.timeout))
+        except Exception as exc:
+            self.failed.emit(str(exc))
+
+
+class LocalModelProbe(QThread):
+    done = Signal(object)
+    failed = Signal(str)
+
+    def __init__(self, settings):
+        super().__init__()
+        self.settings = settings
+
+    def run(self):
+        try:
+            self.done.emit(installed_models(self.settings))
         except Exception as exc:
             self.failed.emit(str(exc))
 
@@ -674,6 +690,31 @@ class MainWindow(QMainWindow):
         self.ollama_enabled = QCheckBox("پشتیبان محلی Ollama")
         self.ollama_enabled.setChecked(self.settings.ollama_enabled)
         layout.addWidget(self.ollama_enabled)
+        local_group = QGroupBox("هوش مصنوعی محلی — Ollama / Qwen")
+        local_form = QFormLayout(local_group)
+        self.ai_provider = QComboBox()
+        self.ai_provider.addItem("پرووایدر + پشتیبان محلی", "hybrid")
+        self.ai_provider.addItem("فقط محلی — بدون درخواست به پرووایدر", "local")
+        self.ai_provider.setCurrentIndex(self.ai_provider.findData(self.settings.ai_provider))
+        local_form.addRow("منبع تحلیل", self.ai_provider)
+        self.local_url = QLineEdit(self.settings.ollama_base_url)
+        local_form.addRow("آدرس محلی Ollama", self.local_url)
+        self.local_model = QComboBox()
+        self.local_model.setEditable(True)
+        self.local_model.setCurrentText(self.settings.ollama_model)
+        local_form.addRow("مدل نصب‌شده", self.local_model)
+        self.local_timeout = QSpinBox()
+        self.local_timeout.setRange(1, 120)
+        self.local_timeout.setSuffix(" ثانیه")
+        self.local_timeout.setValue(max(1, self.settings.ollama_timeout_ms // 1000))
+        local_form.addRow("مهلت پاسخ محلی", self.local_timeout)
+        discover = QPushButton("شناسایی مدل‌های نصب‌شده")
+        discover.clicked.connect(self.discover_local_models)
+        local_form.addRow(discover)
+        self.local_status = QLabel("کلاسیک: ورود/رد؛ ترنبال: انتخاب رنگ. مدل جدید دانلود نمی‌شود.")
+        self.local_status.setWordWrap(True)
+        local_form.addRow(self.local_status)
+        layout.addWidget(local_group)
         form = QFormLayout()
         self.smart_url = QLineEdit(self.settings.smart_review_url or DEFAULT_BASE_URL)
         self.smart_url.setPlaceholderText(DEFAULT_BASE_URL)
@@ -769,6 +810,8 @@ class MainWindow(QMainWindow):
         note.setStyleSheet("color:#aeb8c5")
         layout.addWidget(note)
         layout.addStretch()
+        self.ai_provider.currentIndexChanged.connect(self._provider_changed)
+        self._refresh_provider_controls()
         self.tabs.addTab(self._scrollable(page), "بررسی هوشمند")
         self.tabs.setTabToolTip(3, "بررسی هوشمند ضریب‌ها — اتصال به FreeLLMAPI")
 
@@ -996,9 +1039,10 @@ class MainWindow(QMainWindow):
                        smart_review_every_rounds=self.smart_every.value(),
                        smart_review_rules=self.smart_rules.text().strip(),
                         ollama_enabled=self.ollama_enabled.isChecked(),
-                        ollama_base_url=self.settings.ollama_base_url,
-                        ollama_model=self.settings.ollama_model,
-                        ollama_timeout_ms=self.settings.ollama_timeout_ms,
+                        ai_provider=self.ai_provider.currentData(),
+                        ollama_base_url=self.local_url.text().strip(),
+                        ollama_model=self.local_model.currentText().strip(),
+                        ollama_timeout_ms=self.local_timeout.value() * 1000,
                         ollama_keep_alive=self.settings.ollama_keep_alive,
                        smart_play_enabled=self.smart_play.isChecked(),
                        smart_play_learning_minutes=self.smart_learning.value(),
@@ -1128,6 +1172,9 @@ class MainWindow(QMainWindow):
 
     def test_smart_connection(self):
         """اتصال، پورت و کلید را قبل از شروع پایش آزمایش کن."""
+        if self.ai_provider.currentData() == "local":
+            self.discover_local_models()
+            return
         if getattr(self, "smart_probe", None) is not None and self.smart_probe.isRunning():
             self.smart_probe_status.setText("آزمایش اتصال قبلی هنوز در حال اجراست…")
             return
@@ -1143,6 +1190,37 @@ class MainWindow(QMainWindow):
         self.smart_probe.failed.connect(
             lambda message: self.smart_probe_status.setText("خطای اتصال: " + message))
         self.smart_probe.start()
+
+    def _refresh_provider_controls(self):
+        local = self.ai_provider.currentData() == "local"
+        for field in (self.smart_url, self.smart_key, self.smart_model,
+                      self.smart_timeout, self.smart_compare, self.ollama_enabled):
+            field.setEnabled(not local)
+
+    def _provider_changed(self):
+        self._refresh_provider_controls()
+        if self.ai_provider.currentData() == "local":
+            self.discover_local_models()
+
+    def discover_local_models(self):
+        if getattr(self, "local_probe", None) is not None and self.local_probe.isRunning():
+            return
+        settings = replace(self.settings, ollama_base_url=self.local_url.text().strip())
+        self.local_status.setText("در حال شناسایی مدل‌های محلی…")
+        self.local_probe = LocalModelProbe(settings)
+        self.local_probe.done.connect(self._local_models_found)
+        self.local_probe.failed.connect(lambda error: self.local_status.setText("خطای Ollama: " + error))
+        self.local_probe.start()
+
+    def _local_models_found(self, models):
+        current = self.local_model.currentText()
+        self.local_model.clear()
+        self.local_model.addItems(models)
+        selected = current if current in models else next(
+            (name for name in models if "qwen" in name.lower()), models[0] if models else current)
+        self.local_model.setCurrentText(selected)
+        self.local_status.setText(f"{len(models)} مدل محلی پیدا شد؛ انتخاب: {selected}" if models
+                                  else "Ollama پاسخ داد؛ مدلی نصب نشده است.")
 
     def _smart_probe_done(self, models):
         names = "، ".join(str(name) for name in models[:5])
@@ -1420,6 +1498,10 @@ class MainWindow(QMainWindow):
         self.smart_enabled.blockSignals(True)
         self.smart_enabled.setChecked(self.settings.smart_review_enabled)
         self.ollama_enabled.setChecked(self.settings.ollama_enabled)
+        self.ai_provider.setCurrentIndex(self.ai_provider.findData(self.settings.ai_provider))
+        self.local_url.setText(self.settings.ollama_base_url)
+        self.local_model.setCurrentText(self.settings.ollama_model)
+        self.local_timeout.setValue(max(1, self.settings.ollama_timeout_ms // 1000))
         self.smart_enabled.blockSignals(False)
         self._refresh_smart_label()
         self.smart_url.setText(self.settings.smart_review_url)
@@ -1730,6 +1812,10 @@ class MainWindow(QMainWindow):
                 writer.writerows(self.history)
 
     def closeEvent(self, event):
+        if getattr(self, "local_probe", None) is not None and self.local_probe.isRunning():
+            self.local_status.setText("منتظر پایان شناسایی مدل محلی بمانید…")
+            event.ignore()
+            return
         self.stop_monitoring()
         if self.worker and self.worker.isRunning():
             event.ignore()

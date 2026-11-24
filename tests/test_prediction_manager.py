@@ -96,7 +96,7 @@ def test_local_answer_is_ready_while_router_is_still_waiting(tmp_path, monkeypat
     assert not thread.is_alive()
 
 
-def test_classic_router_prompt_and_verdict_exclude_colors(tmp_path, monkeypatch):
+def test_classic_router_uses_color_context_but_rejects_color_actions(tmp_path, monkeypatch):
     from crash_watcher import StrategyEngine
     from crash_watcher.desktop.config import DesktopSettings, Region
     from crash_watcher.desktop import worker as module
@@ -110,4 +110,5 @@ def test_classic_router_prompt_and_verdict_exclude_colors(tmp_path, monkeypatch)
                         prompts.append(args[3]) or '{"bet":"RED","confidence":0.9}')
     verdict, _, _ = worker._ask("test", SmartSnapshot(recent=("1.20",)), settings, False, None, 1)
     assert verdict is None
-    assert all(word not in prompts[0] for word in ("RED", "GREEN", "YELLOW"))
+    assert "1.20=RED" in prompts[0]
+    assert "bet on YELLOW" not in prompts[0]

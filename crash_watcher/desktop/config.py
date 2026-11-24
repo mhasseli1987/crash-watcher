@@ -68,6 +68,7 @@ class DesktopSettings:
     smart_review_every_rounds: int = 1
     smart_review_rules: str = ""
     ollama_enabled: bool = False
+    ai_provider: str = "hybrid"
     ollama_base_url: str = "http://127.0.0.1:11434"
     ollama_model: str = "qwen3:1.7b"
     ollama_timeout_ms: int = 4000
@@ -197,6 +198,8 @@ class DesktopSettings:
             raise ValueError("smart_review_enabled must be a boolean")
         if type(self.ollama_enabled) is not bool:
             raise ValueError("ollama_enabled must be a boolean")
+        if self.ai_provider not in ("hybrid", "local"):
+            raise ValueError("ai_provider must be hybrid or local")
         from urllib.parse import urlsplit
         ollama_url = None
         try:

@@ -34,7 +34,8 @@ def check_settings(settings) -> list[Check]:
               "هیچ نقطه یا ناحیه‌ای برای کلیک تنظیم نشده" if target is None else "تنظیم شده"),
     ]
     if settings.smart_review_enabled:
-        url = str(settings.smart_review_url).strip()
+        url = str(settings.ollama_base_url if settings.ai_provider == "local"
+                  else settings.smart_review_url).strip()
         checks.append(Check("آدرس پرووایدر", bool(url), "آدرس خالی است" if not url else url))
     return checks
 
@@ -107,9 +108,13 @@ def run_preflight(settings, capture=None, reader=None, grid=None, probe=None,
     if settings.smart_review_enabled:
         checker = probe
         if checker is None:
-            from crash_watcher.desktop.smart_review import probe_models
-            checker = lambda: probe_models(settings.smart_review_url,
-                                           settings.resolved_key(), 10.0)  # noqa: E731
+            if settings.ai_provider == "local":
+                from crash_watcher.desktop.ollama_provider import installed_models
+                checker = lambda: installed_models(settings)
+            else:
+                from crash_watcher.desktop.smart_review import probe_models
+                checker = lambda: probe_models(settings.smart_review_url,
+                                               settings.resolved_key(), 10.0)  # noqa: E731
         try:
             models = checker()
             checks.append(Check("اتصال مدل", True,
