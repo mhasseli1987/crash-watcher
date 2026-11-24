@@ -71,7 +71,7 @@ class DesktopSettings:
     ai_provider: str = "hybrid"
     ollama_base_url: str = "http://127.0.0.1:11434"
     ollama_model: str = "qwen3:1.7b"
-    ollama_timeout_ms: int = 4000
+    ollama_timeout_ms: int = 20000
     ollama_keep_alive: str = "30s"
     # «ورود هوشمند به بازی»: اول یادگیری، بعد شرط‌بندی بر پایهٔ تصمیم آمادهٔ مدل.
     smart_play_enabled: bool = False

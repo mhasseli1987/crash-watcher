@@ -84,9 +84,9 @@ def predict(settings: DesktopSettings, prompt: str) -> SmartVerdict:
                    "confidence": {"type": "number", "minimum": 0, "maximum": 1},
                    "reason": {"type": "string"}},
                    "required": ["bet", "confidence", "reason"], "additionalProperties": False},
-               "options": {"temperature": 0.2, "num_predict": 160},
+               "options": {"temperature": 0.2, "num_predict": 80},
                "messages": [{"role": "system", "content":
-                             "Return only the required JSON object. Use a short reason. "
+                             "Return only the required JSON object. Reason at most 8 words. "
                              "If evidence is insufficient choose SKIP. Do not invent certainty."},
                             {"role": "user", "content": prompt}]}
     body = json.dumps(payload, ensure_ascii=False).encode("utf-8")

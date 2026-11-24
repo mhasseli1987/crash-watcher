@@ -207,6 +207,8 @@ class MonitorWorker(QThread):
                     win_future = None
                     win_round = None
                     win_after_attempt = False
+                    last_completed_at = perf_counter()
+                    last_health_at = last_completed_at - 15
                     while not self._stop.is_set():
                         if self._resync_on_resume.is_set():
                             self._resync_on_resume.clear()
@@ -276,7 +278,22 @@ class MonitorWorker(QThread):
                             strategy_result = (self.strategy.process_round(completed.round_id, completed.multiplier)
                                                if completed and self.settings.bot_mode == "turnbal" else None)
                             self.observation.emit(reading, completed, strategy_result)
+                            now = perf_counter()
+                            if now - last_health_at >= 15:
+                                last_health_at = now
+                                append_log(PROJECT_ROOT / "logs" / "monitoring-health.jsonl",
+                                           {"state": self.detector.state.name,
+                                            "ocr_text": reading.raw_text[:160],
+                                            "ocr_confidence": float(reading.confidence),
+                                            "seconds_without_result": round(now - last_completed_at, 1),
+                                            "rounds_seen": self._smart_seen,
+                                            "provider": self.settings.ai_provider})
+                                if now - last_completed_at >= 30:
+                                    self.smart_report.emit({"ok": False, "status": "WAITING_FOR_ROUND",
+                                        "error": "هنوز پایان دور شناسایی نشده است؛ ناحیهٔ ضریب فعلی را بررسی کنید. "
+                                                 "آخرین متن OCR: " + reading.raw_text[:80]})
                             if completed is not None:
+                                last_completed_at = perf_counter()
                                 # اول نتیجهٔ دست تازه ثبت و پیش‌بینی قبلی سنجیده
                                 # می‌شود، بعد تصمیمِ آمادهٔ مدل برای دست بعد به
                                 # کلیکر داده می‌شود تا در پنجرهٔ کوتاه فقط کلیک کند.
@@ -496,9 +513,10 @@ class MonitorWorker(QThread):
                                               settings.smart_latency_budget_ms / 1000))
                 allowed = ("RED", "GREEN", "YELLOW", "SKIP") if turnbal else ("PLAY", "SKIP")
                 if verdict is not None and verdict.bet in allowed and self._prediction.submit(target, version, "ROUTER", verdict):
+                    self._provider_ready(target, "ROUTER", verdict)
                     return
             except Exception as exc:
-                self.problem.emit("Router prediction failed: " + str(exc))
+                self._provider_failed(target, "ROUTER", exc)
         finally:
             lock.release()
 
@@ -519,12 +537,32 @@ class MonitorWorker(QThread):
                           if turnbal else classic_prompt(snapshot))
                 verdict = predict_ollama(settings, prompt)
                 allowed = ("RED", "GREEN", "YELLOW", "SKIP") if turnbal else ("PLAY", "SKIP")
-                if verdict.bet in allowed:
-                    self._prediction.submit(target, version, "OLLAMA", verdict)
+                if verdict.bet in allowed and self._prediction.submit(target, version, "OLLAMA", verdict):
+                    self._provider_ready(target, "OLLAMA", verdict)
             except Exception as exc:
-                self.problem.emit("Ollama prediction failed: " + str(exc))
+                self._provider_failed(target, "OLLAMA", exc)
         finally:
             lock.release()
+
+    def _provider_ready(self, target, source, verdict):
+        report = {"ok": True, "target_round_id": target, "source": source,
+                  "status": "PREPARED", "verdict": verdict, "bets": verdict.bets,
+                  "selection": "پاسخ مدل آماده است؛ اجرا پس از تأیید پایان دور بررسی می‌شود.",
+                  **(self._planner.stats() if self._planner else {})}
+        self.smart_report.emit(report)
+        append_log(PROJECT_ROOT / "logs" / "provider-results.jsonl",
+                   {"target_round_id": target, "source": source, "status": "PREPARED",
+                    "bet": verdict.bet, "confidence": verdict.confidence, "reason": verdict.reason})
+
+
+    def _provider_failed(self, target, source, error):
+        message = source + ": " + str(error)
+        self.problem.emit(message)
+        self.smart_report.emit({"ok": False, "error": message, "source": source,
+                                "status": "ERROR", "target_round_id": target})
+        append_log(PROJECT_ROOT / "logs" / "provider-results.jsonl",
+                   {"target_round_id": target, "source": source, "status": "ERROR", "error": str(error)})
+
 
     def _ask(self, model, snapshot, settings, turnbal, calibration, timeout):
         """یک درخواست مدل؛ همین تابع در مقایسهٔ موازی هم استفاده می‌شود."""
@@ -577,6 +615,8 @@ class MonitorWorker(QThread):
         # بودجه فقط تعیین می‌کند پاسخِ دیر برای دست بعد استفاده شود یا نه؛
         # timeout همان مقدار تنظیمات می‌ماند تا تماس عادی قطع نشود.
         budget = settings.smart_latency_budget_ms / 1000
+        if settings.ai_provider == "local":
+            budget = settings.ollama_timeout_ms / 1000
         timeout = settings.smart_review_timeout_s
         attempts: list[ModelAttempt] = []
         chosen: ModelAttempt | None = None

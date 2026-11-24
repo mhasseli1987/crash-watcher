@@ -61,7 +61,7 @@ def test_success_and_compact_request():
         verdict = ollama.predict(DesktopSettings(ollama_enabled=True, bot_mode="turnbal"), "next round")
     assert verdict.bet == "GREEN"
     assert len(calls) == 2
-    assert calls[1][1] == 4
+    assert calls[1][1] == 20
 
 
 def test_classic_schema_and_response_are_independent_of_colors():

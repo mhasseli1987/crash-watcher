@@ -20,11 +20,26 @@ def test_local_only_never_calls_remote_provider(mode, bet, tmp_path, monkeypatch
     monkeypatch.setattr(module, "review_turnbal", remote)
     local = Mock(return_value=SmartVerdict(bet, 0.6, "local"))
     monkeypatch.setattr(module, "predict_ollama", local)
+    reports = []
+    worker.smart_report.connect(reports.append)
     version = worker._prediction.begin("next", 30)
     worker._hybrid_ai("next", version, SmartSnapshot(recent=("1.20", "2.50", "12.0")), settings)
     assert worker._prediction.freeze("next").source == "OLLAMA"
     assert not remote.called
     assert local.call_args.args[0].ollama_timeout_ms == settings.ollama_timeout_ms
+    assert reports[-1]["status"] == "PREPARED" and reports[-1]["verdict"].bet == bet
+
+
+def test_local_failure_is_visible_before_round_freeze(tmp_path, monkeypatch):
+    monkeypatch.setattr(module, "PROJECT_ROOT", tmp_path)
+    settings = DesktopSettings(ai_provider="local", result_region=Region(1, 0, 0, 300, 100))
+    worker = module.MonitorWorker(settings, StrategyEngine(settings.strategy()))
+    reports = []
+    worker.smart_report.connect(reports.append)
+    monkeypatch.setattr(module, "predict_ollama", Mock(side_effect=TimeoutError("slow model")))
+    version = worker._prediction.begin("next", 30)
+    worker._hybrid_ai("next", version, SmartSnapshot(), settings)
+    assert reports[-1]["status"] == "ERROR" and "slow model" in reports[-1]["error"]
 
 
 def test_local_provider_selection_persists(tmp_path):
