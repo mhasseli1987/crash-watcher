@@ -78,8 +78,8 @@ QTableWidget::item:selected { background:rgba(60,201,148,90); color:#f2fff8; }
 QHeaderView::section { background:qlineargradient(x1:0,y1:0,x2:0,y2:1, stop:0 #235242, stop:1 #17342a); color:#a8f0cd; padding:8px; border:0; border-right:1px solid rgba(110,210,165,45); font-weight:700; }
 QFrame#metric { background:qlineargradient(x1:0,y1:0,x2:1,y2:1, stop:0 rgba(38,80,64,235), stop:1 rgba(16,36,29,235)); border:1px solid rgba(110,210,165,70); border-radius:16px; }
 QFrame#metric:hover { border:1px solid rgba(150,245,200,150); }
-QLabel#modeChip { background:rgba(10,26,20,200); border:1px solid rgba(110,210,165,80); border-radius:11px; color:#bcd8ca; font-weight:700; padding:5px 10px; font-size:12px; }
-QLabel#modeChip[turnbal="true"] { background:qlineargradient(x1:0,y1:0,x2:0,y2:1, stop:0 #f0dfa6, stop:1 #b8912f); color:#231a04; border:1px solid #ffe9b8; }
+QPushButton#modeChip { background:rgba(10,26,20,200); border:1px solid rgba(110,210,165,80); border-radius:11px; color:#bcd8ca; font-weight:700; padding:5px 10px; font-size:12px; }
+QPushButton#modeChip[turnbal="true"] { background:qlineargradient(x1:0,y1:0,x2:0,y2:1, stop:0 #f0dfa6, stop:1 #b8912f); color:#231a04; border:1px solid #ffe9b8; }
 QCheckBox { spacing:10px; padding:4px 0; }
 QCheckBox::indicator { width:20px; height:20px; border-radius:6px; border:1px solid rgba(120,220,175,110); background:rgba(8,22,18,220); }
 QCheckBox::indicator:hover { border:1px solid #8bffd0; }
@@ -352,10 +352,11 @@ class MainWindow(QMainWindow):
         mode_column.setSpacing(4)
         self.bell = BellToggle(self.settings.bot_mode == "turnbal")
         self.bell.toggled.connect(self.toggle_bot_mode)
-        self.mode_chip = QLabel("حالت: کلاسیک")
+        self.mode_chip = QPushButton("حالت: کلاسیک")
         self.mode_chip.setObjectName("modeChip")
-        self.mode_chip.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.mode_chip.setToolTip("کلیک روی زنگ: تغییر حالت کلاسیک ↔ ترنبال")
+        self.mode_chip.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.mode_chip.clicked.connect(self.toggle_bot_mode)
+        self.mode_chip.setToolTip("تغییر حالت کلاسیک ↔ ترنبال")
         mode_column.addWidget(self.bell, 0, Qt.AlignmentFlag.AlignHCenter)
         mode_column.addWidget(self.mode_chip)
         header.addLayout(mode_column)
@@ -1160,6 +1161,11 @@ class MainWindow(QMainWindow):
             self.preflight_status.setText("پیش‌بررسی ناموفق: " + str(exc))
             return
         self.preflight_status.setText(preflight_summary(checks))
+        if settings.ai_provider == "local":
+            for check in checks:
+                if check.name == "اتصال مدل":
+                    self._set_local_status(("اتصال محلی برقرار است: " if check.ok else "خطای اتصال محلی: ")
+                                           + check.detail)
         problems = preflight_failed(checks)
         if problems:
             QMessageBox.warning(self, "پیش‌بررسی",
@@ -1206,10 +1212,10 @@ class MainWindow(QMainWindow):
         if getattr(self, "local_probe", None) is not None and self.local_probe.isRunning():
             return
         settings = replace(self.settings, ollama_base_url=self.local_url.text().strip())
-        self.local_status.setText("در حال شناسایی مدل‌های محلی…")
+        self._set_local_status("در حال شناسایی مدل‌های محلی…")
         self.local_probe = LocalModelProbe(settings)
         self.local_probe.done.connect(self._local_models_found)
-        self.local_probe.failed.connect(lambda error: self.local_status.setText("خطای Ollama: " + error))
+        self.local_probe.failed.connect(lambda error: self._set_local_status("خطای Ollama: " + error))
         self.local_probe.start()
 
     def _local_models_found(self, models):
@@ -1219,8 +1225,13 @@ class MainWindow(QMainWindow):
         selected = current if current in models else next(
             (name for name in models if "qwen" in name.lower()), models[0] if models else current)
         self.local_model.setCurrentText(selected)
-        self.local_status.setText(f"{len(models)} مدل محلی پیدا شد؛ انتخاب: {selected}" if models
-                                  else "Ollama پاسخ داد؛ مدلی نصب نشده است.")
+        self._set_local_status(f"متصل به Ollama؛ {len(models)} مدل محلی پیدا شد؛ انتخاب: {selected}" if models
+                               else "Ollama پاسخ داد؛ مدلی نصب نشده است.")
+
+    def _set_local_status(self, message):
+        self.local_status.setText(message)
+        if self.ai_provider.currentData() == "local":
+            self.smart_probe_status.setText(message)
 
     def _smart_probe_done(self, models):
         names = "، ".join(str(name) for name in models[:5])
@@ -1689,7 +1700,7 @@ class MainWindow(QMainWindow):
         """کلیک روی زنگ: کلاسیک ↔ ترنبال؛ انتخاب در settings.json می‌ماند."""
         if self.worker and self.worker.isRunning():
             self.bell.set_on(self.settings.bot_mode == "turnbal")
-            self.note.setText("برای تغییر حالت، ابتدا پایش را متوقف کنید.")
+            QMessageBox.information(self, "تغییر حالت", "برای تغییر حالت، ابتدا پایش را متوقف کنید.")
             return
         new_mode = "classic" if self.settings.bot_mode == "turnbal" else "turnbal"
         self.apply_settings(bot_mode=new_mode)

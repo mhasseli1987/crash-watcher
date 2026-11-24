@@ -25,3 +25,27 @@ def test_mode_switch_enables_only_turnbal_controls(monkeypatch):
         finally:
             window.close()
             app.processEvents()
+
+
+def test_header_mode_button_switches_and_explains_active_monitor(monkeypatch):
+    from unittest.mock import Mock
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    from PySide6.QtWidgets import QApplication
+    from crash_watcher.desktop import ui
+    app = QApplication.instance() or QApplication([])
+    monkeypatch.setattr(ui, "load_settings", lambda: DesktopSettings())
+    monkeypatch.setattr(ui, "save_settings", lambda settings: None)
+    notice = Mock()
+    monkeypatch.setattr(ui.QMessageBox, "information", notice)
+    window = ui.MainWindow()
+    window.mode_chip.click()
+    assert window.settings.bot_mode == "turnbal" and window.tabs.isTabEnabled(3)
+    window.mode_chip.click()
+    assert window.settings.bot_mode == "classic"
+    window.worker = Mock()
+    window.worker.isRunning.return_value = True
+    window.mode_chip.click()
+    assert window.settings.bot_mode == "classic" and notice.called
+    window.worker = None
+    window.close()
+    app.processEvents()

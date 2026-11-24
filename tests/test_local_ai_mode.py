@@ -48,5 +48,9 @@ def test_discovery_prefers_installed_qwen(monkeypatch):
     window.ai_provider.setCurrentIndex(window.ai_provider.findData("local"))
     assert window._settings_from_form().ai_provider == "local"
     assert discovery.called and not window.smart_url.isEnabled()
+    window._local_models_found(["qwen3:8b"])
+    assert "qwen3:8b" in window.smart_probe_status.text()
+    window._set_local_status("local error")
+    assert window.smart_probe_status.text() == window.local_status.text() == "local error"
     window.close()
     app.processEvents()
