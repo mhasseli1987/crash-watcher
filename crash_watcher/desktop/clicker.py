@@ -24,6 +24,9 @@ CASHOUT_MAX_TARGET = Decimal("1.90")
 # ضریب زندهٔ واقعی بین دو نمونهٔ پشت‌سرهم حداکثر دو برابر می‌شود؛ جهش بزرگ‌تر
 # عدد ثابتِ پایان دست (Bang) است که دیر خوانده شده.
 CASHOUT_MAX_STEP = Decimal("2.00")
+# دستی که زیر این ضریب بسته می‌شود (کرک لحظه‌ای مثل ۱٫۰۵ یا ۱٫۰۸) یعنی دست
+# بعد بی‌درنگ شرط بسته شود و همان دست تا ۱٫۹۰ برای کلیک خروج صبر کند.
+LOW_CLOSE = Decimal("1.10")
 # برای پذیرش خروج بدون پیام سایت، ضریب پایان دست باید دست‌کم این‌قدر بالای ضریب
 # لحظهٔ کلیک باشد؛ عدد برابر با هدف می‌تواند کرش همان لحظه باشد.
 CASHOUT_CONFIRM_MARGIN = Decimal("1.02")
@@ -102,7 +105,8 @@ RULE_LABELS = {"yellow-run": "صف ۷+۳ زرد",
                "row-signal": "سیگنال سطری",
                "streak-run": "روند هم‌رنگ ۷+", "value-bet": "ضریب ویژه",
                "pair-flip": "جفت رنگ", "smart": "کلیک هوشمند",
-               "smart-play": "ورود هوشمند (مدل)"}
+               "smart-play": "ورود هوشمند (مدل)",
+               "low-close": "بستن زیر ۱٫۱۰"}
 
 
 class AutoClicker:
@@ -573,6 +577,8 @@ class AutoClicker:
             # a trend that keeps going, so the same colour is bet for ten rounds.
             self._streak_clicks = self.settings.streak_signal_clicks
             self._streak_target = color
+        # دستی که زیر ۱٫۱۰ بسته شد: شرط دست بعد همین حالا بسته می‌شود.
+        low_close = value < LOW_CLOSE
         remaining_hold = self.hold_remaining()
         if remaining_hold > 0:
             # توقف کلیک: شرط قبلی همین بالاتر تسویه شد، اما شرط تازه بسته نمی‌شود.
@@ -635,6 +641,11 @@ class AutoClicker:
                     # تصمیم آمادهٔ مدل: یکی از قواعد بالا فعال نشده، پس نظر مدل
                     # را اجرا کن — یک رنگ یا دو رنگ هم‌زمان.
                     rule = "smart-play"
+                elif low_close and not turnbal:
+                    # قاعدهٔ ثابت کاربر: ضریب بسته‌شده زیر ۱٫۱۰ (۱٫۰۵، ۱٫۰۸ …)
+                    # یعنی همین حالا برای دست بعد روی دکمهٔ شرط کلیک شود.
+                    target_color = "PLAY"
+                    rule = "low-close"
                 elif not turnbal or not self.settings.smart_click_enabled:
                     return ClickReport(False, (f"waiting for a round >= {threshold}" if turnbal
                                                else "waiting for a smart decision"),
@@ -717,13 +728,18 @@ class AutoClicker:
         if self.settings.cashout_enabled and (simulated or ok):
             # شرط ثبت شد: هدفِ خروج همیشه داخل ۱٫۴۰ تا ۱٫۹۰ نگه داشته می‌شود تا
             # هیچ شرطی از این عدد جلوتر باز نماند.
-            try:
-                target = Decimal(str(self._smart_cashout))
-            except Exception:
-                # حالت کلاسیک مدل ندارد: «حداقل کش‌اوت» تنظیمات کاربر (تب ترنبال)
-                # مبنای خروج است تا عدد ثابت جای تنظیمات کاربر ننشیند.
-                target = (Decimal(str(self.settings.turnbal_cashout_min))
-                          if turnbal else CASHOUT_MIN_TARGET)
+            if rule == "low-close":
+                # دست بعد از یک بستن زیر ۱٫۱۰ تا ۱٫۹۰ صبر می‌کند؛ در حالت عادی
+                # ربات خودش ضریب خروج را داخل بازهٔ ۱٫۴۰ تا ۱٫۹۰ انتخاب می‌کند.
+                target = CASHOUT_MAX_TARGET
+            else:
+                try:
+                    target = Decimal(str(self._smart_cashout))
+                except Exception:
+                    # حالت کلاسیک مدل ندارد: «حداقل کش‌اوت» تنظیمات کاربر (تب ترنبال)
+                    # مبنای خروج است تا عدد ثابت جای تنظیمات کاربر ننشیند.
+                    target = (Decimal(str(self.settings.turnbal_cashout_min))
+                              if turnbal else CASHOUT_MIN_TARGET)
             self._cashout_target = min(max(target, CASHOUT_MIN_TARGET), CASHOUT_MAX_TARGET)
             self._cashout_planned_target = self._cashout_target
             self._cashout_points = [point for _, point in points]

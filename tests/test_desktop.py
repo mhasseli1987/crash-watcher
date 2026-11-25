@@ -1013,6 +1013,23 @@ def test_advice_cashout_target_is_kept_inside_the_safe_band(no_detection):
     assert target(1.65) == Decimal("1.65")
 
 
+def test_a_round_closed_below_1_10_bets_the_next_hand_until_1_90(no_detection):
+    """بستن زیر ۱٫۱۰: کلیک برای دست بعد و صبر تا ۱٫۹۰ برای خروج."""
+    sender = _Sender()
+    clicker = AutoClicker(_clicker(bot_mode="classic", smart_play_learning_minutes=0,
+                                   bet_region=Region(1, 100, 200, 300, 40),
+                                   cashout_enabled=True), sender=sender)
+    report = clicker.fire("r1", Decimal("1.08"))
+    assert report.clicked and report.rule == "low-close"
+    assert clicker._cashout_target == Decimal("1.90")
+    assert sender.calls == [(250, 220, True)]
+
+    normal = AutoClicker(_clicker(bot_mode="classic", smart_play_learning_minutes=0,
+                                  bet_region=Region(1, 100, 200, 300, 40),
+                                  cashout_enabled=True), sender=_Sender())
+    assert not normal.fire("r1", Decimal("1.10")).clicked
+
+
 def test_bankroll_settles_a_win_and_a_loss_with_the_colour_payout():
     account = Bankroll(10, 0.2)
     account.settle(2, 10, True)
