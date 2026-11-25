@@ -156,20 +156,25 @@ class MonitorWorker(QThread):
             self._planner.update(settings.smart_play_learning_minutes, threshold,
                                 settings.smart_play_two_colors)
 
-    def submit_advice(self, color: str) -> None:
+    def submit_advice(self, color: str, cashout=None) -> None:
         """پیشنهاد تحلیل قبل از دست را برای دست بعد نگه دار.
 
         رنگ پیشنهادی در حالت ترنبال و PLAY در حالت کلاسیک با همان تنظیمات
         کلیکر (مبلغ، محدودهٔ کش‌اوت، کول‌داون) اجرا می‌شود؛ کلیک تازه‌ای
-        این‌جا انجام نمی‌شود.
+        این‌جا انجام نمی‌شود. ضریب تخمینی مدل هدف خروج همین دست است و در
+        کلیکر داخل بازهٔ ایمن ۱٫۴۰ تا ۱٫۹۰ بسته می‌شود.
         """
         if color not in ("RED", "GREEN", "YELLOW"):
             with self._advice_lock:
                 self._advice = None
             return
         bets = (color,) if self.settings.bot_mode == "turnbal" else ("PLAY",)
+        try:
+            target = float(cashout) if cashout is not None else None
+        except (TypeError, ValueError):
+            target = None
         with self._advice_lock:
-            self._advice = (bets, None)
+            self._advice = (bets, target)
 
     def hold_clicks(self, seconds: float, reason: str = "") -> bool:
         """کلیک‌های تازه را برای این مدت متوقف کن (مثلاً قرمزهای پیاپی)."""

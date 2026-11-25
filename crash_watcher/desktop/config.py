@@ -75,7 +75,8 @@ class DesktopSettings:
     ollama_keep_alive: str = "30s"
     # «ورود هوشمند به بازی»: اول یادگیری، بعد شرط‌بندی بر پایهٔ تصمیم آمادهٔ مدل.
     smart_play_enabled: bool = False
-    smart_play_learning_minutes: int = 30
+    # ارزیابی اولیه: یک دقیقه فقط ضریب‌ها و رنگ‌ها خوانده می‌شوند و شرطی بسته نمی‌شود.
+    smart_play_learning_minutes: int = 1
     smart_play_min_confidence: float = 0.40
     smart_play_two_colors: bool = True
     # حالت ربات: "classic" (قواعد فعلی) یا "turnbal" (تصمیم هوش مصنوعی + شرط سه‌رنگ)
@@ -113,6 +114,9 @@ class DesktopSettings:
     bankroll_enabled: bool = False
     bankroll_start: str = "100"
     bankroll_stop_loss_pct: float = 20.0
+    # حد سود و حد ضرر جلسه به مبلغ؛ "0" یعنی خاموش.
+    session_profit_limit: str = "0"
+    session_loss_limit: str = "0"
     payout_red: float = 2.0
     payout_green: float = 2.0
     payout_yellow: float = 10.0
@@ -120,7 +124,7 @@ class DesktopSettings:
     # «2 /2»: دوبل کردن مبلغ شرط برای جبران باخت (تا ۴ بار) با دکمهٔ ×2 بازی
     # و برگشت به مبلغ پایه با دکمهٔ ÷2 پس از برد.
     double_bet_enabled: bool = False
-    double_bet_max: int = 4
+    double_bet_max: int = 6
     double_bet_point: tuple[int, int] | None = None
     halve_bet_point: tuple[int, int] | None = None
     max_attempts: int = 8
@@ -248,6 +252,16 @@ class DesktopSettings:
                 or isinstance(self.bankroll_stop_loss_pct, bool)
                 or not 0 < self.bankroll_stop_loss_pct <= 100):
             raise ValueError("bankroll_stop_loss_pct must be between 0 and 100")
+        for name in ("session_profit_limit", "session_loss_limit"):
+            text = getattr(self, name)
+            if not isinstance(text, str):
+                raise ValueError(f"{name} must be text")
+            try:
+                amount = Decimal(text or "0")
+            except (InvalidOperation, TypeError, ValueError) as exc:
+                raise ValueError(f"{name} must be a number of zero or more") from exc
+            if not amount.is_finite() or amount < 0:
+                raise ValueError(f"{name} must be a number of zero or more")
         if type(self.double_bet_enabled) is not bool:
             raise ValueError("double_bet_enabled must be a boolean")
         if type(self.double_bet_max) is not int or not 1 <= self.double_bet_max <= 10:

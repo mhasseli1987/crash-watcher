@@ -146,6 +146,12 @@ class AutoClicker:
         # توقف کلیکِ تازه (مثل قرمزهای پیاپی)؛ شرط باز و کش‌اوت را نمی‌بندد.
         self._hold_until: datetime | None = None
         self._hold_reason = ""
+        # ارزیابی اولیه: دقیقهٔ اول پایش فقط ضریب‌ها و رنگ‌ها دیده می‌شوند و
+        # هیچ شرط تازه‌ای بسته نمی‌شود؛ ساعت از همین لحظهٔ شروع پایش است.
+        minutes = max(0, int(getattr(settings, "smart_play_learning_minutes", 0) or 0))
+        if minutes:
+            self._hold_until = datetime.now(timezone.utc) + timedelta(minutes=minutes)
+            self._hold_reason = "evaluation"
         self._halve_clicks = 0
         self._cashout_target: Decimal | None = None
         self._cashout_points: list[tuple[int, int]] = []
@@ -173,9 +179,21 @@ class AutoClicker:
         """Rounds still to skip before the click window of the current run."""
         return self._waiting
 
+    def _session_limits(self) -> tuple[float, float]:
+        """حد سود و حد ضرر جلسه (مبلغ)؛ ۰ یعنی خاموش."""
+        def amount(text) -> float:
+            try:
+                value = float(Decimal(str(text or "0")))
+            except Exception:
+                return 0.0
+            return max(0.0, value)
+        return (amount(self.settings.session_profit_limit),
+                amount(self.settings.session_loss_limit))
+
     def _refresh_bankroll(self) -> None:
-        """سرمایهٔ جلسه را از تنظیمات بساز؛ اگر خاموش شد، پاک کن."""
-        if not self.settings.bankroll_enabled:
+        """سرمایهٔ جلسه را از تنظیمات بساز؛ حد سود یا حد ضرر هم حساب را روشن می‌کند."""
+        profit, loss = self._session_limits()
+        if not (self.settings.bankroll_enabled or profit or loss):
             self.bankroll = None
             return
         try:
@@ -185,8 +203,10 @@ class AutoClicker:
             return
         fraction = self.settings.bankroll_stop_loss_pct / 100
         if (self.bankroll is None or self.bankroll.start != start
-                or self.bankroll.stop_loss_fraction != fraction):
-            self.bankroll = Bankroll(start, fraction)
+                or self.bankroll.stop_loss_fraction != fraction
+                or self.bankroll.profit_limit != profit
+                or self.bankroll.loss_limit != loss):
+            self.bankroll = Bankroll(start, fraction, profit, loss)
 
     def update(self, settings: DesktopSettings) -> None:
         """Apply a settings change made while monitoring is already running."""

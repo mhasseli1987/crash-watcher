@@ -205,7 +205,8 @@ def no_detection(monkeypatch):
 def _clicker(**overrides):
     values = dict(click_region=Region(1, 100, 200, 60, 40), autoclick_enabled=True,
                   autoclick_dry_run=False, autoclick_cooldown_ms=0, autoclick_delay_ms=0,
-                  autoclick_skip_rounds=0, bot_mode="turnbal")
+                  autoclick_skip_rounds=0, bot_mode="turnbal",
+                  smart_play_learning_minutes=0)
     values.update(overrides)
     return DesktopSettings(**values)
 
@@ -896,7 +897,7 @@ def test_clicker_without_target_sends_nothing(no_detection):
     sender = _Sender()
     report = AutoClicker(DesktopSettings(autoclick_enabled=True, autoclick_dry_run=False,
                                          autoclick_cooldown_ms=0, autoclick_skip_rounds=0,
-                                         bot_mode="turnbal"),
+                                         smart_play_learning_minutes=0, bot_mode="turnbal"),
                          sender=sender).fire("r1", Decimal("10.00"))
     assert not report.clicked and report.reason == "target not found" and sender.calls == []
 
@@ -956,12 +957,79 @@ def test_bankroll_stops_the_session_after_the_loss_limit(no_detection):
     assert len(sender.calls) == 1
 
 
+def test_first_minute_only_evaluates_and_places_no_bet(no_detection):
+    """دقیقهٔ اول: مدل ارزیابی می‌کند و هیچ شرطی بسته نمی‌شود."""
+    sender = _Sender()
+    clicker = AutoClicker(_clicker(bot_mode="classic", bet_region=Region(1, 100, 200, 300, 40),
+                                   smart_play_learning_minutes=1), sender=sender)
+    clicker.set_smart_play(("PLAY",))
+    assert clicker.hold_remaining() > 55
+    report = clicker.fire("r1", Decimal("12.00"))
+    assert not report.clicked and "evaluation" in report.reason
+    assert sender.calls == []
+    clicker._hold_until = None
+    clicker.set_smart_play(("PLAY",))
+    assert clicker.fire("r2", Decimal("12.00")).clicked
+
+
+def test_session_profit_limit_stops_new_bets(no_detection):
+    sender = _Sender()
+    settings = _clicker(value_bets={"1.50": "RED", "3.00": "GREEN"},
+                        autoclick_threshold="100", smart_play_learning_minutes=0,
+                        bankroll_start="100", session_profit_limit="5",
+                        fixed_bet_amount="10", bet_point_red=(10, 20),
+                        bet_point_green=(30, 40))
+    clicker = AutoClicker(settings, sender=sender)
+    assert clicker.fire("r1", Decimal("1.50")).clicked
+    stopped = clicker.fire("r2", Decimal("1.50"))
+    assert clicker.balance == 110 and clicker.bankroll.profit_hit
+    assert not stopped.clicked and "capital stop-loss" in stopped.reason
+
+
+def test_session_loss_limit_stops_new_bets(no_detection):
+    sender = _Sender()
+    settings = _clicker(value_bets={"1.50": "RED"}, autoclick_threshold="100",
+                        smart_play_learning_minutes=0, bankroll_start="100",
+                        session_loss_limit="5", fixed_bet_amount="10",
+                        bet_point_red=(10, 20), bet_point_green=(30, 40))
+    clicker = AutoClicker(settings, sender=sender)
+    assert clicker.fire("r1", Decimal("1.50")).clicked
+    stopped = clicker.fire("r2", Decimal("3.00"))
+    assert clicker.balance == 90 and clicker.bankroll.loss_hit
+    assert not stopped.clicked and "capital stop-loss" in stopped.reason
+
+
+def test_advice_cashout_target_is_kept_inside_the_safe_band(no_detection):
+    def target(predicted):
+        clicker = AutoClicker(_clicker(bot_mode="classic", smart_play_learning_minutes=0,
+                                       bet_region=Region(1, 100, 200, 300, 40),
+                                       cashout_enabled=True), sender=_Sender())
+        clicker.set_smart_play(("PLAY",), predicted)
+        assert clicker.fire("r1", Decimal("12.00")).clicked
+        return clicker._cashout_target
+
+    assert target(3.5) == Decimal("1.90")
+    assert target(1.2) == Decimal("1.40")
+    assert target(1.65) == Decimal("1.65")
+
+
 def test_bankroll_settles_a_win_and_a_loss_with_the_colour_payout():
     account = Bankroll(10, 0.2)
     account.settle(2, 10, True)
     assert account.balance == 28 and account.realized == 18 and account.wins == 1
     account.settle(2, 2, False)
     assert account.balance == 26 and account.losses == 1 and not account.stopped
+
+
+def test_bankroll_stops_at_the_profit_and_loss_amounts():
+    profit = Bankroll(100, 0.2, profit_limit=5, loss_limit=8)
+    profit.settle(10, 2.0, True)
+    assert profit.realized == 10 and profit.profit_hit and profit.stopped
+    assert "حد سود" in profit.label()
+    loss = Bankroll(100, 0.2, profit_limit=5, loss_limit=8)
+    loss.settle(10, 2.0, False)
+    assert loss.realized == -10 and loss.loss_hit and loss.stopped
+    assert "حد ضرر" in loss.label()
 
 
 def test_bankroll_treats_a_hedge_and_a_simulated_stake_as_break_even():

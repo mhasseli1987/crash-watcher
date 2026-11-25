@@ -110,7 +110,8 @@ def test_low_confidence_advice_never_arms_a_click():
     window = SimpleNamespace(
         settings=DesktopSettings(),
         snapshot_output=SimpleNamespace(appendPlainText=texts.append),
-        worker=SimpleNamespace(isRunning=lambda: True, submit_advice=submitted.append))
+        worker=SimpleNamespace(isRunning=lambda: True,
+                               submit_advice=lambda color, value=None: submitted.append(color)))
     MainWindow._snapshot_advice_ready(window, "RED", 1.5, 0.39)
     assert submitted == [] and "کمتر" in texts[-1]
     MainWindow._snapshot_advice_ready(window, "RED", 1.5, 0.40)
@@ -157,7 +158,7 @@ def test_advice_reaches_the_click_decision(tmp_path):
     base = replace(DesktopSettings(), result_region=Region(1, 0, 0, 20, 10),
                    bot_mode="turnbal", autoclick_enabled=True, cashout_enabled=False,
                    autoclick_dry_run=False, shadow_mode=False, bet_point_green=(70, 70),
-                   autoclick_threshold="10.00")
+                   smart_play_learning_minutes=0, autoclick_threshold="10.00")
     worker = MonitorWorker(base, StrategyEngine(base.strategy()))
     worker.submit_advice("GREEN")
     assert worker._take_advice() == (("GREEN",), None)

@@ -413,10 +413,11 @@ class MainWindow(QMainWindow):
         # قرمزهای پیاپی: تا این زمان هیچ تحلیل/کلیک تازه‌ای شروع نمی‌شود.
         self._red_hold_until = 0.0
         note = QLabel("۱. نوار ضریب‌های آخر و جدول رنگ‌ها را مشخص کنید.\n"
-                      "۲. بررسی را بزنید؛ تصویر خوانده می‌شود و مدل محلی تحلیل و احتمال می‌دهد.\n"
-                      "اگر مدل حداقل ۴۰٪ احتمال بدهد که رنگش درست است، پیشنهاد نگه داشته "
-                      "می‌شود و در شروع دست جدید کلیک انجام می‌شود؛ پایین‌تر از آن دست رد "
-                      "می‌شود. مبلغ و کش‌اوت از تب کلیک می‌آیند.\n"
+                      "۲. دقیقهٔ اول پایش ارزیابی است: مدل فقط ضریب‌ها و رنگ‌ها را می‌بیند و هیچ "
+                      "شرطی بسته نمی‌شود.\n"
+                      "۳. بعد از آن، اگر مدل حداقل ۴۰٪ احتمال بدهد که رنگش درست است، در شروع "
+                      "دست جدید کلیک انجام می‌شود؛ پایین‌تر از آن دست رد می‌شود.\n"
+                      "مبلغ، کش‌اوت و حد سود/حد ضرر از تب کلاسیک می‌آیند.\n"
                       "مدل محلی (Ollama) اول پاسخ می‌دهد؛ مسیر ابری فقط پشتیبان است.")
         note.setWordWrap(True)
         layout.addWidget(note)
@@ -521,7 +522,7 @@ class MainWindow(QMainWindow):
             self.snapshot_output.appendPlainText(
                 "پیشنهاد آماده است؛ برای اجرای کلیک روی دست بعد، پایش را شروع کنید.")
             return
-        worker.submit_advice(color)
+        worker.submit_advice(color, value)
         append_log(PROJECT_ROOT / "logs" / "snapshot-advice.jsonl",
                    {"time": datetime.now().isoformat(timespec="seconds"),
                     "submitted_for_next_round": color, "confidence": confidence})
@@ -618,6 +619,24 @@ class MainWindow(QMainWindow):
         self.resume_button.clicked.connect(lambda: self.worker.resume() if self.worker else None)
         self.reset_button.clicked.connect(self.reset_session)
         layout.addLayout(controls)
+        limits = QGroupBox("حد سود و حد ضرر جلسه (مبلغ — ۰ یعنی خاموش)")
+        limit_row = QHBoxLayout(limits)
+        for field_name, title, value_text in (("profit", "حد سود", self.settings.session_profit_limit),
+                                              ("loss", "حد ضرر", self.settings.session_loss_limit)):
+            column = QVBoxLayout()
+            caption = QLabel(title)
+            caption.setStyleSheet("font-size:20px;font-weight:800;color:#8ff0c0;"
+                                  "border:0;background:transparent")
+            entry = QLineEdit(value_text)
+            entry.setPlaceholderText("0")
+            entry.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            entry.setStyleSheet("font-size:28px;font-weight:800;padding:8px 10px;")
+            entry.setToolTip("با رسیدن سود/زیان جلسه به این مبلغ، ربات شرط تازه نمی‌بندد. ۰ = خاموش")
+            column.addWidget(caption)
+            column.addWidget(entry)
+            limit_row.addLayout(column)
+            setattr(self, f"{field_name}_limit", entry)
+        layout.addWidget(limits)
         self.preview = QLabel("پیش‌نمایش ناحیهٔ نتیجه")
         self.preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.preview.setMinimumHeight(150)
@@ -902,8 +921,8 @@ class MainWindow(QMainWindow):
         self.smart_learning.setRange(0, 600)
         self.smart_learning.setSuffix(" دقیقه")
         self.smart_learning.setValue(self.settings.smart_play_learning_minutes)
-        self.smart_learning.setToolTip("در این مدت فقط یادگیری و ارزیابی انجام می‌شود؛ هیچ شرطی بسته نمی‌شود")
-        form.addRow("دورهٔ یادگیری پیش از بازی", self.smart_learning)
+        self.smart_learning.setToolTip("در این مدت فقط ارزیابی انجام می‌شود؛ هیچ شرطی بسته نمی‌شود")
+        form.addRow("ارزیابی اولیه پیش از کلیک", self.smart_learning)
         self.smart_min_conf = QSpinBox()
         self.smart_min_conf.setRange(20, 100)
         self.smart_min_conf.setSuffix(" %")
@@ -1171,6 +1190,8 @@ class MainWindow(QMainWindow):
                        bankroll_enabled=self.bankroll_enabled.isChecked(),
                        bankroll_start=self.bankroll_start.text().strip() or "100",
                        bankroll_stop_loss_pct=round(self.bankroll_stop.value(), 2),
+                       session_profit_limit=self.profit_limit.text().strip() or "0",
+                       session_loss_limit=self.loss_limit.text().strip() or "0",
                        autoclick_threshold=self.click_threshold.text().strip(),
                        autoclick_delay_ms=self.click_delay.value(),
                        autoclick_skip_rounds=self.click_wait.value(),
@@ -1665,6 +1686,8 @@ class MainWindow(QMainWindow):
         self.bankroll_enabled.setChecked(self.settings.bankroll_enabled)
         self.bankroll_start.setText(self.settings.bankroll_start)
         self.bankroll_stop.setValue(self.settings.bankroll_stop_loss_pct)
+        self.profit_limit.setText(self.settings.session_profit_limit)
+        self.loss_limit.setText(self.settings.session_loss_limit)
         self.double_bet.setChecked(self.settings.double_bet_enabled)
         self.double_max.setValue(self.settings.double_bet_max)
         self._update_double_status()
