@@ -19,7 +19,7 @@ from crash_watcher.vision.recognition import (RapidOCRReader, parse_multiplier, 
 from .config import DesktopSettings, PROJECT_ROOT
 from .clicker import AutoClicker, ClickReport
 from .color_grid import read_grid
-from .final_result import BangDetector, BangRecognizer, parse_history_entry
+from .final_result import BangDetector, BangRecognizer, newest_history_entry
 from .model_compare import (ModelAttempt, ModelLeaderboard, compare as compare_models,
                             parse_models)
 from .smart_play import SmartPlanner
@@ -339,7 +339,9 @@ class MonitorWorker(QThread):
                                         self.problem.emit("History OCR failed: " + str(exc))
                                     if parsed is not None:
                                         history_text = " ".join(parsed.txts or ())
-                                        entry = parse_history_entry(history_text)
+                                        # جفت‌کردن شناسه و ضریب با جعبهٔ OCR، نه با
+                                        # ترتیب متن: OCR همهٔ شناسه‌ها را یک‌جا می‌دهد.
+                                        entry = newest_history_entry(parsed)
                                         if entry is not None:
                                             history_id, history_value = entry
                                         self.history_observation.emit(history_id, history_value, history_text)

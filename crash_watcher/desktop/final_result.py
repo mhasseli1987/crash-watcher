@@ -3,6 +3,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
 import re
+from time import monotonic
 from uuid import uuid4
 import cv2
 import numpy as np
@@ -23,6 +24,11 @@ _BANG = re.compile(r"^Bang\s*@\s*(\d{1,4}\.\d{2})\s*[xX×=:*+»›\-]?$", re.IGN
 # themselves are a plausible ``x.xx``/``xx.xx``/``xxx.xx`` number, is the
 # displaced point put back; a bare ``Bang @761`` stays ambiguous and rejected.
 _BANG_DISPLACED = re.compile(r"^Bang\s*@\s*(\d{3,5})\s*[.:=]$", re.IGNORECASE | re.ASCII)
+# متن نارنجی «Bang @x.xx» صفحهٔ پایان دست با OCR این بازی گاهی «Dang 98275» یا
+# «Bamg 2.75» خوانده می‌شود؛ «@» گم می‌شود و با عدد قاطی می‌شود، پس تطبیق
+# سختگیرانه رد می‌شد و هیچ دستی تمام نمی‌شد.اگر خود متن نهایی خوانا نباشد،
+# نشان تازهٔ نوار ضرایب (شناسه + ضریب دقیق) پایان همان دست را ثابت می‌کند.
+BADGE_GRACE_S = 5.0
 # یک پاس OCR روی نوار تاریچه همهٔ نشان‌ها را پشت سر هم می‌دهد؛ توکن‌ها به ترتیب
 # خوانده می‌شوند تا هر شناسه با ضریب بعدی خودش جفت شود. هر شکل خرابی OCR که
 # قبلاً جدا جدا وصله می‌شد (نقطهٔ اعشار به‌جای فاصله یا حذف‌شده) اینجا پوشش دارد.
@@ -81,6 +87,49 @@ def parse_history_entry(text: str) -> tuple[str, Decimal] | None:
     pairs = _history_pairs(text)
     return max(pairs, key=lambda item: int(item[0])) if pairs else None
 
+
+def history_entries(result) -> list[tuple[str, Decimal]]:
+    """نشان‌های نوار ضرایب با جفت‌کردن هندسی جعبه‌های OCR.
+
+    RapidOCR شناسه‌ها را یک گروه و ضریب‌ها را گروه دیگر برمی‌گرداند؛ اگر متن
+    به ترتیب خوانده شود، ضریب به شناسهٔ اشتباه می‌چسبد (مثلاً جدیدترین
+    شناسه با ضریب قدیمی‌ترین نشان). هر ضریب به شناسهٔ هم‌ستون خودش نسبت
+    داده می‌شود و اگر شناسه‌ای هم‌ستون پیدا نشود، آن نشان کنار گذاشته
+    می‌شود: ضریب اشتباه بدتر از ندانستن آن است.
+    """
+    texts = [str(text).strip() for text in (getattr(result, "txts", ()) or ())]
+    boxes = getattr(result, "boxes", None)
+    if boxes is None or len(boxes) != len(texts):
+        entry = parse_history_entry(" ".join(texts))
+        return [entry] if entry else []
+    ids: list[tuple[str, float]] = []
+    values: list[tuple[Decimal, float]] = []
+    for text, box in zip(texts, boxes):
+        try:
+            points = [(float(x), float(y)) for x, y in box]
+        except (TypeError, ValueError):
+            continue
+        centre = (sum(p[0] for p in points) / len(points),
+                  sum(p[1] for p in points) / len(points))
+        if text.isdigit() and len(text) >= 6:
+            ids.append((text, centre[0]))
+            continue
+        value = parse_multiplier(text.replace(" ", ""))
+        if value is not None:
+            values.append((value, centre[0]))
+    pairs = []
+    for ident, x in ids:
+        nearest = min(values, key=lambda item: abs(item[1] - x), default=None)
+        if nearest is not None and abs(nearest[1] - x) <= 30:
+            pairs.append((ident, nearest[0]))
+    return pairs
+
+
+def newest_history_entry(result) -> tuple[str, Decimal] | None:
+    """تازه‌ترین نشان نوار ضرایب: بزرگ‌ترین شناسه با ضریب هم‌ستون خودش."""
+    pairs = history_entries(result)
+    return max(pairs, key=lambda item: int(item[0])) if pairs else None
+
 @dataclass(frozen=True)
 class FinalReading:
     value: Decimal | None
@@ -135,7 +184,11 @@ class ConfirmedFinal:
     timestamp: datetime
 
 class BangDetector:
-    """Requires a non-Bang phase then a stable Bang; ignores startup Bang."""
+    """Requires a non-Bang phase then a stable Bang; ignores startup Bang.
+
+    اگر OCR متن نهایی «Bang @x.xx» را خراب بخواند (که در این بازی مرتب
+    اتفاق می‌افتد)، نشان تازهٔ نوار ضرایب همان دست را تمام‌شده اعلام می‌کند.
+    """
     def __init__(self, stable_frames: int = 3, absent_frames: int = 2,
                  pixel_difference: float = 3.0) -> None:
         self.stable_frames = stable_frames
@@ -152,6 +205,10 @@ class BangDetector:
         self._last_image: np.ndarray | None = None
         self._previous: np.ndarray | None = None
         self._last_history_id: str | None = None
+        # جدیدترین نشان نوار ضرایب که حساب شده است؛ با آن، نشان‌های ناقص یا
+        # تکراری نمی‌توانند دست تازه بسازند.
+        self._newest_badge: str | None = None
+        self._last_completion = 0.0
         self._seen_ids: set[str] = getattr(self, "_seen_ids", set())
 
     def observe(self, image: np.ndarray, reading: FinalReading, timestamp: datetime,
@@ -161,12 +218,26 @@ class BangDetector:
         thumb = cv2.resize(gray, (64, 32), interpolation=cv2.INTER_AREA)
         moving = self._previous is not None and float(np.mean(cv2.absdiff(thumb, self._previous))) >= self.pixel_difference
         self._previous = thumb
+        badge = None
+        if history_id and history_value is not None and str(history_id).isdigit():
+            if self._newest_badge is None:
+                # اولین نشان فقط خط پایه است: آن دست پیش از شروع پایش بسته شده.
+                self._newest_badge = history_id
+            elif int(history_id) > int(self._newest_badge):
+                self._newest_badge = history_id
+                badge = (history_id, history_value)
         if reading.value is None:
             self._absent += 1
             self._stable = 0
             self._candidate = None
             if self._absent >= self.absent_frames:
                 self.state = DetectionState.ROUND_IN_PROGRESS
+            # متن نهایی خوانا نبود: نشان تازهٔ نوار ضرایب همان پایان دست است.
+            # فقط وقتی دستِ در جریان دیده شده باشد و به‌تازگی دستی از راه متن
+            # نهایی ثبت نشده باشد، تا یک دست دو بار شمرده و دو شرط باز نشود.
+            if (badge is not None and self.state == DetectionState.ROUND_IN_PROGRESS
+                    and monotonic() - self._last_completion >= BADGE_GRACE_S):
+                return self._confirm_badge(badge, thumb, timestamp)
             return None
         if self.state not in (DetectionState.ROUND_IN_PROGRESS, DetectionState.RESULT_CANDIDATE):
             return None
@@ -197,8 +268,24 @@ class BangDetector:
         self._last_history_id = history_id if matched else None
         self._absent = 0
         self.state = DetectionState.RESULT_CONFIRMED
+        self._last_completion = monotonic()
         round_id = f"game-{history_id}" if matched else f"visual-{uuid4().hex}"
         self._seen_ids.add(round_id)
         if history_id:
             self._seen_ids.add(history_id)
         return ConfirmedFinal(round_id, reading.value, reading.confidence, timestamp)
+
+    def _confirm_badge(self, badge, thumb, timestamp: datetime) -> ConfirmedFinal:
+        """پایان دست از روی نشان نوار ضرایب، بدون نیاز به متن «Bang»."""
+        history_id, value = badge
+        self._seen_ids.add(history_id)
+        self._seen_ids.add(f"game-{history_id}")
+        self._absent = 0
+        self._stable = 0
+        self._candidate = None
+        self._last = value
+        self._last_image = thumb.copy()
+        self._last_history_id = history_id
+        self._last_completion = monotonic()
+        self.state = DetectionState.RESULT_CONFIRMED
+        return ConfirmedFinal(f"game-{history_id}", value, 1.0, timestamp)

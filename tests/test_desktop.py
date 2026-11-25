@@ -10,7 +10,8 @@ from crash_watcher.desktop.clicker import AutoClicker
 from crash_watcher.desktop.bankroll import Bankroll
 from crash_watcher.desktop.config import DesktopSettings, Region, load_settings, save_settings
 from crash_watcher.desktop.final_result import (BangDetector, BangRecognizer, FinalReading,
-                                                 parse_bang, parse_history_entry)
+                                                 newest_history_entry, parse_bang,
+                                                 parse_history_entry)
 from crash_watcher.desktop.model_compare import (ModelAttempt, ModelLeaderboard,
                                                   compare as compare_models, parse_models)
 from crash_watcher.desktop.preflight import run_preflight
@@ -146,6 +147,57 @@ def test_mismatched_history_badge_never_delays_the_round():
                                  "9342414", Decimal("9.99"))
     assert confirmed and confirmed.round_id.startswith("visual-")
     assert confirmed.multiplier == Decimal("10.00")
+
+class _Strip:
+    """خروجی OCR واقعی نوار ضرایب: شناسه‌ها یک گروه و ضریب‌ها گروه دیگر."""
+
+    txts = ("9412030", "9412031", "9412032", "10.78x", "3.04x", "1.47x")
+    boxes = np.array([
+        [[22, 8], [60, 8], [60, 22], [22, 22]],
+        [[86, 8], [122, 8], [122, 22], [86, 22]],
+        [[151, 8], [189, 8], [189, 22], [151, 22]],
+        [[21, 22], [58, 22], [58, 36], [21, 36]],
+        [[85, 22], [119, 22], [119, 36], [85, 36]],
+        [[149, 22], [186, 22], [186, 36], [149, 36]],
+    ], dtype=np.float32)
+
+
+def test_history_badges_pair_by_column_not_by_text_order():
+    """ضریب هر نشان باید به شناسهٔ هم‌ستون خودش برسد، نه اولین عدد متن."""
+    assert newest_history_entry(_Strip()) == ("9412032", Decimal("1.47"))
+    assert parse_history_entry("9412030 9412031 9412032 10.78x 3.04x 1.47x") == ("9412032",
+                                                                                Decimal("10.78"))
+
+
+def test_unreadable_bang_text_completes_the_round_from_the_history_badge():
+    """وقتی OCR متن «Bang @x.xx» را خراب می‌خواند، نشان تازهٔ نوار دست را می‌بندد."""
+    detector = BangDetector(stable_frames=2, absent_frames=2)
+    now = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    # اولین نشان خط پایه است؛ همان دستی که پیش از پایش بسته شده.
+    assert detector.observe(_image(0), _reading(None), now, "9412034", Decimal("3.04")) is None
+    assert detector.observe(_image(0), _reading(None), now, "9412034", Decimal("3.04")) is None
+    done = detector.observe(_image(0), _reading(None), now, "9412035", Decimal("1.47"))
+    assert done is not None and done.round_id == "game-9412035"
+    assert done.multiplier == Decimal("1.47")
+    # همان نشان دوباره دست تازه نمی‌سازد.
+    assert detector.observe(_image(1), _reading(None), now, "9412035", Decimal("1.47")) is None
+    # نشان ناقص یا قدیمی‌تر هم دست تازه نمی‌سازد.
+    assert detector.observe(_image(2), _reading(None), now, "941203", Decimal("2.00")) is None
+
+
+def test_badge_after_a_bang_completion_never_opens_a_second_bet():
+    detector = BangDetector(stable_frames=2, absent_frames=2)
+    now = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    detector.observe(_image(0), _reading(None), now, "9412030", Decimal("10.78"))
+    detector.observe(_image(0), _reading(None), now, "9412030", Decimal("10.78"))
+    detector.observe(_image(30), _reading("10.00"), now, "9412030", Decimal("10.78"))
+    detector.observe(_image(30), _reading("10.00"), now, "9412030", Decimal("10.78"))
+    assert detector.observe(_image(30), _reading("10.00"), now,
+                            "9412030", Decimal("10.78")) is not None
+    # نشان همان دست کمی بعد می‌رسد؛ دست دوم نباید ساخته شود.
+    assert detector.observe(_image(30), _reading(None), now, "9412031", Decimal("1.20")) is None
+    assert detector.observe(_image(30), _reading(None), now, "9412031", Decimal("1.20")) is None
+
 
 def test_settings_roundtrip_and_validation(tmp_path):
     path = tmp_path / "settings.json"
