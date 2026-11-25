@@ -130,6 +130,7 @@ class DesktopSettings:
     ocr_confidence: float = 0.55
     theme: str = "dark"
     tesseract_path: str = ""
+    snapshot_advice_only: bool = False
 
     def resolved_key(self) -> str:
         """کلید مؤثر: متغیر محیطی بر مقدار ذخیره‌شده اولویت دارد."""
@@ -156,6 +157,8 @@ class DesktopSettings:
     def validate(self) -> None:
         """Reject settings that cannot build a usable session; raise ValueError."""
         self.strategy()
+        if type(self.snapshot_advice_only) is not bool:
+            raise ValueError("snapshot_advice_only must be a boolean")
         if type(self.interval_ms) is not int or self.interval_ms < 20:
             raise ValueError("interval_ms must be an integer of at least 20")
         for name in ("result_region", "history_region", "click_region", "chart_region",

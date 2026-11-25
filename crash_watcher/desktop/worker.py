@@ -60,8 +60,9 @@ def detected_lines(engine, image):
 
 
 def has_win_message(lines):
-    return any(score >= 0.8 and re.search(r"\byou\s+won\b", text, re.I)
-               for text, score in lines)
+    """پیام برد سایت؛ OCR اغلب «You Won» را دو خط جدا می‌خواند (You / Won)."""
+    text = " ".join(text for text, score in lines if score >= 0.8)
+    return bool(re.search(r"\byou\s+won\b", text, re.I))
 
 
 def classic_prompt(snapshot: SmartSnapshot) -> str:
@@ -120,7 +121,7 @@ class MonitorWorker(QThread):
         self._resync_on_resume = Event()
         # دو فریم پایدار کافی است و انتظار تاریخچه یک فریم است: صفحهٔ پایان دست
         # چند ثانیه بیشتر نمی‌ماند و هر فریم اضافه یعنی یک دورِ از دست رفته.
-        self.detector = BangDetector(stable_frames=2, history_timeout_frames=1)
+        self.detector = BangDetector(stable_frames=2)
         self._clicker: AutoClicker | None = None
         self._recent: deque[str] = deque(maxlen=30)
         self._smart_seen = 0
@@ -139,6 +140,9 @@ class MonitorWorker(QThread):
         self._prediction_sequence = 0
         self._frozen_pending = None
         self._provider_locks = {source: Lock() for source in ("ROUTER", "OLLAMA")}
+        # پیشنهاد «تحلیل قبل از دست» برای دست بعد؛ یک‌بار مصرف می‌شود.
+        self._advice_lock = Lock()
+        self._advice: tuple[tuple[str, ...], float | None] | None = None
 
     def configure(self, settings: DesktopSettings) -> None:
         """Apply click settings from the window while the loop is running."""
@@ -151,6 +155,26 @@ class MonitorWorker(QThread):
             threshold = 0.0 if settings.bot_mode == "turnbal" else settings.smart_play_min_confidence
             self._planner.update(settings.smart_play_learning_minutes, threshold,
                                 settings.smart_play_two_colors)
+
+    def submit_advice(self, color: str) -> None:
+        """پیشنهاد تحلیل قبل از دست را برای دست بعد نگه دار.
+
+        رنگ پیشنهادی در حالت ترنبال و PLAY در حالت کلاسیک با همان تنظیمات
+        کلیکر (مبلغ، محدودهٔ کش‌اوت، کول‌داون) اجرا می‌شود؛ کلیک تازه‌ای
+        این‌جا انجام نمی‌شود.
+        """
+        if color not in ("RED", "GREEN", "YELLOW"):
+            with self._advice_lock:
+                self._advice = None
+            return
+        bets = (color,) if self.settings.bot_mode == "turnbal" else ("PLAY",)
+        with self._advice_lock:
+            self._advice = (bets, None)
+
+    def _take_advice(self) -> tuple[tuple[str, ...], float | None] | None:
+        with self._advice_lock:
+            advice, self._advice = self._advice, None
+        return advice
 
     def stop(self) -> None:
         self._stop.set()
@@ -307,8 +331,7 @@ class MonitorWorker(QThread):
                                             history_id, history_value = entry
                                         self.history_observation.emit(history_id, history_value, history_text)
                             completed = self.detector.observe(frame.image, reading, frame.captured_at,
-                                                              history_id, history_value,
-                                                              require_history=history_capture is not None)
+                                                              history_id, history_value)
                             if (self._smart_play_active()
                                     and completed is None and self._prediction_target is None
                                     and self.detector.state.name == "ROUND_IN_PROGRESS"):
@@ -403,7 +426,13 @@ class MonitorWorker(QThread):
                                     # خروج اضطراری کالیبراسیون روی هدف کش‌اوت اعمال
                                     # می‌شود، نه فقط در متن پرامپت.
                                     cashout = self._guard.cap_cashout(cashout)
-                                clicker.set_smart_play(ready.bets if ready else (), cashout)
+                                advice = self._take_advice()
+                                if advice is not None:
+                                    # پیشنهاد صریح «تحلیل قبل از دست» بر تصمیم
+                                    # خودکار اولویت دارد؛ هدف خروج از تنظیمات می‌آید.
+                                    clicker.set_smart_play(advice[0], advice[1])
+                                else:
+                                    clicker.set_smart_play(ready.bets if ready else (), cashout)
                                 # A frame captured before the round ended may still be
                                 # undergoing OCR. Allow it to finish before settling.
                                 if win_future is not None and clicker._cashout_attempted:

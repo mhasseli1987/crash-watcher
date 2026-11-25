@@ -21,3 +21,4 @@ tools/*
 !tools/release.py
 sample-fullscreen.png
 # فایل اجرایی نهایی با git add -f ثبت می‌شود؛ وابستگی‌ها و تنظیمات محلی خصوصی‌اند.
+history.csv

@@ -487,7 +487,10 @@ class AutoClicker:
                 return ClickReport(False, "cashout unconfirmed: check site and restart monitoring",
                                    count=self._clicks)
             self._pending_rule = None
-            hit = (bool(target_colors) and color in target_colors) if turnbal else self._cashout_confirmed
+            # حالت کلاسیک مدل رنگ ندارد: هم پیام تأیید سایت و هم بسته‌شدن روشن
+            # دست‌کم ۲٪ بالای ضریب کلیک، برد کش‌اوت است.
+            hit = ((bool(target_colors) and color in target_colors) if turnbal
+                   else bool(target_colors) and settled)
             if hit:
                 self._rule_stats.setdefault(rule, [0, 0])[0] += 1
             outcome = None

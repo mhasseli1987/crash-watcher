@@ -84,7 +84,10 @@ def predict(settings: DesktopSettings, prompt: str) -> SmartVerdict:
                    "confidence": {"type": "number", "minimum": 0, "maximum": 1},
                    "reason": {"type": "string"}},
                    "required": ["bet", "confidence", "reason"], "additionalProperties": False},
-               "options": {"temperature": 0.2, "num_predict": 80},
+               # The reason field can run long even under the JSON schema; a
+               # budget of 80 tokens cut the JSON mid-string and every such
+               # round ended with "prediction is not JSON" instead of a verdict.
+               "options": {"temperature": 0.2, "num_predict": 260},
                "messages": [{"role": "system", "content":
                              "Return only the required JSON object. Reason at most 8 words. "
                              "If evidence is insufficient choose SKIP. Do not invent certainty."},

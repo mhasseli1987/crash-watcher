@@ -26,11 +26,15 @@ from crash_watcher.desktop.signals import row_yellow_due
 from crash_watcher.vision.recognition import RapidOCRReader
 
 @pytest.mark.parametrize("text,value", [("Bang @1.46x", "1.46"), ("Bang@7.50x", "7.50"),
-                                        ("BANG @13.05×", "13.05"), ("Bang @1.07", "1.07")])
+                                        ("BANG @13.05×", "13.05"), ("Bang @1.07", "1.07"),
+                                        ("Bang @2.87=", "2.87"), ("Bang @1.75:", "1.75"),
+                                        ("Bang @4.20*", "4.20")])
 def test_bang_parser(text, value):
     assert parse_bang(text) == Decimal(value)
 
-@pytest.mark.parametrize("text", ["Starts in 4.4 s", "1.27x", "Payout 10x", "1.8x", "Bang @1O.OOx", "Bang @1..46x"])
+@pytest.mark.parametrize("text", ["Starts in 4.4 s", "1.27x", "Payout 10x", "1.8x", "Bang @1O.OOx",
+                                  "Bang @1..46x", "Bang @2.87==", "Bang @2.8=",
+                                  "Bang @2.870", "Bang @@2.87x"])
 def test_bang_rejects_live_countdown_and_labels(text):
     assert parse_bang(text) is None
 
@@ -115,35 +119,33 @@ def test_final_result_lifecycle_and_duplicate_guard():
     for i in range(11, 15):
         assert detector.observe(_image(30), _reading("10.00"), now+timedelta(seconds=i)) is None
 
+def _bang_until_stable(detector, now, value="10.00"):
+    """دو فریم خالی و دو فریم Bang تا شمارش پایداری کامل شود."""
+    detector.observe(_image(0), _reading(None), now)
+    detector.observe(_image(0), _reading(None), now)
+    detector.observe(_image(30), _reading(value), now)
+    return detector.observe(_image(30), _reading(value), now)
+
 def test_history_confirmation_and_strategy_handoff():
     detector = BangDetector(stable_frames=2, absent_frames=2)
     strategy = StrategyEngine(StrategyConfig())
     now = datetime(2026, 1, 1, tzinfo=timezone.utc)
-    detector.observe(_image(0), _reading(None), now)
-    detector.observe(_image(0), _reading(None), now)
-    detector.observe(_image(30), _reading("10.00"), now)
-    detector.observe(_image(30), _reading("10.00"), now)
-    assert detector.observe(_image(30), _reading("10.00"), now,
-                            "9342414", Decimal("9.99"), True) is None
+    assert _bang_until_stable(detector, now) is None
     confirmed = detector.observe(_image(30), _reading("10.00"), now,
-                                 "9342414", Decimal("10.00"), True)
+                                 "9342414", Decimal("10.00"))
     assert confirmed and confirmed.round_id == "game-9342414"
     assert strategy.process_round(confirmed.round_id, confirmed.multiplier).cycle_triggered
     assert strategy.process_round(confirmed.round_id, confirmed.multiplier).duplicate
 
-def test_history_can_confirm_after_bang_changes_to_countdown():
+def test_mismatched_history_badge_never_delays_the_round():
     detector = BangDetector(stable_frames=2, absent_frames=2)
     now = datetime(2026, 1, 1, tzinfo=timezone.utc)
-    detector.observe(_image(0), _reading(None), now)
-    detector.observe(_image(0), _reading(None), now)
-    detector.observe(_image(30), _reading("2.89"), now, "9342414", Decimal("1.44"), True)
-    detector.observe(_image(30), _reading("2.89"), now, "9342414", Decimal("1.44"), True)
-    assert detector.observe(_image(30), _reading("2.89"), now,
-                            "9342414", Decimal("1.44"), True) is None
-    confirmed = detector.observe(_image(0), _reading(None), now,
-                                 "9342415", Decimal("2.89"), True)
-    assert confirmed and confirmed.round_id == "game-9342415"
-    assert confirmed.multiplier == Decimal("2.89")
+    assert _bang_until_stable(detector, now) is None
+    # نوار تاریخچه هنوز به‌روز نشده: دست بدون هیچ انتظاری با شناسهٔ بصری ثبت می‌شود.
+    confirmed = detector.observe(_image(30), _reading("10.00"), now,
+                                 "9342414", Decimal("9.99"))
+    assert confirmed and confirmed.round_id.startswith("visual-")
+    assert confirmed.multiplier == Decimal("10.00")
 
 def test_settings_roundtrip_and_validation(tmp_path):
     path = tmp_path / "settings.json"
@@ -431,6 +433,16 @@ def test_win_message_from_current_multiplier_reference():
     img = cv2.imread(str(Path(__file__).resolve().parents[1] / "assets/cashout-you-won-reference.png"))
     assert has_win_message(detected_lines(RapidOCR(), img))
 
+def test_win_message_split_into_separate_lines_still_confirms():
+    """OCR واقعی «You Won» را دو خط جدا می‌خواند؛ باید باز هم برد شناخته شود."""
+    import cv2
+    from rapidocr import RapidOCR
+    from crash_watcher.desktop.worker import detected_lines, has_win_message
+    img = cv2.imread(str(Path(__file__).resolve().parents[1] / "assets/you-won-doge-reference.png"))
+    lines = detected_lines(RapidOCR(), img)
+    assert [text for text, _ in lines][:2] == ["You", "Won"]
+    assert has_win_message(lines)
+
 
 @pytest.mark.parametrize("losses", [1, 2, 3, 4])
 def test_win_at_each_doubling_level_returns_to_base(no_detection, losses):
@@ -550,19 +562,6 @@ def test_dry_run_reports_the_click_but_never_sends_it(no_detection):
 
 
 
-def test_history_timeout_confirms_a_stable_bang():
-    detector = BangDetector(stable_frames=2, absent_frames=2, history_timeout_frames=2)
-    now = datetime(2026, 1, 1, tzinfo=timezone.utc)
-    detector.observe(_image(0), _reading(None), now)
-    detector.observe(_image(0), _reading(None), now)
-    detector.observe(_image(30), _reading("12.00"), now, "111", Decimal("1.00"), True)
-    detector.observe(_image(30), _reading("12.00"), now, "111", Decimal("1.00"), True)
-    assert detector.observe(_image(30), _reading("12.00"), now,
-                            "111", Decimal("1.00"), True) is None
-    confirmed = detector.observe(_image(30), _reading("12.00"), now,
-                                 "111", Decimal("1.00"), True)
-    assert confirmed and confirmed.multiplier == Decimal("12.00")
-    assert confirmed.round_id.startswith("visual-")
 
 def test_confirmed_round_reaches_click_through_detector_and_strategy(no_detection):
     """Same sequence MonitorWorker.run() performs per frame: detect, strategy, click."""
@@ -899,6 +898,23 @@ def test_dry_run_cashout_does_not_send_a_click(no_detection):
     clicker.tick(Decimal("1.45"))
     clicker.tick(Decimal("1.60"))
     assert sender.calls == []
+
+
+def test_classic_cashout_two_percent_above_the_click_counts_as_a_win(no_detection):
+    """بسته‌شدن دست ۲٪ بالای ضریب کلیک، بدون پیام سایت هم برد است."""
+    sender = _Sender()
+    clicker = AutoClicker(_clicker(bot_mode="classic", bet_region=Region(1, 100, 200, 300, 40),
+                                   cashout_enabled=True), sender=sender)
+    clicker.set_smart_play(("PLAY",))
+    assert clicker.fire("r1", Decimal("2.20")).clicked
+    clicker.tick(Decimal("1.30"))
+    clicker.tick(Decimal("1.45"))
+    assert clicker._cashout_attempt_multiplier == Decimal("1.45")
+    assert clicker._cashout_settled(Decimal("1.46")) is False
+    assert clicker._cashout_settled(Decimal("1.48")) is True
+    clicker.set_smart_play(("PLAY",))
+    assert clicker.fire("r2", Decimal("1.54")).clicked
+    assert clicker._rule_stats["smart-play"] == [1, 2]
 
 
 def test_bankroll_stops_the_session_after_the_loss_limit(no_detection):

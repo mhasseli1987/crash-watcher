@@ -88,7 +88,12 @@ class SmartPlanner:
     # -- prepare / consume ---------------------------------------------
     def store(self, verdict: SmartVerdict | None, prepared_after: str | None) -> None:
         """نتیجهٔ مدل را نگه دار تا سر بسته‌شدن ضریبِ بعدی استفاده شود."""
-        if verdict is None or verdict.bet == "SKIP":
+        if verdict is None:
+            # پاسخ مدل نرسیده؛ تصمیم قبلی تا سقف max_stale_rounds معتبر می‌ماند
+            # و decision() خودش کهنگی را رد می‌کند. پاک‌کردنش این‌طور دست‌های
+            # متوالی را بی‌دلیل بی‌تصمیم می‌گذاشت.
+            return
+        if verdict.bet == "SKIP":
             self._ready = None
             return
         bets = verdict.bets

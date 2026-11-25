@@ -35,6 +35,19 @@ def test_learning_phase_blocks_bets_then_trading_allows_them():
     assert planner.decision() is None  # تصمیم هر بار یک‌بار مصرف می‌شود
 
 
+def test_missing_answer_keeps_previous_decision_until_it_goes_stale():
+    clock = _Clock()
+    planner = SmartPlanner(learning_minutes=0, min_confidence=0.40, clock=clock)
+    planner.store(SmartVerdict("GREEN", 0.80, "روند"), "1")
+    planner.store(None, "2")  # پاسخ مدل دیر رسید؛ تصمیم قبلی باید بماند
+    decision = planner.take()
+    assert decision is not None and decision.bets == ("GREEN",)
+    planner.store(SmartVerdict("GREEN", 0.80, "روند"), "3")
+    for round_id in ("3", "4", "5"):
+        planner.observe(round_id, "GREEN")
+    assert planner.decision() is None  # بعد از سه دور کهنه است
+
+
 def test_low_confidence_and_skip_do_not_bet():
     planner = SmartPlanner(learning_minutes=0, min_confidence=0.40, clock=_Clock())
     planner.store(SmartVerdict("RED", 0.39, "شک"), "1")
