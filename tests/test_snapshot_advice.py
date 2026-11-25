@@ -44,7 +44,7 @@ def test_invalid_answers_rejected(raw):
     ('{"color":"YELLOW","multiplier":5}', "YELLOW")])
 def test_bad_multiplier_never_rejects_the_colour(raw, color):
     """ضریب مدل در کلیک/کش‌اوت استفاده نمی‌شود؛ ناسازگاری آن رنگ را باطل نمی‌کند."""
-    parsed, value, _ = advice.parse_advice(raw)
+    parsed, value, _, _ = advice.parse_advice(raw)
     assert parsed == color and value is None
 
 
@@ -72,12 +72,78 @@ def test_one_request_after_read_and_stale_result(monkeypatch, changed):
     monkeypatch.setattr(advice, "request_advice", ask)
     worker.done.connect(results.append)
     worker.failed.connect(errors.append)
-    worker.advice.connect(lambda color, value: advice_events.append((color, value)))
+    worker.advice.connect(lambda color, value, confidence: advice_events.append((color, value)))
     worker.run()
     assert events == ["read", "ask"]
     assert advice_events == [("UNKNOWN", None)]
     assert not errors and len(results) == 1
     assert ("قدیمی است" in results[0]) == changed
+
+
+def test_model_confidence_and_persian_colour_are_accepted():
+    """مدل باید احتمال بدهد؛ درصد و نام فارسی رنگ هم پذیرفته می‌شود."""
+    color, value, _, confidence = advice.parse_advice(
+        '{"color":"سبز","confidence":"45%","multiplier":2.4,"reason":"روند"}')
+    assert (color, value, confidence) == ("GREEN", 2.4, 0.45)
+    assert advice.parse_advice('{"color":"RED"}')[3] == 0.0
+    assert advice.parse_advice('{"color":"red","confidence":1.2}')[3] == 1.0
+
+
+def test_local_model_is_asked_before_the_cloud_route(monkeypatch):
+    """حتی در حالت hybrid تحلیل از مدل محلی گرفته می‌شود."""
+    from dataclasses import replace
+    settings = replace(DesktopSettings(), ai_provider="hybrid", ollama_enabled=True,
+                       smart_review_enabled=True)
+    calls = []
+    monkeypatch.setattr(advice, "_ask_local",
+                        lambda *args: calls.append("local") or '{"color":"RED"}')
+    monkeypatch.setattr(advice, "ask", lambda *args, **kwargs: calls.append("cloud") or "{}")
+    assert advice.request_advice(settings, "prompt") == '{"color":"RED"}'
+    assert calls == ["local"]
+
+
+def test_low_confidence_advice_never_arms_a_click():
+    """زیر ۴۰٪ شرط بسته نمی‌شود؛ از ۴۰٪ به بالا رنگ برای دست جدید ثبت می‌شود."""
+    from types import SimpleNamespace
+    from crash_watcher.desktop.ui import MainWindow
+    submitted, texts = [], []
+    window = SimpleNamespace(
+        settings=DesktopSettings(),
+        snapshot_output=SimpleNamespace(appendPlainText=texts.append),
+        worker=SimpleNamespace(isRunning=lambda: True, submit_advice=submitted.append))
+    MainWindow._snapshot_advice_ready(window, "RED", 1.5, 0.39)
+    assert submitted == [] and "کمتر" in texts[-1]
+    MainWindow._snapshot_advice_ready(window, "RED", 1.5, 0.40)
+    assert submitted == ["RED"]
+
+
+def test_red_streak_is_counted_from_the_newest_rounds():
+    reds = advice.HistorySnapshot((("1.20", "RED"),), (),
+                                 ("GREEN", "RED", "RED", "RED", "RED"))
+    assert advice.red_run(reds) == 4
+    changed = advice.HistorySnapshot((("1.20", "RED"), ("2.50", "GREEN")), (),
+                                     ("RED", "GREEN"))
+    assert advice.red_run(changed) == 0
+    extended = advice.HistorySnapshot((("1.10", "RED"),), (), ("RED", "RED"))
+    assert advice.red_run(extended) == 2
+
+
+def test_red_streak_snapshot_skips_the_model(monkeypatch):
+    """چهار قرمز پیاپی: مدل پرسیده نمی‌شود و توقف یک‌دقیقه‌ای اعلام می‌شود."""
+    worker = advice.SnapshotAdviceWorker(DesktopSettings())
+    frames = [np.zeros((2, 2, 3), dtype=np.uint8)] * 2
+    monkeypatch.setattr(worker, "capture_regions", lambda: frames)
+    monkeypatch.setattr(advice, "RapidOCRReader", lambda: None)
+    monkeypatch.setattr(advice, "warm_local", lambda *args: True)
+    monkeypatch.setattr(advice, "read_snapshot", lambda *args: advice.HistorySnapshot(
+        (("1.10", "RED"),), (), ("RED", "RED", "RED", "RED")))
+    monkeypatch.setattr(advice, "request_advice",
+                        lambda *args: pytest.fail("model must not be asked during a red run"))
+    paused, advice_events = [], []
+    worker.paused.connect(paused.append)
+    worker.advice.connect(lambda *args: advice_events.append(args))
+    worker.run()
+    assert advice_events == [] and "60" in paused[0] and "قرمز" in paused[0]
 
 
 def test_advice_reaches_the_click_decision(tmp_path):

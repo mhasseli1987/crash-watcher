@@ -261,6 +261,30 @@ def test_classic_loss_doubles_once_and_confirmed_win_resets(no_detection):
     assert clicker.fire("r3", Decimal("1.55")).clicked
     assert clicker.double_level == 0 and sender.calls[-2:] == [(30, 40, True), (250, 220, True)]
 
+def test_red_streak_hold_blocks_new_bets_and_keeps_doubling(no_detection):
+    """توقف قرمزهای پیاپی: شرط تازه بسته نمی‌شود و دوبلکردن از دست نمی‌رود."""
+    sender = _Sender()
+    settings = _clicker(bot_mode="classic", bet_region=Region(1, 100, 200, 300, 40),
+                        cashout_enabled=True, double_bet_enabled=True,
+                        double_bet_point=(10, 20), halve_bet_point=(30, 40))
+    clicker = AutoClicker(settings, sender=sender)
+    clicker.set_smart_play(("PLAY",))
+    assert clicker.fire("r1", Decimal("2.20")).clicked
+    clicker.set_smart_play(("PLAY",))
+    assert clicker.fire("r2", Decimal("1.20")).clicked  # باخت دست اول → دوبل
+    assert clicker.double_level == 1
+    sent = list(sender.calls)
+    clicker.hold_clicks(60, "red streak")
+    clicker.set_smart_play(("PLAY",))
+    report = clicker.fire("r3", Decimal("1.10"))
+    assert not report.clicked and "hold red streak" in report.reason
+    # تسویهٔ دو باخت در همین توقف هم شمرده شد؛ شرط تازه‌ای بسته نشد.
+    assert sender.calls == sent and clicker.double_level == 2
+    clicker.hold_clicks(0)
+    clicker.set_smart_play(("PLAY",))
+    assert clicker.fire("r4", Decimal("1.10")).stake == 40
+
+
 def test_manual_click_test_clicks_even_in_dry_run(no_detection):
     sender = _Sender()
     clicker = AutoClicker(_clicker(autoclick_dry_run=True), sender=sender)

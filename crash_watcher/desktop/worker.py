@@ -171,6 +171,14 @@ class MonitorWorker(QThread):
         with self._advice_lock:
             self._advice = (bets, None)
 
+    def hold_clicks(self, seconds: float, reason: str = "") -> bool:
+        """کلیک‌های تازه را برای این مدت متوقف کن (مثلاً قرمزهای پیاپی)."""
+        clicker = self._clicker
+        if clicker is None:
+            return False
+        clicker.hold_clicks(seconds, reason)
+        return True
+
     def _take_advice(self) -> tuple[tuple[str, ...], float | None] | None:
         with self._advice_lock:
             advice, self._advice = self._advice, None

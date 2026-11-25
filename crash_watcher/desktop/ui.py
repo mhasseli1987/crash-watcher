@@ -2,7 +2,8 @@
 from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
-from time import sleep
+from threading import Thread
+from time import monotonic, sleep
 import csv
 import cv2
 import mss
@@ -28,7 +29,8 @@ from .smart_review import (DEFAULT_BASE_URL, DEFAULT_MODEL, append_log, chat_com
                            probe_models)
 from .worker import MonitorWorker
 from .ollama_provider import installed_models
-from .snapshot_advice import SnapshotAdviceWorker, SnapshotWatchWorker
+from .snapshot_advice import (RED_PAUSE_SECONDS, SnapshotAdviceWorker, SnapshotWatchWorker,
+                              warm_local)
 
 _FA_DIGITS = str.maketrans("0123456789", "۰۱۲۳۴۵۶۷۸۹")
 
@@ -408,11 +410,14 @@ class MainWindow(QMainWindow):
         self.snapshot_auto.setChecked(True)
         layout.addWidget(self.snapshot_auto)
         self._snapshot_pending = False
+        # قرمزهای پیاپی: تا این زمان هیچ تحلیل/کلیک تازه‌ای شروع نمی‌شود.
+        self._red_hold_until = 0.0
         note = QLabel("۱. نوار ضریب‌های آخر و جدول رنگ‌ها را مشخص کنید.\n"
-                      "۲. بررسی را بزنید؛ تصویر خوانده می‌شود و مدل پیشنهاد می‌دهد.\n"
-                      "پیشنهاد تخمینی است و برای دست بعد به ربات داده می‌شود؛ کلیک با "
-                      "تنظیمات تب کلیک (مبلغ، کش‌اوت، کول‌داون) انجام می‌شود.\n"
-                      "مدل و اتصال از زبانهٔ «بررسی هوشمند» استفاده می‌شوند.")
+                      "۲. بررسی را بزنید؛ تصویر خوانده می‌شود و مدل محلی تحلیل و احتمال می‌دهد.\n"
+                      "اگر مدل حداقل ۴۰٪ احتمال بدهد که رنگش درست است، پیشنهاد نگه داشته "
+                      "می‌شود و در شروع دست جدید کلیک انجام می‌شود؛ پایین‌تر از آن دست رد "
+                      "می‌شود. مبلغ و کش‌اوت از تب کلیک می‌آیند.\n"
+                      "مدل محلی (Ollama) اول پاسخ می‌دهد؛ مسیر ابری فقط پشتیبان است.")
         note.setWordWrap(True)
         layout.addWidget(note)
         for title, target in (("انتخاب ناحیهٔ ضریب‌های آخر", "history"), ("انتخاب جدول رنگ‌ها", "chart")):
@@ -439,8 +444,23 @@ class MainWindow(QMainWindow):
         self.settings = replace(self.settings, snapshot_advice_only=enabled)
         save_settings(self.settings)
 
+    def _red_hold_active(self) -> bool:
+        return monotonic() < getattr(self, "_red_hold_until", 0.0)
+
+    def _snapshot_red_pause(self, text):
+        """قرمزهای پیاپی: یک دقیقه شرط تازه بسته نمی‌شود تا روند تغییر کند."""
+        self._red_hold_until = monotonic() + RED_PAUSE_SECONDS
+        worker = getattr(self, "worker", None)
+        if worker and worker.isRunning():
+            worker.hold_clicks(RED_PAUSE_SECONDS, "red streak")
+        self.snapshot_output.setPlainText(text)
+        QTimer.singleShot(int((RED_PAUSE_SECONDS + 1) * 1000), self.start_snapshot_advice)
+
     def start_snapshot_advice(self):
         if getattr(self, "snapshot_worker", None) and self.snapshot_worker.isRunning():
+            return
+        if self._red_hold_active():
+            # در توقف قرمزهای پیاپی، هیچ درخواست مدل یا کلیکی شروع نمی‌شود.
             return
         if self.settings.snapshot_advice_only:
             self.stop_monitoring()
@@ -470,17 +490,32 @@ class MainWindow(QMainWindow):
         self.snapshot_worker = SnapshotAdviceWorker(self.settings)
         self.snapshot_worker.captured.connect(self.snapshot_output.setPlainText)
         self.snapshot_worker.advice.connect(self._snapshot_advice_ready)
+        self.snapshot_worker.paused.connect(self._snapshot_red_pause)
         self.snapshot_worker.done.connect(self._snapshot_done)
         self.snapshot_worker.failed.connect(lambda error: self.snapshot_output.setPlainText("تحلیل انجام نشد: " + error))
         self.snapshot_worker.finished.connect(self._snapshot_finished)
         self.snapshot_worker.start()
 
-    def _snapshot_advice_ready(self, color, value):
-        """پیشنهاد مدل را به پایشگر بده تا در کلیک دست بعد اعمال شود."""
+    def _snapshot_advice_ready(self, color, value, confidence=0.0):
+        """پیشنهاد مدل را به پایشگر بده تا در شروع دست جدید کلیک شود.
+
+        فقط وقتی مدل خودش حداقل ۴۰٪ احتمال می‌دهد تحلیلش درست است، شرط
+        گذاشته می‌شود؛ زیر این آستانه همان دست رد می‌شود و تحلیل دست بعد
+        دوباره گرفته می‌شود.
+        """
         worker = getattr(self, "worker", None)
         if color not in ("RED", "GREEN", "YELLOW"):
             self.snapshot_output.appendPlainText(
                 "مدل رنگ مشخصی نداد؛ برای دست بعد کلیکی انجام نمی‌شود.")
+            return
+        minimum = max(0.40, float(self.settings.smart_play_min_confidence))
+        if confidence < minimum:
+            append_log(PROJECT_ROOT / "logs" / "snapshot-advice.jsonl",
+                       {"time": datetime.now().isoformat(timespec="seconds"),
+                        "skipped_low_confidence": color, "confidence": confidence})
+            self.snapshot_output.appendPlainText(
+                f"احتمال خود مدل {confidence:.0%} است و از {minimum:.0%} کمتر؛ برای این دست "
+                "کلیک نمی‌شود. با شروع دست بعد تحلیل تازه گرفته می‌شود.")
             return
         if not (worker and worker.isRunning()):
             self.snapshot_output.appendPlainText(
@@ -489,10 +524,11 @@ class MainWindow(QMainWindow):
         worker.submit_advice(color)
         append_log(PROJECT_ROOT / "logs" / "snapshot-advice.jsonl",
                    {"time": datetime.now().isoformat(timespec="seconds"),
-                    "submitted_for_next_round": color})
+                    "submitted_for_next_round": color, "confidence": confidence})
         name = {"RED": "نارنجی/قرمز", "GREEN": "سبز", "YELLOW": "زرد"}[color]
         self.snapshot_output.appendPlainText(
-            f"پیشنهاد {name} برای دست بعد به ربات داده شد؛ کلیک طبق تنظیمات کلیک انجام می‌شود.")
+            f"پیشنهاد {name} با احتمال {confidence:.0%} ثبت شد؛ کلیک در شروع دست جدید "
+            "طبق تنظیمات تب کلیک انجام می‌شود.")
 
     def _snapshot_changed(self):
         self._snapshot_pending = True
@@ -1566,6 +1602,11 @@ class MainWindow(QMainWindow):
         self.showMinimized()
         if (self.snapshot_auto.isChecked() and self.settings.history_region
                 and self.settings.chart_region):
+            # مدل محلی هم‌زمان با شروع پایش در حافظه بارگذاری می‌شود تا اولین
+            # تحلیل هم در چند ثانیه آماده باشد، نه پس از یک بارگذاری سرد.
+            if self.settings.ollama_enabled or self.settings.ai_provider == "local":
+                settings = self.settings
+                Thread(target=warm_local, args=(settings,), daemon=True).start()
             # تحلیل قبل از دست با شروع پایش خودکار شروع می‌شود تا دست‌ها بی‌تصمیم نمانند.
             QTimer.singleShot(0, self.start_snapshot_advice)
         self._refresh()

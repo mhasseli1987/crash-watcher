@@ -15,11 +15,27 @@ from PySide6.QtCore import QThread, Signal
 
 from .color_grid import _centres, read_grid
 from .config import PROJECT_ROOT
-from .smart_review import ask, _json_object, append_log
+from .smart_review import ask, _json_object, append_log, _COLOR_ALIASES
 from crash_watcher.vision.capture import ScreenCapture
 from crash_watcher.vision.recognition import RapidOCRReader
 
 NAMES = {"RED": "نارنجی / قرمز", "GREEN": "سبز", "YELLOW": "زرد", "UNKNOWN": "نامشخص"}
+COLORS = ("RED", "GREEN", "YELLOW")
+# مدل محلی پاسخ را در ۲ ثانیه می‌دهد؛ سقف کوتاه، مسیر ابری را از معادله خارج می‌کند.
+LOCAL_ADVICE_TIMEOUT_S = 12.0
+# قرمزهای پیاپی یعنی احتمال باخت بالا: یک دقیقه شرط تازه بسته نمی‌شود تا
+# روند تغییر کند؛ این آستانه از جدول و نوار ضرایب خوانده می‌شود.
+RED_STREAK_LIMIT = 4
+RED_PAUSE_SECONDS = 60.0
+ADVICE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "color": {"type": "string", "enum": list(COLORS)},
+        "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+        "multiplier": {"type": ["number", "null"], "minimum": 1},
+        "reason": {"type": "string", "maxLength": 120}},
+    "required": ["color", "confidence", "multiplier", "reason"],
+    "additionalProperties": False}
 
 
 @dataclass(frozen=True)
@@ -34,6 +50,22 @@ class HistorySnapshot:
         return "ضریب‌های آخر، چپ به راست: " + recent + "\nجدول: " + "، ".join(
             f"{NAMES[c]}: {n}" for c, n in counts.items()) + "\nرنگ‌ها، قدیمی به جدید: " + " ← ".join(
                 NAMES[c] for c in self.sequence)
+
+
+def red_run(snapshot):
+    """چند دور پیاپی آخر قرمز (کمتر از ۲) بوده است.
+
+    هر دو منبع چک می‌شوند و بیشترین دیده‌شده برگردانده می‌شود؛ هیچ‌کدام
+    بیش از طول خودش شمرده نمی‌شود، پس برآورد بالا نمی‌رود.
+    """
+    def trailing(colors):
+        run = 0
+        for color in reversed(tuple(colors)):
+            if color != "RED":
+                break
+            run += 1
+        return run
+    return max(trailing(snapshot.sequence), trailing([c for _, c in snapshot.recent]))
 
 
 def _walk_chart(board, rows):
@@ -125,43 +157,110 @@ def build_advice_prompt(snapshot):
         "RED means an outcome multiplier <2x, "
         "GREEN is >=2x and <10x, YELLOW is >=10x. Past outcomes do not establish "
         "predictability or calibrated probabilities. Never claim guaranteed profit. "
-        "Give a tentative color and multiplier estimate only if justified, otherwise UNKNOWN "
-        "and null. Multiplier is a guessed final result, NOT a cashout target. "
+        "Always name the single most likely colour of the three; do not answer UNKNOWN "
+        "while any history is supplied. confidence is your own probability from 0 to 1 "
+        "that this colour really is the next outcome: give it honestly and use 0.4 or more "
+        "only when the supplied pattern supports that colour. "
+        "Give a multiplier only if justified, otherwise null. Multiplier is a guessed final "
+        "result, NOT a cashout target. "
         "10x refers to multiplier value, NEVER the number of cells or run length. "
         "These two images may represent different moments: never assume they match. "
-        "Write reason in Persian only, twelve words at most. Return JSON only: {\"color\":\"RED|GREEN|YELLOW|UNKNOWN\","
-        "\"multiplier\":null,\"reason\":\"short Persian explanation\"}.\n"
+        "Write reason in Persian only, seven words at most. Return JSON only: {\"color\":\"RED|GREEN|YELLOW\","
+        "\"confidence\":0.0,\"multiplier\":null,\"reason\":\"short Persian explanation\"}.\n"
         + json.dumps({"recent": snapshot.recent,
                       "chart_oldest_to_newest": snapshot.sequence}, ensure_ascii=False)
     )
 
 
-def request_advice(settings, prompt, schema=None):
-    if settings.ai_provider != "local":
-        return ask(settings.smart_review_url, settings.resolved_key(), settings.smart_review_model,
-                   prompt, settings.smart_review_timeout_s,
-                   system="Analyze supplied data only. Return the requested JSON. No tools or actions.")
-    schema = schema or {"type": "object", "properties": {
-        "color": {"type": "string", "enum": list(NAMES)},
-        "multiplier": {"type": ["number", "null"], "minimum": 1},
-        "reason": {"type": "string", "maxLength": 120}},
-        "required": ["color", "multiplier", "reason"], "additionalProperties": False}
+def warm_local(settings):
+    """مدل محلی را پیش از تحلیل در حافظه بگذار.
+
+    بارگذاری سرد مدل چند ثانیه است و اگر با همان مهلت کوتاه تحلیل انجام
+    شود، درخواست به مسیر ابری می‌افتد؛ یک گرم‌کردن یک‌باره این را حل می‌کند.
+    """
+    if not (settings.ollama_enabled or settings.ai_provider == "local"):
+        return False
+    payload = {"model": settings.ollama_model, "stream": False, "think": False,
+               "keep_alive": settings.ollama_keep_alive, "options": {"num_predict": 1},
+               "messages": [{"role": "user", "content": "."}]}
+    call = request.Request(settings.ollama_base_url.rstrip("/") + "/api/chat",
+                           data=json.dumps(payload).encode("utf-8"),
+                           headers={"Content-Type": "application/json"}, method="POST")
+    try:
+        with request.urlopen(call, timeout=max(settings.ollama_timeout_ms / 1000,
+                                               LOCAL_ADVICE_TIMEOUT_S)) as response:
+            json.load(response)
+    except Exception:
+        return False
+    return True
+
+
+def _ask_local(settings, prompt, schema):
     payload = {"model": settings.ollama_model, "stream": False, "think": False,
                "format": schema, "keep_alive": settings.ollama_keep_alive,
-               "options": {"temperature": 0.2, "num_predict": 160},
+               # طول پاسخ همان هزینهٔ زمانی است: با ۶۴ توکن پاسخ کامل و سالم
+               # در حدود ۳ ثانیه می‌رسد؛ با ۳۲ توکن JSON نیمه‌کاره می‌ماند.
+               "options": {"temperature": 0.2, "num_predict": 64},
                "messages": [{"role": "user", "content": prompt}]}
     call = request.Request(settings.ollama_base_url.rstrip("/") + "/api/chat",
                            data=json.dumps(payload).encode("utf-8"),
                            headers={"Content-Type": "application/json"}, method="POST")
-    with request.urlopen(call, timeout=settings.ollama_timeout_ms / 1000) as response:
+    timeout = min(settings.ollama_timeout_ms / 1000, LOCAL_ADVICE_TIMEOUT_S)
+    with request.urlopen(call, timeout=timeout) as response:
         return json.load(response)["message"]["content"]
+
+
+def request_advice(settings, prompt, schema=None):
+    """مدل محلی اول جواب می‌دهد؛ مسیر ابری فقط پشتیبان است.
+
+    در حالت hybrid درخواست‌های این تب پیش‌تر به مسیر ابری می‌رفتند و ۱۲ تا ۳۸
+    ثانیه طول می‌کشیدند یا ۵۰۲ می‌دادند؛ همان مدل محلی همیشه آماده است و پاسخ
+    را در حدود دو ثانیه برمی‌گرداند، پس تحلیل قبل از دست همیشه محلی است و
+    ابری فقط وقتی محلی خطا بدهد و کاربر local را انتخاب نکرده باشد.
+    """
+    schema = schema or ADVICE_SCHEMA
+    if settings.ollama_enabled or settings.ai_provider == "local":
+        try:
+            return _ask_local(settings, prompt, schema)
+        except Exception:
+            if settings.ai_provider == "local" or not settings.smart_review_enabled:
+                raise
+    return ask(settings.smart_review_url, settings.resolved_key(), settings.smart_review_model,
+               prompt, settings.smart_review_timeout_s,
+               system="Analyze supplied data only. Return the requested JSON. No tools or actions.")
+
+
+def _confidence(data):
+    """احتمال خود مدل که رنگ درست است؛ نبودش یعنی هیچ ادعایی ندارد."""
+    raw = data.get("confidence", data.get("probability"))
+    text = str(raw).strip()
+    percent = "%" in text
+    try:
+        value = float(text.replace("%", "").strip())
+    except (TypeError, ValueError):
+        return 0.0
+    if not math.isfinite(value):
+        return 0.0
+    if percent:
+        value /= 100
+    elif value > 1:
+        # ۴۵ یعنی ۴۵٪؛ عددی مثل ۱٫۲ احتمال بی‌معناست و به سقف بسته می‌شود.
+        value = value / 100 if value >= 10 else 1.0
+    return min(1.0, max(0.0, value))
 
 
 def parse_advice(raw):
     data = _json_object(raw)
-    if not data or data.get("color") not in NAMES:
+    if not data:
+        raise ValueError("پاسخ مدل JSON قابل خواندن نبود.")
+    text = str(data.get("color", data.get("bet", data.get("choice", "")))).strip()
+    color = _COLOR_ALIASES.get(text.lower(), _COLOR_ALIASES.get(text, text.upper()))
+    if color == "SKIP":
+        color = "UNKNOWN"
+    if color not in NAMES:
         raise ValueError("پاسخ مدل رنگ معتبر ندارد.")
-    color, value = data["color"], data.get("multiplier")
+    confidence = _confidence(data)
+    value = data.get("multiplier")
     # ضریب مدل فقط تخمین نتیجهٔ نهایی است و هیچ‌جای کلیک/کش‌اوت استفاده نمی‌شود؛
     # پس عدد نامعتبر یا ناسازگار با رنگ، خود رنگ را باطل نمی‌کند.
     if value is not None and (type(value) not in (int, float)
@@ -174,12 +273,13 @@ def parse_advice(raw):
     reason = data.get("reason", "")
     if not isinstance(reason, str):
         raise ValueError("توضیح مدل معتبر نیست.")
-    return color, value, reason
+    return color, value, reason, confidence
 
 
 class SnapshotAdviceWorker(QThread):
     captured = Signal(str)
-    advice = Signal(str, object)  # رنگ و ضریب پیشنهادی برای دست بعد
+    advice = Signal(str, object, float)  # رنگ، ضریب تخمینی و احتمال خود مدل
+    paused = Signal(str)  # قرمزهای پیاپی: توقف کلیک تا تغییر روند
     done = Signal(str)
     failed = Signal(str)
 
@@ -212,22 +312,36 @@ class SnapshotAdviceWorker(QThread):
     def run(self):
         started = perf_counter()
         try:
+            warm_local(self.settings)
             frames, snapshot = self.read_with_retry()
             stamp = datetime.now().strftime("%H:%M:%S")
+            streak = red_run(snapshot)
+            if streak >= RED_STREAK_LIMIT:
+                # مدل لازم نیست: قاعده‌ها می‌گویند با این‌همه قرمز پیاپی، شرط
+                # بستن در این یک دقیقه بد است. تا تغییر روند کلیک نمی‌شود.
+                append_log(PROJECT_ROOT / "logs" / "snapshot-advice.jsonl",
+                           {"time": stamp, "red_streak": streak,
+                            "paused_seconds": RED_PAUSE_SECONDS, "error": ""})
+                self.paused.emit(
+                    snapshot.text() + f"\nزمان عکس: {stamp}\n"
+                    f"{streak} دور پیاپی قرمز بوده؛ احتمال باخت بالا است. کلیک تازه برای "
+                    f"{int(RED_PAUSE_SECONDS)} ثانیه متوقف شد تا روند تغییر کند.")
+                return
             self.captured.emit(snapshot.text() + f"\nزمان عکس: {stamp} — منتظر پاسخ مدل…")
             raw = request_advice(self.settings, build_advice_prompt(snapshot))
             try:
-                color, value, reason = parse_advice(raw)
+                color, value, reason, confidence = parse_advice(raw)
             except ValueError as exc:
                 raise ValueError(f"{exc} پاسخ خام: {raw[:160]!r}") from exc
-            self.advice.emit(color, float(value) if value is not None else None)
+            value = float(value) if value is not None else None
+            self.advice.emit(color, value, confidence)
             append_log(PROJECT_ROOT / "logs" / "snapshot-advice.jsonl",
-                       {"time": stamp, "color": color,
-                        "multiplier": float(value) if value is not None else None,
+                       {"time": stamp, "color": color, "multiplier": value,
+                        "confidence": confidence,
                         "seconds": round(perf_counter() - started, 2), "error": ""})
             after = self.capture_regions()
             stale = any(not np.array_equal(a, b) for a, b in zip(frames, after))
-            result = (f"رنگ تخمینی: {NAMES[color]} | ضریب تخمینی: "
+            result = (f"رنگ تخمینی: {NAMES[color]} | احتمال مدل: {confidence:.0%} | ضریب تخمینی: "
                       + (f"{value:.2f}x" if value is not None else "نامشخص") + "\n" + reason)
             self.done.emit(snapshot.text() + f"\nزمان عکس: {stamp}\n" + result + "\n"
                            + ("تاریخچه هنگام تحلیل تغییر کرد؛ این پیشنهاد قدیمی است. دوباره بررسی کنید." if stale else

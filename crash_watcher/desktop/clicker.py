@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 from time import monotonic, sleep
@@ -143,6 +143,9 @@ class AutoClicker:
         # «2 /2»: هر باخت یک دوبل و هر برد یک برگشت به مبلغ پایه.
         self._double_level = 0
         self._double_clicks = 0
+        # توقف کلیکِ تازه (مثل قرمزهای پیاپی)؛ شرط باز و کش‌اوت را نمی‌بندد.
+        self._hold_until: datetime | None = None
+        self._hold_reason = ""
         self._halve_clicks = 0
         self._cashout_target: Decimal | None = None
         self._cashout_points: list[tuple[int, int]] = []
@@ -206,6 +209,17 @@ class AutoClicker:
     def balance(self) -> float | None:
         """موجودی سرمایهٔ جلسه؛ None یعنی استاپ‌لاس خاموش است."""
         return self.bankroll.balance if self.bankroll is not None else None
+
+    def hold_clicks(self, seconds: float, reason: str = "") -> None:
+        """تا این مدت هیچ شرط تازه‌ای بسته نشود؛ تسویه و کش‌اوت دست نمی‌خورند."""
+        self._hold_until = datetime.now(timezone.utc) + timedelta(seconds=max(0.0, float(seconds)))
+        self._hold_reason = reason
+
+    def hold_remaining(self) -> float:
+        """چند ثانیه از توقف کلیک مانده است."""
+        if self._hold_until is None:
+            return 0.0
+        return max(0.0, (self._hold_until - datetime.now(timezone.utc)).total_seconds())
 
     def _stake(self) -> float:
         """مبلغ این شرط: مبلغ پایه ضرب در دوبل‌های جبران باخت."""
@@ -539,6 +553,11 @@ class AutoClicker:
             # a trend that keeps going, so the same colour is bet for ten rounds.
             self._streak_clicks = self.settings.streak_signal_clicks
             self._streak_target = color
+        remaining_hold = self.hold_remaining()
+        if remaining_hold > 0:
+            # توقف کلیک: شرط قبلی همین بالاتر تسویه شد، اما شرط تازه بسته نمی‌شود.
+            return ClickReport(False, f"hold {self._hold_reason}: {remaining_hold:.0f}s left",
+                               count=self._clicks, remaining=self._armed)
         reading = self._chart_reading() if turnbal else None
         row_gap = self.settings.row_signal_gap
         row_due = (turnbal and self.settings.row_signal_enabled
