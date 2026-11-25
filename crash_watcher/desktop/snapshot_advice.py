@@ -315,7 +315,10 @@ class SnapshotAdviceWorker(QThread):
             warm_local(self.settings)
             frames, snapshot = self.read_with_retry()
             stamp = datetime.now().strftime("%H:%M:%S")
-            streak = red_run(snapshot)
+            # توقف قرمزهای پیاپی برای بازی رنگ ترنبال است؛ در کلاسیک «قرمز»
+            # فقط یعنی ضریب زیر ۲ که نیمی از دست‌هاست و این توقف ربات را یک دست
+            # در میان می‌خواباند.
+            streak = red_run(snapshot) if self.settings.bot_mode == "turnbal" else 0
             if streak >= RED_STREAK_LIMIT:
                 # مدل لازم نیست: قاعده‌ها می‌گویند با این‌همه قرمز پیاپی، شرط
                 # بستن در این یک دقیقه بد است. تا تغییر روند کلیک نمی‌شود.

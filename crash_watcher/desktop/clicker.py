@@ -730,21 +730,19 @@ class AutoClicker:
             ok = self.sender(point[0], point[1],
                              restore=self.settings.autoclick_restore_cursor) and ok
         if self.settings.cashout_enabled and (simulated or ok):
-            # شرط ثبت شد: هدفِ خروج همیشه داخل ۱٫۴۰ تا ۱٫۹۰ نگه داشته می‌شود تا
-            # هیچ شرطی از این عدد جلوتر باز نماند.
+            # شرط ثبت شد: هدفِ خروج همیشه داخل بازهٔ کاربر (تب ترنبال، پیش‌فرض
+            # ۱٫۴۰ تا ۱٫۹۰) نگه داشته می‌شود تا هیچ خروجی پایین‌تر از عددی که
+            # کاربر گذاشته کلیک نشود.
+            floor, ceiling = self._cashout_bounds()
             if rule == "low-close":
-                # دست بعد از یک بستن زیر ۱٫۱۰ تا ۱٫۹۰ صبر می‌کند؛ در حالت عادی
-                # ربات خودش ضریب خروج را داخل بازهٔ ۱٫۴۰ تا ۱٫۹۰ انتخاب می‌کند.
-                target = CASHOUT_MAX_TARGET
+                # دست بعد از یک بستن زیر ۱٫۱۰ تا سقف بازه صبر می‌کند.
+                target = ceiling
             else:
                 try:
                     target = Decimal(str(self._smart_cashout))
                 except Exception:
-                    # حالت کلاسیک مدل ندارد: «حداقل کش‌اوت» تنظیمات کاربر (تب ترنبال)
-                    # مبنای خروج است تا عدد ثابت جای تنظیمات کاربر ننشیند.
-                    target = (Decimal(str(self.settings.turnbal_cashout_min))
-                              if turnbal else CASHOUT_MIN_TARGET)
-            self._cashout_target = min(max(target, CASHOUT_MIN_TARGET), CASHOUT_MAX_TARGET)
+                    target = floor
+            self._cashout_target = min(max(target, floor), ceiling)
             self._cashout_planned_target = self._cashout_target
             self._cashout_points = [point for _, point in points]
             self._cashout_prev = None
@@ -760,6 +758,21 @@ class AutoClicker:
                            shadow=self.settings.shadow_mode, balance=self.balance,
                            stake=0.0 if simulated else self._stake(),
                            double_level=self._double_level)
+
+    def _cashout_bounds(self) -> tuple[Decimal, Decimal]:
+        """بازهٔ مجاز خروج از تنظیمات کاربر، همیشه داخل ۱٫۴۰ تا ۱٫۹۰."""
+        def number(text, default: Decimal) -> Decimal:
+            try:
+                value = Decimal(str(text))
+            except Exception:
+                return default
+            return value if value.is_finite() and value > 0 else default
+
+        floor = min(max(number(self.settings.turnbal_cashout_min, CASHOUT_MIN_TARGET),
+                        CASHOUT_MIN_TARGET), CASHOUT_MAX_TARGET)
+        ceiling = min(max(number(self.settings.turnbal_cashout_max, CASHOUT_MAX_TARGET),
+                          floor), CASHOUT_MAX_TARGET)
+        return floor, ceiling
 
     def wants_cashout(self) -> bool:
         """شرطی باز است و هنوز روی هدف خروج کلیک نشده؟"""

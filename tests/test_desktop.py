@@ -337,7 +337,8 @@ def test_classic_ignores_turnbal_rules_and_clicks_one_button(no_detection):
     assert report.clicked and report.rule == "smart-play"
     assert sender.calls == [(250, 220, True)]
     assert clicker.armed == 0 and clicker.waiting == 0
-    assert clicker._cashout_target == Decimal("1.40")
+    # خروج روی حداقل ضریبی که کاربر در تنظیمات گذاشته بسته می‌شود.
+    assert clicker._cashout_target == Decimal("1.8")
 
 
 def test_classic_does_not_click_without_a_decision(no_detection):
@@ -1126,6 +1127,24 @@ def test_advice_cashout_target_is_kept_inside_the_safe_band(no_detection):
     assert target(3.5) == Decimal("1.90")
     assert target(1.2) == Decimal("1.40")
     assert target(1.65) == Decimal("1.65")
+
+
+def test_cashout_uses_the_configured_range_not_the_model_minimum(no_detection):
+    """خروج روی ضریب‌های تنظیم‌شدهٔ کاربر کلیک می‌شود، نه ۱٫۴۰ مدل."""
+    def target(predicted, minimum="1.50", maximum="1.90"):
+        clicker = AutoClicker(_clicker(bot_mode="classic", smart_play_learning_minutes=0,
+                                       bet_region=Region(1, 100, 200, 300, 40),
+                                       cashout_enabled=True, turnbal_cashout_min=minimum,
+                                       turnbal_cashout_max=maximum), sender=_Sender())
+        clicker.set_smart_play(("PLAY",), predicted)
+        assert clicker.fire("r1", Decimal("12.00")).clicked
+        return clicker._cashout_target
+
+    assert target(1.40) == Decimal("1.50")
+    assert target(None) == Decimal("1.50")
+    assert target(1.75) == Decimal("1.75")
+    assert target(3.00) == Decimal("1.90")
+    assert target(1.20, minimum="1.65", maximum="1.80") == Decimal("1.65")
 
 
 def test_a_round_closed_below_1_10_bets_the_next_hand_until_1_90(no_detection):
