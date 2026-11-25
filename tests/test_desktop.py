@@ -3,6 +3,7 @@ from decimal import Decimal
 from pathlib import Path
 import json
 import os
+import cv2
 import numpy as np
 import pytest
 from crash_watcher import StrategyConfig, StrategyEngine
@@ -10,8 +11,8 @@ from crash_watcher.desktop.clicker import AutoClicker
 from crash_watcher.desktop.bankroll import Bankroll
 from crash_watcher.desktop.config import DesktopSettings, Region, load_settings, save_settings
 from crash_watcher.desktop.final_result import (BangDetector, BangRecognizer, FinalReading,
-                                                 newest_history_entry, parse_bang,
-                                                 parse_history_entry)
+                                                 newest_badge, newest_history_entry, parse_bang,
+                                                 parse_history_entry, rightmost_dot)
 from crash_watcher.desktop.model_compare import (ModelAttempt, ModelLeaderboard,
                                                   compare as compare_models, parse_models)
 from crash_watcher.desktop.preflight import run_preflight
@@ -167,6 +168,36 @@ def test_history_badges_pair_by_column_not_by_text_order():
     assert newest_history_entry(_Strip()) == ("9412032", Decimal("1.47"))
     assert parse_history_entry("9412030 9412031 9412032 10.78x 3.04x 1.47x") == ("9412032",
                                                                                 Decimal("10.78"))
+
+
+def _badge_strip(dot_right, width=396, height=37):
+    """نوار ضرایب ساده: یک نقطهٔ نارنجی و جای متن در سمت راست آن."""
+    strip = np.zeros((height, width, 3), dtype=np.uint8)
+    cv2.circle(strip, (dot_right - 7, height // 3), 7, (0, 120, 255), -1)
+    return strip
+
+
+def test_newest_badge_reads_the_column_right_of_the_last_dot():
+    """ستون نشان تازه: شناسهٔ بالا و ضریب پایین همان نقطه، در لبهٔ راست نوار."""
+    shapes = []
+
+    def reader(image):
+        shapes.append(image.shape)
+        return ("9412345" if len(shapes) == 1 else "2.66x"), 0.99
+
+    strip = _badge_strip(341)
+    dot = rightmost_dot(strip)
+    assert dot is not None and 338 <= dot <= 342
+    assert newest_badge(strip, reader) == ("9412345", Decimal("2.66"))
+    assert len(shapes) == 2
+
+
+def test_newest_badge_needs_a_readable_id_and_value():
+    assert newest_badge(_badge_strip(341), lambda image: ("Bang 2.66x", 0.9)) is None
+    assert newest_badge(_badge_strip(341), lambda image: ("9412345", 0.9)) is None
+    blank = np.zeros((37, 396, 3), dtype=np.uint8)
+    assert rightmost_dot(blank) is None
+    assert newest_badge(blank, lambda image: ("9412345", 0.9)) is None
 
 
 def test_unreadable_bang_text_completes_the_round_from_the_history_badge():
@@ -445,9 +476,10 @@ def test_cashout_confirmation_overrides_final_color(no_detection, tmp_path):
     assert (30, 40, True) in sender.calls
 
 
-def test_unconfirmed_cashout_blocks_next_bet(no_detection, tmp_path):
+def test_unconfirmed_cashout_does_not_block_next_bet(no_detection, tmp_path):
     sender = _Sender()
-    settings = _clicker(autoclick_threshold="100", value_bets={"1.50": "RED", "3.00": "GREEN"},
+    settings = _clicker(autoclick_threshold="100", value_bets={"1.50": "RED", "1.20": "GREEN",
+                                                              "3.00": "GREEN"},
                         cashout_enabled=True, double_bet_enabled=True,
                         double_bet_point=(10, 20), halve_bet_point=(30, 40))
     clicker = AutoClicker(settings, sender=sender, log_path=tmp_path / "rounds.jsonl")
@@ -455,16 +487,16 @@ def test_unconfirmed_cashout_blocks_next_bet(no_detection, tmp_path):
     clicker.tick(Decimal("1.40"))
     clicker.tick(Decimal("1.50"))
     count = len(sender.calls)
-    # دست زیر ضریب کلیک خروج بسته شد: خروج قطعی نیست، پس شرط تازه بسته نمی‌شود.
+    # دست زیر ضریب کلیک خروج بسته شد و پیام سایت هم نیامد: خروج نامعلوم است،
+    # اما قفل شرط بعد نیست؛ ربات همین دست بعد را می‌بندد.
     result = clicker.fire("r2", Decimal("1.20"))
-    assert not result.clicked and "unconfirmed" in result.reason
-    assert len(sender.calls) == count
-    # برابر با ضریب کلیک («1.50») هنوز نامعلوم است: می‌تواند کرش همان لحظه باشد.
-    equal = clicker.fire("r2a", Decimal("1.50"))
-    assert not equal.clicked and "unconfirmed" in equal.reason
-    # دست بعدی روشن بالای همان ضریب بسته شد: خروج انجام شده، مبلغ به پایه برمی‌گردد
-    # و شرط تازه بسته می‌شود (انتظار برای پیام سایت هر دست یک شرط را می‌سوزاند).
-    settled = clicker.fire("r2b", Decimal("3.00"))
+    assert result.clicked and result.rule == "value-bet"
+    assert len(sender.calls) > count
+    # خروج نامعلوم نه برد است نه باخت: مبلغ به پایه برمی‌گردد و دوبل نمی‌شود.
+    assert clicker.double_level == 0
+    assert (30, 40, True) not in sender.calls
+    # دست ربات شرط تازه‌اش باز است؛ بستن روشن بالای ضریب کلیک همچنان برد است.
+    settled = clicker.fire("r3", Decimal("3.00"))
     assert settled.clicked and clicker.double_level == 0
 
 

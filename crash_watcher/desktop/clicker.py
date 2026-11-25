@@ -518,13 +518,15 @@ class AutoClicker:
         if self._pending_rule is not None:
             target_colors, rule, stake, payouts = self._pending_rule
             settled = self._cashout_settled(value)
-            if (self.settings.cashout_enabled and not self.settings.simulated
-                    and not settled and
-                    (self._cashout_attempted or self._cashout_planned_target is None
-                     or value >= self._cashout_planned_target)):
-                return ClickReport(False, "cashout unconfirmed: check site and restart monitoring",
-                                   count=self._clicks)
+            # خروجی که سایت تأییدش نکرد فقط «نامعلوم» است و هیچ‌وقت شرط دست بعد را
+            # قفل نمی‌کند: ربات بدون توقف به دست بعد می‌رود.
+            unconfirmed = (self.settings.cashout_enabled and not self.settings.simulated
+                           and not settled
+                           and (self._cashout_attempted or self._cashout_planned_target is None
+                                or value >= self._cashout_planned_target))
             self._pending_rule = None
+            if unconfirmed:
+                self._log_cashout(value, False, "cashout unconfirmed: continuing", ())
             # حالت کلاسیک مدل رنگ ندارد: هم پیام تأیید سایت و هم بسته‌شدن روشن
             # دست‌کم ۲٪ بالای ضریب کلیک، برد کش‌اوت است.
             hit = ((bool(target_colors) and color in target_colors) if turnbal
@@ -535,8 +537,10 @@ class AutoClicker:
             if target_colors:
                 # برد رنگ اصلی، پوشش رنگ دوم (سربه‌سر) یا باخت. خروج فقط وقتی
                 # برد است که «settled» باشد: پیام سایت یا بسته‌شدن روشن بالای
-                # ضریب کلیک؛ در حالت نامعلوم شرط بعدی بسته نمی‌شود.
-                outcome = (True if settled else False
+                # ضریب کلیک. خروج نامعلوم نه برد است نه باخت: دوبل و تسویهٔ سرمایه دست
+                # نمی‌خورند تا دست بعد بدون توقف بسته شود.
+                outcome = (None if unconfirmed
+                           else True if settled else False
                            if self.settings.cashout_enabled and not self.settings.simulated
                            else True if turnbal and color == target_colors[0]
                            else None if not turnbal or color in target_colors[1:] else False)

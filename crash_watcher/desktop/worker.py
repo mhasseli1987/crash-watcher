@@ -19,7 +19,7 @@ from crash_watcher.vision.recognition import (RapidOCRReader, parse_multiplier, 
 from .config import DesktopSettings, PROJECT_ROOT
 from .clicker import AutoClicker, ClickReport
 from .color_grid import read_grid
-from .final_result import BangDetector, BangRecognizer, newest_history_entry
+from .final_result import BangDetector, BangRecognizer, newest_badge, newest_history_entry
 from .model_compare import (ModelAttempt, ModelLeaderboard, compare as compare_models,
                             parse_models)
 from .smart_play import SmartPlanner
@@ -263,6 +263,8 @@ class MonitorWorker(QThread):
                     previous_reading = None
                     reading = None
                     history_previous = None
+                    history_stable = 0
+                    history_read = None
                     history_id = None
                     history_value = None
                     history_future = None
@@ -323,11 +325,26 @@ class MonitorWorker(QThread):
                             # every phase (OCR still runs only when it changes).
                             if history_capture:
                                 strip, _ = history_capture.capture()
-                                hthumb = cv2.resize(cv2.cvtColor(strip.image, cv2.COLOR_BGR2GRAY), (64, 32))
-                                unchanged = (history_previous is not None and float(
-                                    np.mean(cv2.absdiff(hthumb, history_previous))) < 1)
-                                if history_future is None and not unchanged:
-                                    history_previous = hthumb
+                                # ستون آخر نوار فقط دو فریم یکسان بماند خوانده می‌شود؛
+                                # تا انیمیشن ورود نشان تمام شود و متن نصفه خوانده نشود.
+                                signature = cv2.cvtColor(
+                                    strip.image[:, -100:], cv2.COLOR_BGR2GRAY).tobytes()
+                                history_stable = (history_stable + 1
+                                                  if signature == history_previous else 0)
+                                history_previous = signature
+                                entry = None
+                                if history_stable == 2 and signature != history_read:
+                                    entry = newest_badge(strip.image, reader)
+                                    if entry is not None:
+                                        history_read = signature
+                                if entry is not None:
+                                    history_id, history_value = entry
+                                    self.history_observation.emit(history_id, history_value,
+                                                                  f"{history_id} {history_value}")
+                                elif history_future is None and history_stable == 2:
+                                    # خواندن سریع نشد (چیدمان عوض شده): مدل تشخیص کل
+                                    # نوار را می‌خواند، حتی اگر دیر برسد.
+                                    history_read = signature
                                     history_future = history_pool.submit(history_engine,
                                                                          strip.image.copy())
                                 if history_future is not None and history_future.done():

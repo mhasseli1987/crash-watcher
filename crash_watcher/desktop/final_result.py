@@ -130,6 +130,59 @@ def newest_history_entry(result) -> tuple[str, Decimal] | None:
     pairs = history_entries(result)
     return max(pairs, key=lambda item: int(item[0])) if pairs else None
 
+
+# هر نشان نوار ضرایب یک نقطهٔ رنگی دارد، شناسهٔ خاکستری بالای ضریب رنگی همان
+# ستون. خواندن کل نوار با مدل تشخیص ۴ تا ۸ ثانیه طول می‌کشد و پایان دست را از
+# پنجرهٔ ۴ ثانیه‌ای کلیک بیرون می‌برد؛ پس راست‌ترین نقطه پیدا و فقط همان ستون
+# (دو خط تکی، بدون مدل تشخیص) خوانده می‌شود که چند صدم ثانیه است.
+BADGE_DOT_SATURATION = 140
+BADGE_ID_WIDTH = 56
+BADGE_VALUE_WIDTH = 62
+
+
+def rightmost_dot(strip: np.ndarray) -> int | None:
+    """ستون راست‌ترین نقطهٔ رنگی نوار (خود ضریب‌ها هم رنگی‌اند، پس فقط ردیف
+    شناسه‌ها بررسی می‌شود که جز نقطه چیزی رنگی ندارد)."""
+    height = int(strip.shape[0])
+    band = strip[: max(1, int(height * 0.70))]
+    hsv = cv2.cvtColor(band, cv2.COLOR_BGR2HSV)
+    mask = ((hsv[:, :, 1] > BADGE_DOT_SATURATION) & (hsv[:, :, 2] > 120)).astype(np.uint8)
+    counts = mask.sum(axis=0)
+    columns = [x for x in range(int(counts.size)) if counts[x] >= 3]
+    return int(columns[-1]) if columns else None
+
+
+def newest_badge(strip: np.ndarray, reader) -> tuple[str, Decimal] | None:
+    """تازه‌ترین نشان از ستون راست‌ترین نقطه: (شناسه، ضریب) یا None."""
+    if strip is None or getattr(strip, "size", 0) == 0:
+        return None
+    dot = rightmost_dot(strip)
+    if dot is None:
+        return None
+    height, width = strip.shape[:2]
+    left = dot + 6
+    if width - left < 40:
+        return None
+
+    def line(image: np.ndarray) -> str:
+        if image.size == 0:
+            return ""
+        big = cv2.resize(image, None, fx=3, fy=3, interpolation=cv2.INTER_CUBIC)
+        try:
+            text, _ = reader(big)
+        except Exception:
+            return ""
+        return str(text).strip()
+
+    ident = line(strip[: int(height * 0.66), left:left + BADGE_ID_WIDTH])
+    if not (ident.isdigit() and len(ident) >= 6):
+        return None
+    raw = line(strip[int(height * 0.52):, left:left + BADGE_VALUE_WIDTH]).replace(" ", "")
+    value = parse_multiplier(raw)
+    if value is None:
+        return None
+    return ident, value
+
 @dataclass(frozen=True)
 class FinalReading:
     value: Decimal | None
