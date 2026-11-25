@@ -11,8 +11,9 @@ from crash_watcher.desktop.clicker import AutoClicker
 from crash_watcher.desktop.bankroll import Bankroll
 from crash_watcher.desktop.config import DesktopSettings, Region, load_settings, save_settings
 from crash_watcher.desktop.final_result import (BangDetector, BangRecognizer, FinalReading,
-                                                 newest_badge, newest_history_entry, parse_bang,
-                                                 parse_history_entry, rightmost_dot)
+                                                 bang_screen, badge_column, newest_badge,
+                                                 newest_history_entry, parse_bang,
+                                                 parse_history_entry)
 from crash_watcher.desktop.model_compare import (ModelAttempt, ModelLeaderboard,
                                                   compare as compare_models, parse_models)
 from crash_watcher.desktop.preflight import run_preflight
@@ -186,8 +187,8 @@ def test_newest_badge_reads_the_column_right_of_the_last_dot():
         return ("9412345" if len(shapes) == 1 else "2.66x"), 0.99
 
     strip = _badge_strip(341)
-    dot = rightmost_dot(strip)
-    assert dot is not None and 338 <= dot <= 342
+    column = badge_column(strip)
+    assert column is not None and 340 <= column <= 345
     assert newest_badge(strip, reader) == ("9412345", Decimal("2.66"))
     assert len(shapes) == 2
 
@@ -196,8 +197,38 @@ def test_newest_badge_needs_a_readable_id_and_value():
     assert newest_badge(_badge_strip(341), lambda image: ("Bang 2.66x", 0.9)) is None
     assert newest_badge(_badge_strip(341), lambda image: ("9412345", 0.9)) is None
     blank = np.zeros((37, 396, 3), dtype=np.uint8)
-    assert rightmost_dot(blank) is None
+    assert badge_column(blank) is None
     assert newest_badge(blank, lambda image: ("9412345", 0.9)) is None
+
+
+def test_bang_screen_is_the_orange_word_only():
+    """ملاک پایان دست: متن نارنجی «Bang» در ناحیهٔ نتیجه."""
+    frame = np.zeros((185, 430, 3), dtype=np.uint8)
+    cv2.putText(frame, "Bang @1.39x", (60, 110), cv2.FONT_HERSHEY_SIMPLEX, 1.4,
+                (1, 96, 228), 3)
+    assert bang_screen(frame)
+    assert not bang_screen(np.zeros((185, 430, 3), dtype=np.uint8))
+    live = np.zeros((185, 430, 3), dtype=np.uint8)
+    cv2.putText(live, "5.18x", (120, 110), cv2.FONT_HERSHEY_SIMPLEX, 1.4,
+                (235, 235, 235), 3)
+    assert not bang_screen(live)
+
+
+def test_bang_screen_completes_the_round_outside_the_in_progress_state():
+    """صفحهٔ Bang خودش پایان دست است؛ لازم نیست وضعیت ROUND_IN_PROGRESS باشد."""
+    from crash_watcher.vision.models import DetectionState
+
+    detector = BangDetector(stable_frames=2, absent_frames=2)
+    now = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    assert detector.observe(_image(0), _reading(None), now, "9413000",
+                            Decimal("2.00")) is None
+    detector.state = DetectionState.RESULT_CONFIRMED
+    assert detector.observe(_image(0), _reading(None), now, "9413000",
+                            Decimal("2.00"), bang=True) is None
+    done = detector.observe(_image(1), _reading(None), now, "9413001", Decimal("1.39"),
+                            bang=True)
+    assert done is not None and done.round_id == "game-9413001"
+    assert done.multiplier == Decimal("1.39")
 
 
 def test_unreadable_bang_text_completes_the_round_from_the_history_badge():

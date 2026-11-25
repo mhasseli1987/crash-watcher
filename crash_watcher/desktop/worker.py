@@ -19,7 +19,8 @@ from crash_watcher.vision.recognition import (RapidOCRReader, parse_multiplier, 
 from .config import DesktopSettings, PROJECT_ROOT
 from .clicker import AutoClicker, ClickReport
 from .color_grid import read_grid
-from .final_result import BangDetector, BangRecognizer, newest_badge, newest_history_entry
+from .final_result import (BangDetector, BangRecognizer, bang_screen, newest_badge,
+                           newest_history_entry)
 from .model_compare import (ModelAttempt, ModelLeaderboard, compare as compare_models,
                             parse_models)
 from .smart_play import SmartPlanner
@@ -36,7 +37,11 @@ from .turnbal import review as review_turnbal
 DECISION_TIMEOUT_S = 3.5
 # پنجرهٔ شرط دست بعد بعد از بسته‌شدن ضریب چند ثانیه باز است؛ کلیکی که دیرتر
 # برسد شرطی برای دست گذشته می‌بندد و فقط پول می‌سوزاند.
-CLICK_WINDOW_MS = 4000.0
+# تشخیص پایان دست با نوار ضرایب ۲ تا ۴ ثانیه پس از «Bang» کامل می‌شود؛ با
+# پنجرهٔ ۴ ثانیه‌ای بخشی از دست‌ها بی‌دلیل رد می‌شدند و ربات یک دست می‌بست و
+# می‌ایستاد. تا وقتی شمارش معکوس دست تازه تمام نشده، کلیک روی دکمهٔ شرط همان
+# شرطِ دست بعد است، پس این پنجره ۶ ثانیه شد.
+CLICK_WINDOW_MS = 6000.0
 
 
 def live_multiplier(reader, image, minimum: float = 0.55):
@@ -362,8 +367,12 @@ class MonitorWorker(QThread):
                                         if entry is not None:
                                             history_id, history_value = entry
                                         self.history_observation.emit(history_id, history_value, history_text)
+                            # «Bang» نارنجی ملاک قطعی پایان دست است، مستقل از
+                            # اینکه OCR متن نهایی را درست بخواند یا نه.
+                            bang_now = bang_screen(frame.image)
                             completed = self.detector.observe(frame.image, reading, frame.captured_at,
-                                                              history_id, history_value)
+                                                              history_id, history_value,
+                                                              bang=bang_now)
                             if (self._smart_play_active()
                                     and completed is None and self._prediction_target is None
                                     and self.detector.state.name == "ROUND_IN_PROGRESS"):
@@ -508,7 +517,11 @@ class MonitorWorker(QThread):
                                 # بخوان؛ خوانش Bang فقط عدد پایان دست را می‌دهد.
                                 # اگر همین فریم Bang بود، دست تمام شده و کلیک روی
                                 # دکمهٔ شرط فقط یک شرط تازه باز می‌کند: هرگز نزن.
-                                if reading.value is None:
+                                if bang_now:
+                                    # صفحهٔ پایان دست: پنجرهٔ خروج بسته است و
+                                    # کلیک روی دکمهٔ شرط شرط تازه باز می‌کند.
+                                    clicker.tick(ended=True)
+                                elif reading.value is None:
                                     live = live_multiplier(reader, frame.image)
                                     if live is not None:
                                         cashout_wait_for_live = False

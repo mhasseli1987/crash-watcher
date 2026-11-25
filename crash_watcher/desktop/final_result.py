@@ -131,36 +131,54 @@ def newest_history_entry(result) -> tuple[str, Decimal] | None:
     return max(pairs, key=lambda item: int(item[0])) if pairs else None
 
 
-# هر نشان نوار ضرایب یک نقطهٔ رنگی دارد، شناسهٔ خاکستری بالای ضریب رنگی همان
-# ستون. خواندن کل نوار با مدل تشخیص ۴ تا ۸ ثانیه طول می‌کشد و پایان دست را از
-# پنجرهٔ ۴ ثانیه‌ای کلیک بیرون می‌برد؛ پس راست‌ترین نقطه پیدا و فقط همان ستون
-# (دو خط تکی، بدون مدل تشخیص) خوانده می‌شود که چند صدم ثانیه است.
-BADGE_DOT_SATURATION = 140
-BADGE_ID_WIDTH = 56
-BADGE_VALUE_WIDTH = 62
+# هر نشان نوار ضرایب یک نقطهٔ گرد رنگی دارد و شناسهٔ خاکستری بالای ضریب رنگی
+# همان ستون است. خواندن کل نوار با مدل تشخیص ۴ تا ۸ ثانیه طول می‌کشد و پایان
+# دست را از پنجرهٔ ۴ ثانیه‌ای کلیک بیرون می‌برد؛ پس راست‌ترین نقطه پیدا و فقط
+# همان ستون (دو خط تکی، بدون مدل تشخیص) خوانده می‌شود که چند صدم ثانیه است.
+# اندازه‌ها از نوار واقعی همین بازی گرفته شده‌اند.
+BADGE_DOT_MIN = 7
+BADGE_DOT_MAX = 20
+BADGE_ID_ROWS = (0, 15)
+BADGE_VALUE_ROWS = (14, 31)
+BADGE_ID_WIDTH = 52
+BADGE_VALUE_WIDTH = 58
 
 
-def rightmost_dot(strip: np.ndarray) -> int | None:
-    """ستون راست‌ترین نقطهٔ رنگی نوار (خود ضریب‌ها هم رنگی‌اند، پس فقط ردیف
-    شناسه‌ها بررسی می‌شود که جز نقطه چیزی رنگی ندارد)."""
-    height = int(strip.shape[0])
-    band = strip[: max(1, int(height * 0.70))]
-    hsv = cv2.cvtColor(band, cv2.COLOR_BGR2HSV)
-    mask = ((hsv[:, :, 1] > BADGE_DOT_SATURATION) & (hsv[:, :, 2] > 120)).astype(np.uint8)
-    counts = mask.sum(axis=0)
-    columns = [x for x in range(int(counts.size)) if counts[x] >= 3]
-    return int(columns[-1]) if columns else None
+def badge_dots(strip: np.ndarray) -> list[tuple[int, int, int, int]]:
+    """جعبهٔ نقطه‌های گرد نوار؛ خود ضریب‌ها هم رنگی‌اند ولی باریک‌اند و نقطه
+    شمرده نمی‌شوند."""
+    hsv = cv2.cvtColor(strip, cv2.COLOR_BGR2HSV)
+    mask = cv2.inRange(hsv, (5, 100, 120), (35, 255, 255)) | cv2.inRange(
+        hsv, (35, 100, 120), (90, 255, 255))
+    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    found = []
+    for contour in contours:
+        x, y, width, height = cv2.boundingRect(contour)
+        if (BADGE_DOT_MIN <= width <= BADGE_DOT_MAX
+                and BADGE_DOT_MIN <= height <= BADGE_DOT_MAX
+                and 0.6 <= width / height <= 1.6
+                and cv2.contourArea(contour) >= 40):
+            found.append((x, y, width, height))
+    return found
+
+
+def badge_column(strip: np.ndarray) -> int | None:
+    """شروع ستون متن تازه‌ترین نشان: کمی راستِ نقطهٔ گرد آن."""
+    found = badge_dots(strip)
+    if not found:
+        return None
+    x, _, width, _ = max(found, key=lambda item: item[0])
+    return x + width + 1
 
 
 def newest_badge(strip: np.ndarray, reader) -> tuple[str, Decimal] | None:
-    """تازه‌ترین نشان از ستون راست‌ترین نقطه: (شناسه، ضریب) یا None."""
+    """(شناسه، ضریب) تازه‌ترین نشان نوار یا None."""
     if strip is None or getattr(strip, "size", 0) == 0:
         return None
-    dot = rightmost_dot(strip)
-    if dot is None:
+    left = badge_column(strip)
+    if left is None:
         return None
-    height, width = strip.shape[:2]
-    left = dot + 6
+    width = strip.shape[1]
     if width - left < 40:
         return None
 
@@ -174,14 +192,33 @@ def newest_badge(strip: np.ndarray, reader) -> tuple[str, Decimal] | None:
             return ""
         return str(text).strip()
 
-    ident = line(strip[: int(height * 0.66), left:left + BADGE_ID_WIDTH])
+    top, bottom = BADGE_ID_ROWS
+    ident = line(strip[top:bottom, left:left + BADGE_ID_WIDTH])
     if not (ident.isdigit() and len(ident) >= 6):
         return None
-    raw = line(strip[int(height * 0.52):, left:left + BADGE_VALUE_WIDTH]).replace(" ", "")
+    top, bottom = BADGE_VALUE_ROWS
+    raw = line(strip[top:bottom, left:left + BADGE_VALUE_WIDTH]).replace(" ", "")
     value = parse_multiplier(raw)
     if value is None:
         return None
     return ident, value
+
+
+# متن نارنجی «Bang» تنها نشانهٔ قطعی پایان دست است؛ در پرواز زندهٔ همین ناحیه
+# هیچ نارنجی چشمگیری نیست (خط نمودار بنفش و عدد سفید است). شمارش پیکسل نارنجی
+# روی ناحیهٔ نتیجه زیر یک میلی‌ثانیه طول می‌کشد، پس هر فریم قابل بررسی است.
+BANG_ORANGE_LOW = (5, 120, 150)
+BANG_ORANGE_HIGH = (30, 255, 255)
+BANG_ORANGE_PIXELS = 600
+
+
+def bang_screen(image: np.ndarray) -> bool:
+    """آیا صفحهٔ پایان دست («Bang» نارنجی) روی صفحه است؟"""
+    if image is None or getattr(image, "size", 0) == 0:
+        return False
+    hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
+    mask = cv2.inRange(hsv, BANG_ORANGE_LOW, BANG_ORANGE_HIGH)
+    return int(cv2.countNonZero(mask)) >= BANG_ORANGE_PIXELS
 
 @dataclass(frozen=True)
 class FinalReading:
@@ -262,15 +299,22 @@ class BangDetector:
         # تکراری نمی‌توانند دست تازه بسازند.
         self._newest_badge: str | None = None
         self._last_completion = 0.0
+        # چند فریم پشت‌سرهم متن نارنجی «Bang» دیده شده است.
+        self._bang_frames = 0
         self._seen_ids: set[str] = getattr(self, "_seen_ids", set())
 
     def observe(self, image: np.ndarray, reading: FinalReading, timestamp: datetime,
                 history_id: str | None = None,
-                history_value: Decimal | None = None) -> ConfirmedFinal | None:
+                history_value: Decimal | None = None,
+                bang: bool = False) -> ConfirmedFinal | None:
         gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
         thumb = cv2.resize(gray, (64, 32), interpolation=cv2.INTER_AREA)
         moving = self._previous is not None and float(np.mean(cv2.absdiff(thumb, self._previous))) >= self.pixel_difference
         self._previous = thumb
+        # صفحهٔ «Bang» خودش پایان دست را اعلام می‌کند: به متن OCR متنهایی که
+        # معمولاً «Dang 9229» یا «Shet n x» خوانده می‌شود وابسته نیستیم.
+        self._bang_frames = self._bang_frames + 1 if bang else 0
+        bang_seen = self._bang_frames >= 2
         badge = None
         if history_id and history_value is not None and str(history_id).isdigit():
             if self._newest_badge is None:
@@ -288,7 +332,8 @@ class BangDetector:
             # متن نهایی خوانا نبود: نشان تازهٔ نوار ضرایب همان پایان دست است.
             # فقط وقتی دستِ در جریان دیده شده باشد و به‌تازگی دستی از راه متن
             # نهایی ثبت نشده باشد، تا یک دست دو بار شمرده و دو شرط باز نشود.
-            if (badge is not None and self.state == DetectionState.ROUND_IN_PROGRESS
+            if (badge is not None
+                    and (self.state == DetectionState.ROUND_IN_PROGRESS or bang_seen)
                     and monotonic() - self._last_completion >= BADGE_GRACE_S):
                 return self._confirm_badge(badge, thumb, timestamp)
             return None
