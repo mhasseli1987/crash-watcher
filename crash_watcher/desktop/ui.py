@@ -1787,8 +1787,15 @@ class MainWindow(QMainWindow):
                   if report.remaining else "")
         forecast = f" | پیش‌بینی: {report.forecast}" if report.forecast else ""
         balance = f" | سرمایه: {report.balance:.2f}" if report.balance is not None else ""
+        # وضعیت اجرای واقعی (PHASE 6): تصمیم مدل، قاعدهٔ اجراشده و نتیجهٔ ارسال جدا دیده شوند.
+        state = getattr(report, "status", "") or ("INPUT SENT" if report.clicked else "")
+        state = f" | {state}" if state else ""
+        override = getattr(report, "override_reason", "")
+        override = f" | {override}" if override else ""
+        latency = getattr(report, "latency_ms", None)
+        latency = f" | {latency:.0f}ms" if isinstance(latency, (int, float)) else ""
         self.click_status.setText(f"وضعیت کلیک: {label} — {report.reason}{budget}{forecast}"
-                                  f"{balance} {report.point or ''}")
+                                  f"{balance}{state}{override}{latency} {report.point or ''}")
         if report.clicked:
             self._add_history(["", "", "", "", datetime.now().isoformat(timespec="seconds"), "", "",
                                f"CLICK {report.reason}: {report.point}"])

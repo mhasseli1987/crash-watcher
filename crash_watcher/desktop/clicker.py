@@ -1,11 +1,11 @@
 """کلیک موس روی دایرهٔ زرد؛ فقط کتابخانهٔ استاندارد."""
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
-from time import monotonic, sleep
+from time import monotonic, perf_counter, sleep
 import ctypes
 import ctypes.wintypes
 import json
@@ -30,6 +30,14 @@ LOW_CLOSE = Decimal("1.10")
 # برای پذیرش خروج بدون پیام سایت، ضریب پایان دست باید دست‌کم این‌قدر بالای ضریب
 # لحظهٔ کلیک باشد؛ عدد برابر با هدف می‌تواند کرش همان لحظه باشد.
 CASHOUT_CONFIRM_MARGIN = Decimal("1.02")
+# پنجرهٔ معتبر یک کلیک برنامه‌ریزی‌شده: کلیکی که بعد از بسته‌شدن این پنجره برسد
+# شرط دست بعد را می‌بندد، پس به‌جای ارسال، منقضی می‌شود.
+CLICK_PLAN_TTL_S = 6.0
+# یک دست کرش می‌تواند دقیقه‌ها طول بکشد؛ پنجرهٔ خروج فقط با پایان دست (Bang)
+# یا شروع دست تازه بسته می‌شود، ولی سقف زمانی هم دارد تا برنامهٔ کهنه نماند.
+CASHOUT_PLAN_TTL_S = 180.0
+# تصمیم مدل برای «دست بعد» است؛ اگر تا این مدت مصرف نشود کهنه است و اجرا نمی‌شود.
+AI_PREDICTION_TTL_S = 30.0
 _UP = 0x0004
 try:
     _user32 = ctypes.windll.user32
@@ -99,6 +107,44 @@ class ClickReport:
     balance: float | None = None
     stake: float = 0.0
     double_level: int = 0
+    # PHASE 6: وضعیت اجرا و زمان‌بندی برای لاگ و داشبورد.
+    status: str = ""
+    intent_at: str = ""
+    dispatch_at: str = ""
+    dispatch_result: str = ""
+    latency_ms: float | None = None
+    missed_deadline_reason: str = ""
+    target_round_id: str = ""
+    prediction: str = ""
+    source: str = ""
+    override_reason: str = ""
+    provider_latency_ms: float | None = None
+
+
+@dataclass
+class ClickPlan:
+    """یک کلیک تأییدشده که هنوز ارسال نشده است (تأخیر تنظیم‌شده یا انتظار حلقه)."""
+
+    round_id: str
+    value: Decimal
+    points: tuple[tuple[str | None, tuple[int, int]], ...]
+    rule: str
+    target: str
+    detail: str
+    colors: tuple[str, ...]
+    stake: float
+    simulated: bool
+    double_level: int
+    cashout_target: Decimal | None
+    forecast: str
+    prediction: str = ""
+    source: str = ""
+    override_reason: str = ""
+    provider_latency_ms: float | None = None
+    intent_at: str = field(default_factory=lambda: datetime.now().isoformat(timespec="milliseconds"))
+    created: float = field(default_factory=monotonic)
+    not_before: float = 0.0
+    deadline: float = 0.0
 
 
 RULE_LABELS = {"yellow-run": "صف ۷+۳ زرد",
@@ -113,9 +159,19 @@ class AutoClicker:
     """زرد که بسته شد: ۷ دست صبر، بعد سه کلیک پشت‌سرهم؛ بدون ری‌ست با زردهای بعدی."""
 
     def __init__(self, settings: DesktopSettings, sender=click, log_path: Path | None = None,
-                 summary_path: Path | None = None, report_path: Path | None = None) -> None:
+                 summary_path: Path | None = None, report_path: Path | None = None,
+                 clock=monotonic) -> None:
         self.settings = settings
         self.sender = sender
+        # همهٔ مهلت‌ها با ساعت یکنوا سنجیده می‌شوند؛ ساعت سیستم (دیوار) فقط برای لاگ است.
+        self._clock = clock
+        self._plan: ClickPlan | None = None
+        self._cashout_deadline: float | None = None
+        self._model_prediction: str = ""
+        self._model_source: str = ""
+        self._model_latency: float | None = None
+        self._model_set_at: float = 0.0
+        self._override_reason: str = ""
         self.log_path = log_path or PROJECT_ROOT / "logs" / "rounds.jsonl"
         self.summary_path = summary_path or PROJECT_ROOT / "logs" / "summary.txt"
         self.report_path = report_path or PROJECT_ROOT / "logs" / "session-report.txt"
@@ -373,9 +429,9 @@ class AutoClicker:
         return "RED" if value < Decimal(self.settings.red_threshold) else "GREEN"
 
     def _wait_before_click(self) -> None:
-        """Permanent rule: never click more than one second after the round closed."""
-        if self.settings.autoclick_delay_ms:
-            sleep(self.settings.autoclick_delay_ms / 1000)
+        """تأخیر تنظیم‌شدهٔ کلیک در نخ خوانش اجرا نمی‌شود؛ این تابع فقط برای
+        فراخوانی‌های دستیِ قدیمی نگه داشته شده و هیچ خوابی ندارد."""
+        return None
 
     def take_review(self) -> dict | None:
         """Summarise the last review window once its time is up; None otherwise."""
@@ -410,11 +466,26 @@ class AutoClicker:
         """رنگ ضریب — همین قاعدهٔ رنگ در بخش بررسی هوشمند هم استفاده می‌شود."""
         return self._color(value)
 
-    def set_smart_play(self, bets, cashout=None) -> None:
-        """تصمیم آمادهٔ مدل برای دست بعد: یک یا دو رنگ، به‌همراه ضریب خروج."""
+    def set_smart_play(self, bets, cashout=None, prediction=None, source=None,
+                       provider_latency_ms=None) -> None:
+        """تصمیم آمادهٔ مدل برای دست بعد: یک یا دو رنگ، به‌همراه ضریب خروج.
+
+        فرادادهٔ مدل (پیش‌بینی، منبع، تأخیر) فقط برای لاگ و سنجش هم‌زمان
+        پیشنهاد مدل با اجرای واقعی نگه داشته می‌شود؛ هیچ‌وقت باعث کلیک اضافه نمی‌شود.
+        """
         allowed = ("RED", "GREEN", "YELLOW") if self.settings.bot_mode == "turnbal" else ("PLAY",)
         self._smart_play = tuple(bet for bet in (bets or ()) if bet in allowed)
         self._smart_cashout = cashout
+        if prediction is not None or source is not None:
+            self._model_prediction = str(prediction or "")
+            self._model_source = str(source or "")
+            self._model_latency = provider_latency_ms
+            self._model_set_at = self._clock()
+
+    def record_report(self, round_id: str, value: Decimal, report: ClickReport) -> None:
+        """ثبت گزارش یک تصمیم که در حلقهٔ پایش رد شده است (مثلاً تشخیص دیرهنگام)."""
+        if self.settings.autoclick_enabled:
+            self._record(round_id, value, report)
 
     def fire(self, round_id: str, value: Decimal) -> ClickReport:
         report = self._decide(round_id, value)
@@ -434,7 +505,25 @@ class AutoClicker:
                      "clicks": report.count, "remaining": report.remaining,
                      "dry_run": report.dry_run, "shadow": report.shadow,
                      "balance": report.balance, "stake": report.stake,
-                     "double_level": report.double_level}
+                     "double_level": report.double_level,
+                     # PHASE 6: هر ردیف پیشنهاد مدل و اجرای واقعی را قابل مقایسه می‌کند.
+                     "round_id": round_id,
+                     "target_round_id": report.target_round_id or round_id,
+                     "model_prediction": report.prediction or None,
+                     "prediction_source": report.source or "NONE",
+                     "provider_latency_ms": report.provider_latency_ms,
+                     "selected_strategy": report.rule or "none",
+                     "override_reason": report.override_reason or None,
+                     "click_point": list(report.point) if report.point else None,
+                     "click_intent_at": report.intent_at or None,
+                     "input_dispatch_at": report.dispatch_at or None,
+                     "input_dispatch_result": report.dispatch_result or None,
+                     "site_confirmation": ("SITE CONFIRMED" if self._cashout_confirmed
+                                           else "SITE UNCONFIRMED" if self._cashout_attempted
+                                           else "NOT ATTEMPTED"),
+                     "click_latency_ms": report.latency_ms,
+                     "missed_deadline_reason": report.missed_deadline_reason or None,
+                     "final_status": report.status or ("INPUT SENT" if report.clicked else "SKIPPED")}
             with self.log_path.open("a", encoding="utf-8") as file:
                 file.write(json.dumps(entry, ensure_ascii=False) + "\n")
         except Exception:
@@ -502,17 +591,31 @@ class AutoClicker:
             pass
 
     def _decide(self, round_id: str, value: Decimal) -> ClickReport:
-        # دستِ در جریان بسته شد: پنجرهٔ کش‌اوتِ شرط قبلی تمام است.
-        self._cashout_points = []
-        self._cashout_prev = None
         if not self.settings.autoclick_enabled:
-            return ClickReport(False, "disabled", count=self._clicks)
+            return ClickReport(False, "disabled", count=self._clicks, status="SKIPPED")
         if self.bankroll is not None and self.bankroll.stopped:
             # کف استاپ‌لاس رد شده: تا شروع دوبارهٔ جلسه هیچ شرطی بسته نمی‌شود.
             return ClickReport(False, f"capital stop-loss: {self.bankroll.label()}",
-                               count=self._clicks, balance=self.bankroll.balance)
+                               count=self._clicks, balance=self.bankroll.balance,
+                               status="SKIPPED")
         if round_id == self._last_id:
-            return ClickReport(False, "same round", count=self._clicks, remaining=self._armed)
+            # همان دست دوباره خوانده شد؛ پنجرهٔ خروجِ بازِ همین دست باید باز بماند،
+            # وگرنه خروج دست جاری از بین می‌رود.
+            return ClickReport(False, "same round", count=self._clicks, remaining=self._armed,
+                               status="SKIPPED")
+        # دستِ تازه: پنجرهٔ کش‌اوتِ شرط دست قبلی تمام است.
+        self._cashout_points = []
+        self._cashout_prev = None
+        self._cashout_deadline = None
+        if self._plan is not None and self._plan.round_id != round_id:
+            # دست عوض شد: کلیکِ برنامه‌ریزی‌شدهٔ دست قبلی هرگز به دست تازه نمی‌رسد.
+            self._expire_plan("round changed before dispatch")
+        if (self._smart_play and self._model_set_at
+                and self._clock() - self._model_set_at > AI_PREDICTION_TTL_S):
+            # تصمیم مدل برای دست دیگری بود و کهنه شده است؛ اجرا نمی‌شود.
+            self._override_reason = "stale prediction dropped"
+            self._smart_play = ()
+            self._smart_cashout = None
         turnbal = self.settings.bot_mode == "turnbal"
         color = self._color(value) if turnbal else None
         if self._pending_rule is not None:
@@ -672,25 +775,38 @@ class AutoClicker:
                                            forecast=prediction.label)
                     target_color = prediction.color
                     rule = "smart"
-        now = monotonic()
+        now = self._clock()
         if now - self._last_at < self.settings.autoclick_cooldown_ms / 1000:
-            return ClickReport(False, "cooldown", count=self._clicks, remaining=self._armed)
+            return ClickReport(False, "cooldown", count=self._clicks, remaining=self._armed,
+                               status="SKIPPED")
         if self._armed > 0 and target_color is None:
             target_color = "YELLOW"  # the run after a yellow is a yellow bet
         if self._armed > 0 and not rule:
             rule = "yellow-run"
+        prediction = self._model_prediction
+        source = self._model_source
+        provider_latency = self._model_latency
+        override_reason = self._override_reason
+        status = ""
         if rule == "smart-play":
             # حداکثر دو رنگ، هر کدام با همان قاعدهٔ یک ثانیه‌ای کلیک می‌شود.
             targets: list[str | None] = list(dict.fromkeys(self._smart_play))
             if not turnbal:
                 targets = targets[:1]
             self._smart_play = ()
+            status = "AI READY"
         else:
             targets = [target_color]
+            if prediction and self._smart_play:
+                # قاعدهٔ بالاتری بر تصمیم مدل اولویت داشت؛ برای سنجش مدل ثبت می‌شود.
+                override_reason = override_reason or f"rule {rule or 'none'} overrides model {prediction}"
+                status = "AI OVERRIDDEN"
         points = [(color, self._bet_point(color)) for color in targets]
         points = [(color, point) for color, point in points if point is not None]
         if not points:
-            return ClickReport(False, "target not found", count=self._clicks, remaining=self._armed)
+            return ClickReport(False, "target not found", count=self._clicks, remaining=self._armed,
+                               status="SKIPPED", prediction=prediction, source=source,
+                               override_reason=override_reason)
         simulated = self.settings.simulated
         gated = (turnbal and not row_click
                  and value_color is None and self._armed <= 0
@@ -699,65 +815,199 @@ class AutoClicker:
             # Remember what was predicted so the next round can score it.
             self._pending_color = self.forecaster.forecast().color
         self._last_id, self._last_at = round_id, now
+        colors = tuple(color for color, _ in points if color)
+        # در حالت آزمایشی/سایه سرمایه جابه‌جا نمی‌شود؛ مبلغ صفر ثبت می‌شود.
+        stake = 0.0 if simulated else self._stake()
+        cashout_target = None
+        if self.settings.cashout_enabled and (colors or rule == "smart-play"):
+            # هدفِ خروج همیشه داخل بازهٔ کاربر (پیش‌فرض ۱٫۴۰ تا ۱٫۹۰) نگه داشته
+            # می‌شود تا هیچ خروجی پایین‌تر از عددی که کاربر گذاشته کلیک نشود.
+            floor, ceiling = self._cashout_bounds()
+            if rule == "low-close":
+                # دست بعد از یک بستن زیر ۱٫۱۰ تا سقف بازه صبر می‌کند.
+                cashout_target = ceiling
+            else:
+                try:
+                    picked = Decimal(str(self._smart_cashout))
+                except Exception:
+                    picked = floor
+                cashout_target = min(max(picked, floor), ceiling)
+        self._smart_cashout = None
+        plan = ClickPlan(round_id=round_id, value=value, points=tuple(points),
+                         rule=rule, target="+".join(colors) or (target_color or ""),
+                         detail=row_detail, colors=colors, stake=stake,
+                         simulated=simulated, double_level=self._double_level,
+                         cashout_target=cashout_target,
+                         forecast=self.forecaster.forecast().label if turnbal else "",
+                         prediction=prediction, source=source,
+                         override_reason=override_reason,
+                         provider_latency_ms=provider_latency)
+        # تأخیر تنظیم‌شده هرگز در نخ خوانش خوابیده نمی‌شود: یک برنامهٔ زمان‌بندی‌شده
+        # با مهلت یکنوا ساخته می‌شود و حلقهٔ پایش در اولین فرصت آن را ارسال می‌کند.
+        delay_s = min(max(0.0, self.settings.autoclick_delay_ms / 1000), CLICK_PLAN_TTL_S)
+        plan.not_before = now + delay_s
+        plan.deadline = now + CLICK_PLAN_TTL_S
+        self._model_prediction, self._model_source = "", ""
+        self._model_latency, self._model_set_at = None, 0.0
+        self._override_reason = ""
+        if delay_s > 0:
+            self._plan = plan
+            return ClickReport(False, f"click scheduled in {delay_s:.2f}s", points[0][1],
+                               self._clicks, self._armed, forecast=plan.forecast,
+                               target=plan.target, rule=rule, detail=row_detail,
+                               dry_run=self.settings.autoclick_dry_run,
+                               shadow=self.settings.shadow_mode, balance=self.balance,
+                               stake=stake, double_level=self._double_level,
+                               status="CLICK SCHEDULED", intent_at=plan.intent_at,
+                               target_round_id=round_id, prediction=plan.prediction,
+                               source=plan.source, override_reason=override_reason,
+                               provider_latency_ms=plan.provider_latency_ms)
+        self._plan = None
+        return self._dispatch_plan(plan)
+
+    def _send(self, point: tuple[int, int]) -> bool:
+        """یک ورودی را بفرست؛ خطا یا نتیجهٔ ناموفق فرستنده یعنی کلیک انجام نشده."""
+        try:
+            return bool(self.sender(point[0], point[1],
+                                    restore=self.settings.autoclick_restore_cursor))
+        except Exception:
+            return False
+
+    def _spend_budget(self, plan: ClickPlan) -> None:
+        """بودجه و شرط را فقط پس از ارسال موفق ورودی ثبت کن."""
         self._clicks += 1
         self._window["clicks"] += 1
-        if target_color or rule == "smart-play":
+        if plan.target or plan.rule == "smart-play":
             self._cashout_confirmed = False
             self._cashout_attempted = False
-            colors = tuple(color for color, _ in points if color)
-            # در حالت آزمایشی/سایه سرمایه جابه‌جا نمی‌شود؛ مبلغ صفر ثبت می‌شود.
-            stake = 0.0 if simulated else self._stake()
-            payouts = {color: self._payout(color) for color in colors}
-            self._pending_rule = (colors, rule or "unknown", stake, payouts)
-            self._rule_stats.setdefault(rule or "unknown", [0, 0])[1] += 1
+            payouts = {color: self._payout(color) for color in plan.colors}
+            self._pending_rule = (plan.colors, plan.rule or "unknown", plan.stake, payouts)
+            self._rule_stats.setdefault(plan.rule or "unknown", [0, 0])[1] += 1
         if self._armed > 0:
             # Every clicked round of a run spends one, the trigger included, so a
             # run is exactly autoclick_max_clicks clicks and then stops.
             self._armed -= 1
-        ok = True
-        if not simulated and self.settings.double_bet_enabled:
+        if plan.cashout_target is not None:
+            self._cashout_target = plan.cashout_target
+            self._cashout_planned_target = plan.cashout_target
+            self._cashout_points = [point for _, point in plan.points]
+            self._cashout_prev = None
+            self._cashout_deadline = self._clock() + CASHOUT_PLAN_TTL_S
+
+    def _dispatch_plan(self, plan: ClickPlan) -> ClickReport:
+        """برنامهٔ کلیک را همین حالا ارسال کن و نتیجهٔ واقعی ارسال را برگردان.
+
+        اگر فرستنده شکست بخورد (مکان‌نما جابه‌جا نشود یا ورودی ارسال نشود)، هیچ
+        کلیکی شمرده نمی‌شود: بودجه، دوبل، شرط باز و آمار دست‌نخورده می‌مانند.
+        """
+        started = perf_counter()
+        dispatch_at = datetime.now().isoformat(timespec="milliseconds")
+        if not plan.simulated and self.settings.double_bet_enabled:
             # مبلغ شرط در بازی پیش از کلیک شرط تنظیم می‌شود: ×2 پس از باخت و
             # ÷2 پس از برد تا برگشت به مبلغ پایه.
-            ok = self._apply_double_clicks() and ok
-        if not ok:
-            self._pending_rule = None
-            return ClickReport(False, "stake adjustment failed", count=self._clicks,
-                               remaining=self._armed)
-        for _, point in points:
-            if simulated:
+            if not self._apply_double_clicks():
+                self._plan = None
+                report = ClickReport(False, "stake adjustment failed", plan.points[0][1],
+                                     self._clicks, self._armed, rule=plan.rule,
+                                     target=plan.target, status="INPUT FAILED",
+                                     intent_at=plan.intent_at, dispatch_at=dispatch_at,
+                                     dispatch_result="stake adjustment failed",
+                                     latency_ms=round((perf_counter() - started) * 1000, 2),
+                                     target_round_id=plan.round_id,
+                                     prediction=plan.prediction, source=plan.source,
+                                     override_reason=plan.override_reason)
+                # ثبت گزارش با فراخواننده (fire/drain_click) انجام می‌شود؛ اینجا
+                # دوباره نوشتن، دو ردیف برای یک دست در لاگ می‌ساخت.
+                return report
+        results: list[bool] = []
+        for _, point in plan.points:
+            if plan.simulated:
+                results.append(True)
                 continue
-            # Permanent rule: each click waits at most one second after the round.
-            ok = self.sender(point[0], point[1],
-                             restore=self.settings.autoclick_restore_cursor) and ok
-        if self.settings.cashout_enabled and (simulated or ok):
-            # شرط ثبت شد: هدفِ خروج همیشه داخل بازهٔ کاربر (تب ترنبال، پیش‌فرض
-            # ۱٫۴۰ تا ۱٫۹۰) نگه داشته می‌شود تا هیچ خروجی پایین‌تر از عددی که
-            # کاربر گذاشته کلیک نشود.
-            floor, ceiling = self._cashout_bounds()
-            if rule == "low-close":
-                # دست بعد از یک بستن زیر ۱٫۱۰ تا سقف بازه صبر می‌کند.
-                target = ceiling
-            else:
-                try:
-                    target = Decimal(str(self._smart_cashout))
-                except Exception:
-                    target = floor
-            self._cashout_target = min(max(target, floor), ceiling)
-            self._cashout_planned_target = self._cashout_target
-            self._cashout_points = [point for _, point in points]
-            self._cashout_prev = None
+            results.append(self._send(point))
+        sent = sum(1 for item in results if item)
+        latency = round((perf_counter() - started) * 1000, 2)
+        if plan.simulated:
+            self._spend_budget(plan)
+            reason = f"{self._simulated_label}: would click"
+            status = "SHADOW" if self.settings.shadow_mode else "DRY RUN"
+            clicked = False
+        elif sent == len(results) and results:
+            self._spend_budget(plan)
+            reason, status, clicked = "clicked", "INPUT SENT", True
+        else:
+            reason = ("input dispatch failed" if sent == 0
+                      else f"partial input dispatch ({sent}/{len(results)})")
+            status, clicked = "INPUT FAILED", False
+        report = ClickReport(clicked, reason, plan.points[0][1], self._clicks, self._armed,
+                             forecast=plan.forecast, target=plan.target, rule=plan.rule,
+                             detail=plan.detail, dry_run=self.settings.autoclick_dry_run,
+                             shadow=self.settings.shadow_mode, balance=self.balance,
+                             stake=plan.stake, double_level=self._double_level,
+                             status=status, intent_at=plan.intent_at,
+                             dispatch_at=dispatch_at,
+                             dispatch_result=("dry run" if plan.simulated
+                                              else f"sent {sent}/{len(results)}"),
+                             latency_ms=latency, target_round_id=plan.round_id,
+                             prediction=plan.prediction, source=plan.source,
+                             override_reason=plan.override_reason,
+                             provider_latency_ms=plan.provider_latency_ms)
+        if self._plan is plan:
+            self._plan = None
+        return report
+
+    def _expire_plan(self, reason: str) -> ClickReport | None:
+        """برنامهٔ ارسال‌نشده را منقضی کن تا هیچ‌وقت به دست اشتباه نرسد."""
+        plan, self._plan = self._plan, None
+        if plan is None:
+            return None
+        report = ClickReport(False, f"expired: {reason}", count=self._clicks,
+                             remaining=self._armed, rule=plan.rule, target=plan.target,
+                             status="EXPIRED", intent_at=plan.intent_at,
+                             target_round_id=plan.round_id,
+                             missed_deadline_reason=reason,
+                             prediction=plan.prediction, source=plan.source,
+                             provider_latency_ms=plan.provider_latency_ms)
+        if self.settings.autoclick_enabled:
+            self._record(plan.round_id, plan.value, report)
+        return report
+
+    def drain_click(self) -> ClickReport | None:
+        """برنامهٔ کلیکِ سررسیده را ارسال کن؛ بدون خواب، مناسب حلقهٔ پایش.
+
+        None یعنی هنوز چیزی برای ارسال نیست (یا برنامه‌ای وجود ندارد). برنامهٔ
+        گذشته از پنجرهٔ دستش هرگز ارسال نمی‌شود و با EXPIRED ثبت می‌شود.
+        """
+        plan = self._plan
+        if plan is None:
+            return None
+        now = self._clock()
+        if now > plan.deadline:
+            return self._expire_plan("click window closed before dispatch")
+        if now < plan.not_before:
+            return None
+        self._plan = None
+        report = self._dispatch_plan(plan)
+        if self.settings.autoclick_enabled:
+            self._record(plan.round_id, plan.value, report)
+        return report
+
+    def resume_cleanup(self) -> None:
+        """پس از توقف/ادامه هیچ کلیک یا خروج کهنه‌ای اجرا نشود."""
+        self._expire_plan("monitoring paused before dispatch")
+        self._cashout_points = []
+        self._cashout_target = None
+        self._cashout_planned_target = None
+        self._cashout_prev = None
+        self._cashout_attempted = False
+        self._cashout_confirmed = False
+        self._cashout_deadline = None
+        self._pending_rule = None
+        self._smart_play = ()
         self._smart_cashout = None
-        colors = tuple(color for color, _ in points if color)
-        reason = (f"{self._simulated_label}: would click" if simulated
-                  else "clicked" if ok else "click failed")
-        return ClickReport(not simulated and ok, reason, points[0][1], self._clicks,
-                           self._armed, forecast=self.forecaster.forecast().label if turnbal else "",
-                           target="+".join(colors) or (target_color or ""),
-                           rule=rule, detail=row_detail,
-                           dry_run=self.settings.autoclick_dry_run,
-                           shadow=self.settings.shadow_mode, balance=self.balance,
-                           stake=0.0 if simulated else self._stake(),
-                           double_level=self._double_level)
+        self._model_prediction, self._model_source = "", ""
+        self._model_latency, self._model_set_at = None, 0.0
+        self._override_reason = ""
 
     def _cashout_bounds(self) -> tuple[Decimal, Decimal]:
         """بازهٔ مجاز خروج از تنظیمات کاربر، همیشه داخل ۱٫۴۰ تا ۱٫۹۰."""
@@ -806,6 +1056,11 @@ class AutoClicker:
         if not (self.settings.cashout_enabled and self._cashout_points
                 and self._cashout_target is not None):
             return
+        if (self._cashout_deadline is not None
+                and self._clock() > self._cashout_deadline):
+            # برنامهٔ خروج از پنجرهٔ دستش گذشته است؛ کلیک دیر به دست تازه نمی‌رسد.
+            self._close_cashout("cashout plan expired: round window closed")
+            return
         if ended:
             # دست پیش از رسیدن به هدف بسته شد: پنجرهٔ خروجِ این شرط تمام است.
             self._close_cashout("cashout skipped: round ended before the target")
@@ -831,6 +1086,7 @@ class AutoClicker:
         target, self._cashout_target = self._cashout_target, None
         points, self._cashout_points = self._cashout_points, []
         self._cashout_prev = None
+        self._cashout_deadline = None
         ok = True
         simulated = self.settings.simulated
         for point in points:
@@ -852,7 +1108,15 @@ class AutoClicker:
                      "round": self._last_id, "value": str(value), "clicked": bool(clicked),
                      "reason": reason, "site_confirmed": confirmed,
                      "points": [list(point) for point in points],
-                     "clicks": self._clicks}
+                     "clicks": self._clicks,
+                     "round_id": self._last_id,
+                     "target_round_id": self._last_id,
+                     "selected_strategy": "cashout",
+                     "click_point": [list(point) for point in points],
+                     "click_intent_at": datetime.now().isoformat(timespec="milliseconds"),
+                     "final_status": ("SITE CONFIRMED" if confirmed else
+                                      "INPUT SENT" if clicked else
+                                      "SITE UNCONFIRMED")}
             with self.log_path.open("a", encoding="utf-8") as file:
                 file.write(json.dumps(entry, ensure_ascii=False) + "\n")
         except Exception:
@@ -863,6 +1127,7 @@ class AutoClicker:
         target, self._cashout_target = self._cashout_target, None
         points, self._cashout_points = self._cashout_points, []
         self._cashout_prev = None
+        self._cashout_deadline = None
         self._log_cashout(value or target, False, reason, points)
 
     def close(self) -> None:

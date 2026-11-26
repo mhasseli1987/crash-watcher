@@ -282,6 +282,8 @@ class MonitorWorker(QThread):
                     while not self._stop.is_set():
                         if self._resync_on_resume.is_set():
                             self._resync_on_resume.clear()
+                            # هیچ کلیک یا خروج برنامه‌ریزی‌شدهٔ قبل از توقف اجرا نمی‌شود.
+                            clicker.resume_cleanup()
                             self.detector.reset()
                             self._prediction_target = None
                             self._frozen_pending = None
@@ -377,6 +379,14 @@ class MonitorWorker(QThread):
                                     and completed is None and self._prediction_target is None
                                     and self.detector.state.name == "ROUND_IN_PROGRESS"):
                                 self._start_hybrid(clicker)
+                            # کلیک تأخیردار دست قبلی: بدون خواب و فقط وقتی هنوز دست
+                            # تازه‌ای تمام نشده، تا ورودی به دست اشتباه نرسد.
+                            if completed is None and not bang_now and clicker._plan is not None:
+                                drained = clicker.drain_click()
+                                if drained is not None:
+                                    if drained.clicked and clicker.wants_cashout():
+                                        cashout_wait_for_live = True
+                                    self.click_report.emit(drained)
                             strategy_result = (self.strategy.process_round(completed.round_id, completed.multiplier)
                                                if completed and self.settings.bot_mode == "turnbal" else None)
                             self.observation.emit(reading, completed, strategy_result)
@@ -401,6 +411,10 @@ class MonitorWorker(QThread):
                                 # کلیکر داده می‌شود تا در پنجرهٔ کوتاه فقط کلیک کند.
                                 turnbal = self.settings.bot_mode == "turnbal"
                                 color = clicker.color(completed.multiplier) if turnbal else None
+                                # فرادادهٔ تصمیم مدل برای همین دست، برای لاگ PHASE 6.
+                                model_prediction = None
+                                model_source = None
+                                model_latency = None
                                 scoring_target = (self._frozen_pending or {}).get("cashout") or 1.4
                                 outcome = (color if turnbal else
                                            "SUCCESS" if float(completed.multiplier) >= scoring_target else "FAIL")
@@ -449,6 +463,9 @@ class MonitorWorker(QThread):
                                         "answers": frozen_answers,
                                         "total_latency_ms": frozen_total_ms,
                                         "latencies": frozen_latencies}
+                                    model_prediction = chosen.verdict.bet if chosen else None
+                                    model_source = chosen.source if chosen else None
+                                    model_latency = frozen_total_ms
                                     verdict = chosen.verdict if chosen else None
                                     if verdict is not None and self._guard is not None:
                                         verdict, _ = self._guard.check(verdict)
@@ -471,9 +488,13 @@ class MonitorWorker(QThread):
                                 if advice is not None:
                                     # پیشنهاد صریح «تحلیل قبل از دست» بر تصمیم
                                     # خودکار اولویت دارد؛ هدف خروج از تنظیمات می‌آید.
-                                    clicker.set_smart_play(advice[0], advice[1])
+                                    clicker.set_smart_play(advice[0], advice[1],
+                                                           prediction=None, source="MANUAL")
                                 else:
-                                    clicker.set_smart_play(ready.bets if ready else (), cashout)
+                                    clicker.set_smart_play(
+                                        ready.bets if ready else (), cashout,
+                                        prediction=model_prediction, source=model_source,
+                                        provider_latency_ms=model_latency)
                                 # A frame captured before the round ended may still be
                                 # undergoing OCR. Allow it to finish before settling.
                                 if win_future is not None and clicker._cashout_attempted:
@@ -492,7 +513,13 @@ class MonitorWorker(QThread):
                                     # رد می‌شود تا آمار خراب نشود.
                                     report = ClickReport(False,
                                                          f"late detection {age_ms:.0f} ms; no click",
-                                                         count=clicker.clicks)
+                                                         count=clicker.clicks, status="EXPIRED",
+                                                         target_round_id=completed.round_id,
+                                                         missed_deadline_reason=(
+                                                             f"detection arrived {age_ms:.0f} ms after the round; "
+                                                             f"window is {CLICK_WINDOW_MS:.0f} ms"))
+                                    clicker.record_report(completed.round_id,
+                                                          completed.multiplier, report)
                                 else:
                                     report = clicker.fire(completed.round_id,
                                                           completed.multiplier)

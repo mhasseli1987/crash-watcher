@@ -131,7 +131,9 @@ def test_red_streak_is_counted_from_the_newest_rounds():
 
 def test_red_streak_snapshot_skips_the_model(monkeypatch):
     """چهار قرمز پیاپی: مدل پرسیده نمی‌شود و توقف یک‌دقیقه‌ای اعلام می‌شود."""
-    worker = advice.SnapshotAdviceWorker(DesktopSettings())
+    # توقف قرمزهای پیاپی قاعدهٔ بازی رنگ ترنبال است (در کلاسیک قرمز نیمی از
+    # دست‌هاست و ربات را یک‌دست‌درمیان می‌خواباند).
+    worker = advice.SnapshotAdviceWorker(DesktopSettings(bot_mode="turnbal"))
     frames = [np.zeros((2, 2, 3), dtype=np.uint8)] * 2
     monkeypatch.setattr(worker, "capture_regions", lambda: frames)
     monkeypatch.setattr(advice, "RapidOCRReader", lambda: None)
@@ -158,7 +160,8 @@ def test_advice_reaches_the_click_decision(tmp_path):
     base = replace(DesktopSettings(), result_region=Region(1, 0, 0, 20, 10),
                    bot_mode="turnbal", autoclick_enabled=True, cashout_enabled=False,
                    autoclick_dry_run=False, shadow_mode=False, bet_point_green=(70, 70),
-                   smart_play_learning_minutes=0, autoclick_threshold="10.00")
+                   autoclick_delay_ms=0, smart_play_learning_minutes=0,
+                   autoclick_threshold="10.00")
     worker = MonitorWorker(base, StrategyEngine(base.strategy()))
     worker.submit_advice("GREEN")
     assert worker._take_advice() == (("GREEN",), None)

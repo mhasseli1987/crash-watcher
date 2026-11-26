@@ -656,25 +656,34 @@ def test_high_round_inside_the_run_does_not_reset_the_count(no_detection):
     assert clicker.fire("e", Decimal("10.00")).remaining == 2
 
 def test_no_click_waits_longer_than_one_second(no_detection, monkeypatch):
+    """تأخیر کلیک سقف یک ثانیه دارد و به‌صورت زمان‌بندی یکنوا اجرا می‌شود، نه خواب."""
     slept = []
     monkeypatch.setattr("crash_watcher.desktop.clicker.sleep", lambda seconds: slept.append(seconds))
     with pytest.raises(ValueError):
         _clicker(autoclick_delay_ms=1001).validate()
-    clicker = AutoClicker(_clicker(autoclick_delay_ms=1000), sender=_Sender())
-    assert clicker.fire("r", Decimal("12.00")).clicked
+    clock = {"now": 0.0}
+    sender = _Sender()
+    clicker = AutoClicker(_clicker(autoclick_delay_ms=1000), sender=sender,
+                          clock=lambda: clock["now"])
+    scheduled = clicker.fire("r", Decimal("12.00"))
+    assert not scheduled.clicked and scheduled.status == "CLICK SCHEDULED"
+    assert sender.calls == []
+    assert clicker.drain_click() is None  # هنوز زود است
+    clock["now"] = 1.0
+    assert clicker.drain_click().clicked and len(sender.calls) == 1
     assert clicker.test().clicked
-    assert slept == [1.0]
+    assert slept == []
 
 
 def test_clicker_places_automatic_bet_without_delay(no_detection, monkeypatch):
     slept = []
     monkeypatch.setattr("crash_watcher.desktop.clicker.sleep", lambda seconds: slept.append(seconds))
     sender = _Sender()
-    clicker = AutoClicker(_clicker(autoclick_delay_ms=1000), sender=sender)
+    clicker = AutoClicker(_clicker(autoclick_delay_ms=0), sender=sender)
     assert clicker.fire("r1", Decimal("12.00")).clicked
     assert slept == [] and len(sender.calls) == 1
     slept.clear()
-    AutoClicker(_clicker(autoclick_delay_ms=0), sender=sender).fire("r2", Decimal("12.00"))
+    AutoClicker(_clicker(autoclick_delay_ms=500), sender=sender).fire("r2", Decimal("12.00"))
     assert slept == []
 
 def test_clicker_clicks_once_per_round_and_respects_cooldown(no_detection):
