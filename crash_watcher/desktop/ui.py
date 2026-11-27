@@ -1040,6 +1040,23 @@ class MainWindow(QMainWindow):
         color_hint.setWordWrap(True)
         color_hint.setStyleSheet("color:#7fa694;font-size:12px")
         color_form.addRow(color_hint)
+        self.tb_plan = QCheckBox("پیش‌بینی چند دست آینده با یک تماس مدل")
+        self.tb_plan.setChecked(self.settings.turnbal_plan_enabled)
+        self.tb_plan.setToolTip("مدل به‌جای تصمیم در پنجرهٔ چندثانیه‌ای، یک‌بار رنگ چند دست "
+                                "آینده را می‌دهد و کلیکر همان رنگ‌ها را به ترتیب می‌زند")
+        color_form.addRow("برنامه", self.tb_plan)
+        self.tb_plan_size = QSpinBox()
+        self.tb_plan_size.setRange(1, 10)
+        self.tb_plan_size.setSuffix(" دست")
+        self.tb_plan_size.setValue(self.settings.turnbal_plan_size)
+        color_form.addRow("تعداد دست هر برنامه", self.tb_plan_size)
+        plan_hint = QLabel("روشن: بعد از دورهٔ ارزیابی، مدل یک‌بار رنگ چند دست آینده را "
+                           "می‌دهد (ضریب لازم نیست) و ربات به ترتیب روی همان رنگ‌ها کلیک "
+                           "می‌کند؛ وقتی برنامه تمام شد، از وضعیت تازه برنامهٔ بعدی گرفته "
+                           "می‌شود. برنامه در logs/turnbal-plan.jsonl ثبت می‌شود.")
+        plan_hint.setWordWrap(True)
+        plan_hint.setStyleSheet("color:#7fa694;font-size:12px")
+        color_form.addRow(plan_hint)
         layout.addWidget(color_group)
 
         calib_group = QGroupBox("کالیبراسیون شرط سه‌رنگ")
@@ -1143,6 +1160,8 @@ class MainWindow(QMainWindow):
             getattr(self, f"tb_{key}_conf").setValue(round(getattr(defaults, f"turnbal_{key}_min_conf") * 100))
             getattr(self, f"tb_{key}_tries").setValue(getattr(defaults, f"turnbal_{key}_attempts"))
         self.tb_color_only.setChecked(defaults.turnbal_color_only)
+        self.tb_plan.setChecked(defaults.turnbal_plan_enabled)
+        self.tb_plan_size.setValue(defaults.turnbal_plan_size)
         self.tb_cashout_min.setValue(defaults.turnbal_cashout_min)
         self.tb_cashout_max.setValue(defaults.turnbal_cashout_max)
         self.tb_emergency.setValue(defaults.turnbal_emergency_exit)
@@ -1242,6 +1261,8 @@ class MainWindow(QMainWindow):
                        smart_latency_budget_ms=self.smart_latency.value(),
                        bot_mode=self.settings.bot_mode,
                        turnbal_color_only=self.tb_color_only.isChecked(),
+                       turnbal_plan_enabled=self.tb_plan.isChecked(),
+                       turnbal_plan_size=self.tb_plan_size.value(),
                        turnbal_red_enabled=self.tb_red_on.isChecked(),
                        turnbal_green_enabled=self.tb_green_on.isChecked(),
                        turnbal_yellow_enabled=self.tb_yellow_on.isChecked(),
@@ -1317,6 +1338,9 @@ class MainWindow(QMainWindow):
         bets = report.get("bets") or ()
         if report.get("ok") and bets:
             parts.append("انتخاب برای دست بعد: " + " + ".join(names.get(bet, bet) for bet in bets))
+        plan = report.get("plan_colors") or ()
+        if plan:
+            parts.append("برنامهٔ دست‌های آینده: " + " → ".join(names.get(bet, bet) for bet in plan))
         self.smart_play_status.setText(" | ".join(parts) or "—")
 
     def _toggle_smart_review(self, on: bool) -> None:
@@ -1754,6 +1778,10 @@ class MainWindow(QMainWindow):
         self.tb_green_tries.setValue(self.settings.turnbal_green_attempts)
         self.tb_yellow_tries.setValue(self.settings.turnbal_yellow_attempts)
         self.tb_color_only.setChecked(self.settings.turnbal_color_only)
+        self.tb_plan.blockSignals(True)
+        self.tb_plan.setChecked(self.settings.turnbal_plan_enabled)
+        self.tb_plan.blockSignals(False)
+        self.tb_plan_size.setValue(self.settings.turnbal_plan_size)
         self.tb_cashout_min.setValue(self.settings.turnbal_cashout_min)
         self.tb_cashout_max.setValue(self.settings.turnbal_cashout_max)
         self.tb_emergency.setValue(self.settings.turnbal_emergency_exit)

@@ -20,8 +20,10 @@ from crash_watcher.desktop.preflight import run_preflight
 from crash_watcher.desktop.secrets_store import is_protected, protect, unprotect
 from crash_watcher.desktop.smart_play import SmartPlanner
 from crash_watcher.desktop.smart_review import SmartSnapshot, SmartVerdict
-from crash_watcher.desktop.turnbal import (ColorRule, TurnbalCalibration, TurnbalGuard,
-                                            calibrate, build_prompt as turnbal_prompt)
+from crash_watcher.desktop.turnbal import (ColorRule, PlanQueue, TurnbalCalibration,
+                                            TurnbalGuard, calibrate,
+                                            build_plan_prompt as turnbal_plan_prompt,
+                                            build_prompt as turnbal_prompt, parse_plan)
 from types import SimpleNamespace
 from crash_watcher.desktop.forecast import ColorForecaster, Forecast
 from crash_watcher.desktop.color_grid import read_grid
@@ -1355,6 +1357,45 @@ def test_color_only_keeps_the_configured_doubling(no_detection):
     # دست بعد قرمز بسته شد: باخت رنگ، دوبل طبق تنظیمات.
     clicker.fire("r2", Decimal("1.20"))
     assert clicker.double_level == 1
+
+
+# --- «برنامهٔ چند دست آینده» ---------------------------------------------------
+
+def test_plan_prompt_asks_for_the_requested_number_of_rounds():
+    snapshot = SmartSnapshot(recent=("1.20", "2.40"),
+                             grid_columns=(("R", "G"), ("G",)), rounds_seen=6)
+    text = turnbal_plan_prompt(snapshot, TurnbalCalibration(), 3)
+    assert "3 دست آینده" in text and '"rounds"' in text
+    assert text.count('{"color"') == 3
+    # رنگ مهم است، نه ضریب: هیچ کش‌اوت/خروجی در پرامپت نیست.
+    assert "کش‌اوت" not in text and '"cashout"' not in text
+
+
+def test_parse_plan_keeps_the_order_and_confidences():
+    raw = ('{"rounds":[{"color":"red","confidence":0.6},'
+           '{"color":"سبز","confidence":70},{"color":"مون","confidence":0.4}]}')
+    plan = parse_plan(raw, 3)
+    assert [color for color, _ in plan] == ["RED", "GREEN", "YELLOW"]
+    assert plan[1][1] == pytest.approx(0.7)
+
+
+def test_parse_plan_skips_colours_outside_calibration():
+    plan = parse_plan('{"rounds":["YELLOW","GREEN"]}', 2, TurnbalCalibration())
+    assert [color for color, _ in plan] == ["GREEN"]
+
+
+def test_parse_plan_accepts_a_plain_colour_list_and_respects_the_size():
+    plan = parse_plan('{"colors":["RED","GREEN","RED","RED"]}', 3)
+    assert [color for color, _ in plan] == ["RED", "GREEN", "RED"]
+    assert parse_plan("not json", 3) == []
+
+
+def test_plan_queue_hands_over_one_colour_per_round():
+    queue = PlanQueue()
+    queue.load([("RED", 0.6), ("GREEN", 0.55), ("YELLOW", 0.4)])
+    assert not queue.empty and queue.label() == "قرمز → سبز → زرد (مون)"
+    assert [queue.take(), queue.take(), queue.take()] == ["RED", "GREEN", "YELLOW"]
+    assert queue.empty and queue.take() is None
 
 
 def test_smart_planner_scores_the_second_colour_as_break_even_only():

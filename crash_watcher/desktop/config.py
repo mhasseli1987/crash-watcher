@@ -85,6 +85,10 @@ class DesktopSettings:
     # را می‌زند؛ نه ضریب تحلیل می‌شود و نه کش‌اوتی بسته می‌شود. دوبل‌کردن طبق
     # تنظیمات (double_bet_max) سر جایش می‌ماند.
     turnbal_color_only: bool = False
+    # «برنامهٔ چند دست آینده»: مدل یک‌بار رنگ چند دست آینده را می‌دهد و کلیکر همان
+    # رنگ‌ها را به ترتیب می‌زند؛ دیگر هیچ تصمیمی داخل پنجرهٔ شش‌ثانیه‌ای گرفته نمی‌شود.
+    turnbal_plan_enabled: bool = False
+    turnbal_plan_size: int = 3
     # «حالت ترنبال»: کالیبراسیون شرط سه‌رنگ؛ هر رنگ جدا سنجیده می‌شود
     turnbal_red_enabled: bool = True
     turnbal_green_enabled: bool = True
@@ -309,6 +313,10 @@ class DesktopSettings:
             raise ValueError("turnbal_max_streak must be an integer between 1 and 50")
         if type(self.turnbal_min_gap) is not int or not 0 <= self.turnbal_min_gap <= 50:
             raise ValueError("turnbal_min_gap must be an integer between 0 and 50")
+        if type(self.turnbal_plan_enabled) is not bool:
+            raise ValueError("turnbal_plan_enabled must be a boolean")
+        if type(self.turnbal_plan_size) is not int or not 1 <= self.turnbal_plan_size <= 10:
+            raise ValueError("turnbal_plan_size must be an integer between 1 and 10")
         if (type(self.smart_play_learning_minutes) is not int
                 or not 0 <= self.smart_play_learning_minutes <= 600):
             raise ValueError("smart_play_learning_minutes must be an integer between 0 and 600")

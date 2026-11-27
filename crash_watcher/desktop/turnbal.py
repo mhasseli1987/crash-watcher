@@ -14,6 +14,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import json
+import re
 
 from .smart_review import (EXIT_MAX, EXIT_MIN, SmartSnapshot, SmartVerdict,
                            ask, parse_verdict)
@@ -252,3 +254,198 @@ def review(base_url: str, api_key: str, model: str, snapshot: SmartSnapshot,
     raw = ask(base_url, api_key, model, prompt, timeout, SYSTEM_PROMPT)
     verdict, _reason = calibrate(parse_verdict(raw), calibration)
     return verdict, raw, prompt
+
+
+# --------------------------------------------------------------------------
+# «برنامهٔ چند دست آینده»
+#
+# مدل هیچ‌وقت داخل پنجرهٔ کوتاه شرط صدا زده نمی‌شود. یک‌بار برای چند دست آینده
+# رنگ می‌دهد و کلیکر همان رنگ‌ها را به ترتیب، یکی در هر دست، می‌زند. وقتی
+# برنامه مصرف شد، از وضعیت تازه دوباره گرفته می‌شود.
+# --------------------------------------------------------------------------
+
+PLAN_SYSTEM_PROMPT = (
+    "تو موتور پیش‌بینی رنگ یک بازی سه‌شرط (Trenball) هستی. ورودی، شبکهٔ رنگ "
+    "نمودار و ضریب‌های اخیر است. برای دست‌های آینده، به ترتیب، رنگ محتمل هر دست "
+    "را بده. ضریب‌ها و خروج هیچ نقشی در تصمیم تو ندارند. پاسخ را همیشه در قالب "
+    "JSON بده."
+)
+
+
+def build_plan_prompt(snapshot: SmartSnapshot, calibration: TurnbalCalibration,
+                      size: int = 3, threshold: str = "10.00",
+                      extra_rules: str = "") -> str:
+    """پرسمان «رنگ چند دست آینده»؛ مثال JSON دقیقاً به تعداد خواسته‌شده است."""
+    from .smart_review import _grid_text  # همان متن شبکهٔ رنگ بخش بررسی هوشمند
+
+    rounds = max(1, int(size))
+    recent = "، ".join(snapshot.recent[-20:]) or "ندارد"
+    rules = _rules_text(calibration, threshold)
+    if extra_rules.strip():
+        rules.append("- " + extra_rules.strip())
+    # الگوی ``...`` عمداً قابل کپی نیست؛ مدل کوچک اگر مقدار نمونه ببیند همان را
+    # عیناً برمی‌گرداند ("RED|GREEN") و کل برنامه بی‌رنگ می‌شود.
+    example = ",".join('{"color":"<...>","confidence":<0..1>}' for _ in range(rounds))
+    return (
+        "وضعیت فعلی بازی:\n"
+        f"۱) ضریب آخرین دست‌ها (قدیمی به جدید): {recent}\n"
+        "۲) شبکهٔ رنگ نمودار (هر ستون از بالا جدید به پایین قدیمی):\n"
+        f"{_grid_text(snapshot)}\n"
+        f"تعداد دورهای دیده‌شده در این جلسه: {snapshot.rounds_seen}\n\n"
+        "قواعد و کالیبراسیون:\n" + "\n".join(rules) + "\n\n"
+        f"برای {rounds} دست آینده، به ترتیب (دست بعدی اول)، رنگ محتمل هر دست را بده. "
+        f"هر دست دقیقاً یک رنگ و دقیقاً {rounds} دست. فیلد color فقط یکی از این سه "
+        "واژه است: RED یا GREEN یا YELLOW (هیچ ترکیب و علامت اضافه‌ای ننویس). "
+        "اگر دستی را نمی‌دانی همان رنگ محتمل‌تر را بده.\n"
+        "فقط JSON برگردان:\n"
+        '{"rounds":[' + example + '],"reason":"یک جمله فارسی"}'
+    )
+
+
+def parse_plan(text: str, size: int = 3,
+               calibration: TurnbalCalibration | None = None) -> list[tuple[str, float]]:
+    """پاسخ مدل را به فهرست (رنگ، اطمینان) تبدیل کن؛ ورودی نامعتبر = فهرست خالی.
+
+    رنگ‌هایی که در کالیبراسیون خاموش‌اند پذیرفته نمی‌شوند و ترتیب دست‌ها حفظ
+    می‌شود. بیش از `size` دست نگه داشته نمی‌شود.
+    """
+    from .smart_review import _COLOR_ALIASES, _json_object
+
+    payload = _plan_payload(text)
+    if payload is None:
+        payload = _json_object(text)
+    if payload is None:
+        return []
+    items = (payload.get("rounds") or payload.get("plan") or payload.get("predictions")
+             or payload.get("colors"))
+    if isinstance(items, dict):
+        items = [items]
+    if not isinstance(items, list):
+        return []
+    limit = max(1, int(size))
+    plan: list[tuple[str, float]] = []
+    for item in items:
+        if isinstance(item, dict):
+            raw = item.get("color", item.get("bet", item.get("pick", "")))
+            confidence = item.get("confidence", item.get("probability", 0.5))
+        else:
+            raw, confidence = item, 0.5
+        label = str(raw).strip()
+        # مدل کوچک گاهی «RED|GREEN» یا «RED یا GREEN» می‌نویسد؛ اولین رنگ معتبر
+        # همان دست حساب می‌شود تا کل برنامه از دست نرود.
+        for piece in re.split(r"[|/,]|\s+(?:یا|or)\s+", label):
+            token = piece.strip()
+            if not token:
+                continue
+            candidate = _COLOR_ALIASES.get(token.lower(),
+                                           _COLOR_ALIASES.get(token, token.upper()))
+            if candidate in COLORS:
+                label = token
+                break
+        color = _COLOR_ALIASES.get(label.lower(), _COLOR_ALIASES.get(label, label.upper()))
+        if color not in COLORS:
+            continue
+        if calibration is not None and not calibration.rule(color).enabled:
+            continue
+        try:
+            value = float(str(confidence).replace("%", "").strip())
+        except (TypeError, ValueError):
+            value = 0.5
+        if value > 1:
+            value /= 100
+        plan.append((color, round(min(1.0, max(0.0, value)), 3)))
+        if len(plan) >= limit:
+            break
+    return plan
+
+
+def _plan_payload(text: str) -> dict | None:
+    """شیء JSON بیرونیِ پاسخ برنامه.
+
+    پاسخ برنامه شیءهای تودرتو دارد (هر دست یک شیء رنگ)؛ تطبیق غیرحریص `_json_object`
+    اولین شیء داخلی را می‌گرفت. این‌جا اول کل متن و بعد بیرونی‌ترین آکولاد خوانده
+    می‌شود.
+    """
+    if not isinstance(text, str):
+        return None
+    fenced = re.search(r"```(?:json)?\s*(\{.*\})\s*```", text, re.DOTALL)
+    candidates = ([fenced[1]] if fenced else []) + [text]
+    for candidate in candidates:
+        try:
+            value = json.loads(candidate.strip())
+        except (ValueError, TypeError):
+            continue
+        if isinstance(value, dict):
+            return value
+    greedy = re.search(r"\{.*\}", text, re.DOTALL)
+    if greedy:
+        try:
+            value = json.loads(greedy[0])
+        except (ValueError, TypeError):
+            return None
+        if isinstance(value, dict):
+            return value
+    return None
+
+
+def plan_schema(size: int = 3) -> dict:
+    """اسکیمای JSON برنامه؛ مدل محلی را روی رنگ‌های مجاز و تعداد درست قفل می‌کند."""
+    rounds = max(1, int(size))
+    return {
+        "type": "object",
+        "properties": {
+            "rounds": {
+                "type": "array", "minItems": rounds, "maxItems": rounds,
+                "items": {
+                    "type": "object",
+                    "properties": {"color": {"type": "string",
+                                             "enum": list(COLORS)},
+                                   "confidence": {"type": "number", "minimum": 0,
+                                                  "maximum": 1}},
+                    "required": ["color", "confidence"],
+                    "additionalProperties": False,
+                },
+            },
+            "reason": {"type": "string"},
+        },
+        "required": ["rounds", "reason"],
+        "additionalProperties": False,
+    }
+
+
+@dataclass
+class PlanQueue:
+    """برنامهٔ رنگ دست‌های آینده؛ هر دست فقط یک رنگ مصرف می‌کند."""
+
+    colors: list[str] = field(default_factory=list)
+    confidences: list[float] = field(default_factory=list)
+
+    def load(self, plan) -> None:
+        pairs = [(color, float(conf)) for color, conf in plan]
+        self.colors = [color for color, _ in pairs]
+        self.confidences = [conf for _, conf in pairs]
+
+    @property
+    def empty(self) -> bool:
+        return not self.colors
+
+    def take(self) -> str | None:
+        if not self.colors:
+            return None
+        color = self.colors.pop(0)
+        if self.confidences:
+            self.confidences.pop(0)
+        return color
+
+    def label(self) -> str:
+        return " → ".join(NAMES.get(color, color) for color in self.colors) or "خالی"
+
+
+def review_plan(base_url: str, api_key: str, model: str, snapshot: SmartSnapshot,
+                calibration: TurnbalCalibration, size: int = 3,
+                timeout: float = 60.0, threshold: str = "10.00",
+                extra_rules: str = "") -> tuple[list[tuple[str, float]], str, str]:
+    """برنامهٔ رنگ چند دست آینده از پرسمان تا فهرست: (برنامه، پاسخ خام، پرسمان)."""
+    prompt = build_plan_prompt(snapshot, calibration, size, threshold, extra_rules)
+    raw = ask(base_url, api_key, model, prompt, timeout, PLAN_SYSTEM_PROMPT)
+    return parse_plan(raw, size, calibration), raw, prompt

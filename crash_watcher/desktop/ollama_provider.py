@@ -67,6 +67,41 @@ def _parse_verdict(content: str, allowed_bets=("RED", "GREEN", "YELLOW", "SKIP")
                         float(cashout) if cashout is not None else None)
 
 
+def ask_text(settings: DesktopSettings, prompt: str, system: str = "",
+             num_predict: int = 420, schema: dict | None = None) -> str:
+    """یک پرسمان JSON خام از مدل محلی؛ برای «برنامهٔ چند دست آینده».
+
+    برخلاف `predict`، اسکیمای پاسخ ثابت نیست و متن خام برگردانده می‌شود تا با
+    `parse_plan` در turnbal خوانده شود.
+    """
+    settings.validate()
+    if not settings.ollama_enabled and settings.ai_provider != "local":
+        raise OllamaError("Ollama is disabled")
+    if not isinstance(prompt, str) or not prompt.strip():
+        raise ValueError("prompt must be nonempty text")
+    payload = {"model": settings.ollama_model, "stream": False, "think": False,
+               "keep_alive": settings.ollama_keep_alive,
+               "format": schema if isinstance(schema, dict) else "json",
+               "options": {"temperature": 0.2, "num_predict": num_predict},
+               "messages": [{"role": "system", "content":
+                             system.strip() or "Return only the required JSON object. "
+                             "Do not explain."},
+                            {"role": "user", "content": prompt}]}
+    body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    call = request.Request(settings.ollama_base_url.rstrip("/") + "/api/chat",
+                           data=body, headers={"Content-Type": "application/json"},
+                           method="POST")
+    try:
+        with request.urlopen(call, timeout=settings.ollama_timeout_ms / 1000) as response:
+            data = json.load(response)
+    except (OSError, ValueError, error.URLError) as exc:
+        raise OllamaError("Ollama request failed or timed out") from exc
+    try:
+        return str(data["message"]["content"])
+    except (TypeError, KeyError) as exc:
+        raise OllamaError("Ollama response has no message") from exc
+
+
 def predict(settings: DesktopSettings, prompt: str) -> SmartVerdict:
     """Request one compact JSON verdict from an installed local model."""
     settings.validate()

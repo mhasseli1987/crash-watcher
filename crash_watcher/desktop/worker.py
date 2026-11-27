@@ -25,11 +25,12 @@ from .model_compare import (ModelAttempt, ModelLeaderboard, compare as compare_m
                             parse_models)
 from .smart_play import SmartPlanner
 from .prediction_manager import PredictionManager
-from .ollama_provider import predict as predict_ollama, OllamaError
+from .ollama_provider import ask_text, predict as predict_ollama, OllamaError
 from .smart_review import SmartVerdict
 from .smart_review import SmartSnapshot, append_log, ask, build_prompt, grid_columns, parse_verdict, review
-from .turnbal import TurnbalCalibration, TurnbalGuard, build_prompt as build_turnbal_prompt
-from .turnbal import review as review_turnbal
+from .turnbal import (PLAN_SYSTEM_PROMPT, PlanQueue, TurnbalCalibration, TurnbalGuard,
+                      build_plan_prompt, build_prompt as build_turnbal_prompt)
+from .turnbal import parse_plan, plan_schema, review as review_turnbal, review_plan
 
 
 # تصمیم دست بعد باید پیش از بازشدن پنجرهٔ شرط آماده باشد؛ انتظار ۱۰ تا ۷۰ ثانیه‌ای
@@ -148,6 +149,9 @@ class MonitorWorker(QThread):
         # پیشنهاد «تحلیل قبل از دست» برای دست بعد؛ یک‌بار مصرف می‌شود.
         self._advice_lock = Lock()
         self._advice: tuple[tuple[str, ...], float | None] | None = None
+        # «برنامهٔ چند دست آینده»: رنگ دست‌های آینده از یک تماس مدل، یکی در هر دست.
+        self._plan = PlanQueue()
+        self._plan_busy = False
 
     def configure(self, settings: DesktopSettings) -> None:
         """Apply click settings from the window while the loop is running."""
@@ -193,6 +197,84 @@ class MonitorWorker(QThread):
         with self._advice_lock:
             advice, self._advice = self._advice, None
         return advice
+
+    # -- «برنامهٔ چند دست آینده» -----------------------------------------
+    def _plan_mode(self) -> bool:
+        """ترنبال + فقط رنگ + برنامهٔ چند دست آینده روشن است؟"""
+        return bool(self.settings.bot_mode == "turnbal"
+                    and self.settings.turnbal_color_only
+                    and self.settings.turnbal_plan_enabled)
+
+    def _start_plan(self, current: str) -> None:
+        """یک تماس مدل برای رنگ چند دست آینده، در رشتهٔ جدا و بدون توقف پایش."""
+        if self._plan_busy or not self._plan_mode():
+            return
+        self._plan_busy = True
+        snapshot = SmartSnapshot(recent=tuple(self._recent), current=current,
+                                 grid_columns=self._chart_grid(), rounds_seen=self._smart_seen)
+        Thread(target=self._plan_thread, args=(snapshot, self.settings), daemon=True).start()
+
+    def _plan_thread(self, snapshot: SmartSnapshot, settings: DesktopSettings) -> None:
+        started = perf_counter()
+        calibration = TurnbalCalibration.from_settings(settings)
+        size = max(1, int(settings.turnbal_plan_size))
+        log_path = PROJECT_ROOT / "logs" / "turnbal-plan.jsonl"
+        model = settings.smart_review_model or "auto"
+        try:
+            if settings.ai_provider == "local":
+                prompt = build_plan_prompt(snapshot, calibration, size,
+                                           settings.autoclick_threshold,
+                                           settings.smart_review_rules)
+                # برنامه در رشتهٔ جدا گرفته می‌شود؛ سقف انتظار بلندتر از تصمیم
+                # لحظه‌ای است تا لود سرد مدل برنامه را بی‌دلیل از بین نبرد.
+                raw = ask_text(replace(settings, ollama_timeout_ms=max(settings.ollama_timeout_ms,
+                                                                     60000)),
+                               prompt, PLAN_SYSTEM_PROMPT, schema=plan_schema(size))
+                plan = parse_plan(raw, size, calibration)
+                model = settings.ollama_model
+            else:
+                plan, raw, prompt = review_plan(
+                    settings.smart_review_url, settings.resolved_key(), model, snapshot,
+                    calibration, size, settings.smart_review_timeout_s,
+                    settings.autoclick_threshold, settings.smart_review_rules)
+        except Exception as exc:
+            self._plan_busy = False
+            append_log(log_path, {"round": snapshot.current, "ok": False, "error": str(exc)})
+            self.smart_report.emit({"ok": False, "mode": "turnbal", "plan": True,
+                                    "round": snapshot.current,
+                                    "error": "برنامهٔ چند دست آینده: " + str(exc),
+                                    **(self._planner.stats() if self._planner else {})})
+            return
+        self._plan_busy = False
+        if not plan:
+            append_log(log_path, {"round": snapshot.current, "ok": False,
+                                  "error": "no colour in the answer", "raw": raw})
+            self.smart_report.emit({"ok": False, "mode": "turnbal", "plan": True,
+                                    "round": snapshot.current,
+                                    "error": "مدل برای دست‌های آینده رنگی برنگرداند"})
+            return
+        self._plan.load(plan)
+        append_log(log_path, {"round": snapshot.current, "ok": True, "model": model,
+                              "plan": [color for color, _ in plan],
+                              "confidence": [conf for _, conf in plan],
+                              "seconds": round(perf_counter() - started, 2), "raw": raw})
+        self.smart_report.emit({"ok": True, "mode": "turnbal", "plan": True,
+                                "round": snapshot.current, "verdict": None,
+                                "bets": (), "model": model, "raw": raw,
+                                "plan_colors": [color for color, _ in plan],
+                                "seconds": round(perf_counter() - started, 2),
+                                **(self._planner.stats() if self._planner else {})})
+
+    def _take_plan_color(self, round_id: str) -> str | None:
+        """رنگ همین دست از برنامه؛ اگر برنامه تمام شده باشد برنامهٔ تازه شروع می‌شود."""
+        if self._plan.empty:
+            if not self._plan_busy:
+                self._start_plan(round_id)
+            return None
+        color = self._plan.take()
+        if self._plan.empty and not self._plan_busy:
+            self._start_plan(round_id)
+        return color
 
     def stop(self) -> None:
         self._stop.set()
@@ -376,6 +458,7 @@ class MonitorWorker(QThread):
                                                               history_id, history_value,
                                                               bang=bang_now)
                             if (self._smart_play_active()
+                                    and not self._plan_mode()
                                     and completed is None and self._prediction_target is None
                                     and self.detector.state.name == "ROUND_IN_PROGRESS"):
                                 self._start_hybrid(clicker)
@@ -450,6 +533,18 @@ class MonitorWorker(QThread):
                                     self._score_models(color)
                                 if self._guard is not None:
                                     self._guard.observe(color)
+                                # «برنامهٔ چند دست آینده»: رنگ همین دست از برنامهٔ
+                                # آماده خوانده می‌شود؛ هیچ تماسی داخل پنجرهٔ شرط نیست.
+                                plan_mode = self._plan_mode()
+                                plan_color = None
+                                if plan_mode:
+                                    if planner.learning:
+                                        # دورهٔ ارزیابی: فقط رنگ‌ها خوانده می‌شوند و
+                                        # اولین برنامه پیش از پایان دوره آماده می‌شود.
+                                        if self._plan.empty and not self._plan_busy:
+                                            self._start_plan(completed.round_id)
+                                    else:
+                                        plan_color = self._take_plan_color(completed.round_id)
                                 planner.observe(completed.round_id, outcome)
                                 if self._smart_play_active() and self._prediction_target is not None:
                                     self._local_prediction(clicker, color)
@@ -499,6 +594,12 @@ class MonitorWorker(QThread):
                                     clicker.set_smart_play(advice[0],
                                                            None if color_only else advice[1],
                                                            prediction=None, source="MANUAL")
+                                elif plan_color is not None:
+                                    # برنامهٔ چند دست آینده: همین یک رنگ، همین دست.
+                                    clicker.set_smart_play((plan_color,), None,
+                                                           prediction=plan_color,
+                                                           source="PLAN")
+                                    model_prediction, model_source = plan_color, "PLAN"
                                 else:
                                     clicker.set_smart_play(
                                         ready.bets if ready else (), cashout,
@@ -544,7 +645,8 @@ class MonitorWorker(QThread):
                                 self._recent.append(str(completed.multiplier))
                                 self._smart_seen += 1
                                 self._smart_rounds += 1
-                                if (not self._smart_play_active() and self.settings.smart_review_enabled
+                                if (not self._smart_play_active() and not self._plan_mode()
+                                        and self.settings.smart_review_enabled
                                         and self._smart_rounds >= self.settings.smart_review_every_rounds):
                                     self._smart_rounds = 0
                                     self._start_smart_review(str(completed.multiplier))
