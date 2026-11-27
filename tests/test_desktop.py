@@ -79,6 +79,23 @@ def test_misread_bang_uses_detected_line_without_guessing_digits():
     assert recognizer.recognize(np.zeros((194, 410, 3), np.uint8)).value is None
 
 
+def test_split_bang_lines_are_joined_before_rejecting_the_round():
+    """صفحهٔ پایان واقعی «Bang» و «@1.00×» را دو تکه می‌دهد؛ پیوند باید بخواند."""
+    class SplitReader:
+        def __call__(self, image):
+            return "Ba 0", 0.55
+
+        def detect_lines(self, image):
+            return [("Bang", 0.99), ("@1.00×", 0.99)]
+
+    assert BangRecognizer(SplitReader()).recognize(
+        np.zeros((214, 442, 3), np.uint8)).value == Decimal("1.00")
+
+    SplitReader.detect_lines = lambda self, image: [("Bang", 0.99), ("Bonus", 0.99)]
+    assert BangRecognizer(SplitReader()).recognize(
+        np.zeros((214, 442, 3), np.uint8)).value is None
+
+
 def test_real_ocr_reads_a_padded_chart_viewport():
     import cv2
     image = np.full((194, 410, 3), 24, np.uint8)
@@ -149,6 +166,29 @@ def test_mismatched_history_badge_never_delays_the_round():
                                  "9342414", Decimal("9.99"))
     assert confirmed and confirmed.round_id.startswith("visual-")
     assert confirmed.multiplier == Decimal("10.00")
+
+def test_late_badge_does_not_complete_the_same_round_twice(monkeypatch):
+    """دستی که از متن Bang ثبت شد، با رسیدن نشان نوارش دوباره شمرده نمی‌شود."""
+    clock = {"t": 100.0}
+    monkeypatch.setattr("crash_watcher.desktop.final_result.monotonic", lambda: clock["t"])
+    detector = BangDetector(stable_frames=2, absent_frames=2)
+    now = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    detector.observe(_image(0), _reading(None), now)
+    detector.observe(_image(0), _reading(None), now)
+    detector.observe(_image(30), _reading("2.62"), now, "9415460", Decimal("55.10"))
+    detector.observe(_image(30), _reading("2.62"), now, "9415460", Decimal("55.10"))
+    first = detector.observe(_image(30), _reading("2.62"), now, "9415460", Decimal("55.10"))
+    assert first and first.round_id.startswith("visual-")
+    # نشان همان دست چند ثانیه بعد به نوار می‌رسد؛ نباید دست تازه بسازد.
+    clock["t"] = 108.0
+    detector.observe(_image(0), _reading(None), now)
+    detector.observe(_image(0), _reading(None), now)
+    assert detector.observe(_image(31), _reading(None), now, "9415461", Decimal("2.62")) is None
+    # دست تازهٔ بعدی هنوز دقیقاً یک‌بار ثبت می‌شود.
+    detector.observe(_image(31), _reading("3.10"), now)
+    fresh = detector.observe(_image(31), _reading("3.10"), now)
+    assert fresh and fresh.multiplier == Decimal("3.10")
+
 
 class _Strip:
     """خروجی OCR واقعی نوار ضرایب: شناسه‌ها یک گروه و ضریب‌ها گروه دیگر."""

@@ -380,8 +380,12 @@ class MonitorWorker(QThread):
                                     and self.detector.state.name == "ROUND_IN_PROGRESS"):
                                 self._start_hybrid(clicker)
                             # کلیک تأخیردار دست قبلی: بدون خواب و فقط وقتی هنوز دست
-                            # تازه‌ای تمام نشده، تا ورودی به دست اشتباه نرسد.
-                            if completed is None and not bang_now and clicker._plan is not None:
+                            # تازه‌ای تمام نشده، تا ورودی به دست اشتباه نرسد. صفحهٔ
+                            # «Bang» تا چند ثانیه می‌ماند ولی دکمهٔ شرط در همان حال
+                            # «Bet (Next round)» است؛ انتظار برای پاک‌شدن آن در تست
+                            # زنده تأخیر ۱ ثانیه‌ای را به ۴٫۸ ثانیه می‌رساند و برنامه
+                            # را در پنجرهٔ ۶ ثانیه‌ای منقضی می‌کرد.
+                            if completed is None and clicker._plan is not None:
                                 drained = clicker.drain_click()
                                 if drained is not None:
                                     if drained.clicked and clicker.wants_cashout():

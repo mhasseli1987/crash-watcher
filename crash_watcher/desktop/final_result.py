@@ -260,6 +260,21 @@ class BangRecognizer:
             valid = [(parse_bang(text), text, confidence) for text, confidence in lines
                      if parse_bang(text) is not None and np.isfinite(confidence)
                      and confidence >= max(0.8, self.min_confidence)]
+            if not valid:
+                # در صفحهٔ پایان واقعی، مدل تشخیص «Bang» و «@1.00×» را دو تکهٔ
+                # جدا برمی‌گرداند؛ ضمیمهٔ خط‌های پشت‌سرهم همان متن نهایی است.
+                # parse_bang سختگیر است، پس این پیوند عدد حدسی نمی‌سازد.
+                joined = []
+                for (first, first_score), (second, second_score) in zip(lines, lines[1:]):
+                    text = f"{str(first).strip()} {str(second).strip()}"
+                    try:
+                        confidence = min(float(first_score), float(second_score))
+                    except (TypeError, ValueError):
+                        continue
+                    joined.append((text, confidence))
+                valid = [(parse_bang(text), text, confidence) for text, confidence in joined
+                         if parse_bang(text) is not None and np.isfinite(confidence)
+                         and confidence >= max(0.8, self.min_confidence)]
         if not valid or len({value for value, _, _ in valid}) != 1:
             text, confidence = max(readings, key=lambda item: item[1], default=("", 0.0))
             return FinalReading(None, confidence, text, None, True)
@@ -298,6 +313,9 @@ class BangDetector:
         # جدیدترین نشان نوار ضرایب که حساب شده است؛ با آن، نشان‌های ناقص یا
         # تکراری نمی‌توانند دست تازه بسازند.
         self._newest_badge: str | None = None
+        # دستی که از متن Bang ثبت شد ولی نشان نوارش هنوز نرسیده است؛ نشان بعدی
+        # با همین ضریب فقط تأیید همان دست است، نه یک دست تازه.
+        self._awaiting_badge: Decimal | None = None
         self._last_completion = 0.0
         # چند فریم پشت‌سرهم متن نارنجی «Bang» دیده شده است.
         self._bang_frames = 0
@@ -316,13 +334,25 @@ class BangDetector:
         self._bang_frames = self._bang_frames + 1 if bang else 0
         bang_seen = self._bang_frames >= 2
         badge = None
+        duplicate_badge = False
         if history_id and history_value is not None and str(history_id).isdigit():
             if self._newest_badge is None:
                 # اولین نشان فقط خط پایه است: آن دست پیش از شروع پایش بسته شده.
                 self._newest_badge = history_id
             elif int(history_id) > int(self._newest_badge):
                 self._newest_badge = history_id
-                badge = (history_id, history_value)
+                if (self._awaiting_badge is not None
+                        and history_value == self._awaiting_badge):
+                    # همین دست چند لحظه پیش از متن Bang ثبت شد؛ این نشان تأیید
+                    # همان دست است و نباید شرط تازه‌ای باز کند.
+                    self._awaiting_badge = None
+                    self._seen_ids.add(history_id)
+                    self._seen_ids.add(f"game-{history_id}")
+                    duplicate_badge = True
+                else:
+                    badge = (history_id, history_value)
+        if duplicate_badge:
+            return None
         if reading.value is None:
             self._absent += 1
             self._stable = 0
@@ -371,6 +401,9 @@ class BangDetector:
         self._seen_ids.add(round_id)
         if history_id:
             self._seen_ids.add(history_id)
+        # دستِ ثبت‌شده از متن نهایی منتظر نشان نوارش می‌ماند تا همان نشان دوباره
+        # دست تازه ساخته نشود.
+        self._awaiting_badge = None if matched else reading.value
         return ConfirmedFinal(round_id, reading.value, reading.confidence, timestamp)
 
     def _confirm_badge(self, badge, thumb, timestamp: datetime) -> ConfirmedFinal:
@@ -378,6 +411,7 @@ class BangDetector:
         history_id, value = badge
         self._seen_ids.add(history_id)
         self._seen_ids.add(f"game-{history_id}")
+        self._awaiting_badge = None
         self._absent = 0
         self._stable = 0
         self._candidate = None
