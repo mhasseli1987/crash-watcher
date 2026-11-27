@@ -414,6 +414,7 @@ class MonitorWorker(QThread):
                                 # می‌شود، بعد تصمیمِ آمادهٔ مدل برای دست بعد به
                                 # کلیکر داده می‌شود تا در پنجرهٔ کوتاه فقط کلیک کند.
                                 turnbal = self.settings.bot_mode == "turnbal"
+                                color_only = turnbal and self.settings.turnbal_color_only
                                 color = clicker.color(completed.multiplier) if turnbal else None
                                 # فرادادهٔ تصمیم مدل برای همین دست، برای لاگ PHASE 6.
                                 model_prediction = None
@@ -483,8 +484,11 @@ class MonitorWorker(QThread):
                                                             **planner.stats()})
                                 ready = (planner.take() if self._smart_play_active()
                                          else None)
-                                cashout = ready.cashout if ready else None
-                                if ready is not None and self._guard is not None:
+                                # در ترنبال فقط رنگ مهم است: هیچ هدف خروجی از مدل،
+                                # پیشنهاد دستی یا کالیبراسیون ساخته نمی‌شود.
+                                cashout = (None if color_only
+                                           else (ready.cashout if ready else None))
+                                if not color_only and ready is not None and self._guard is not None:
                                     # خروج اضطراری کالیبراسیون روی هدف کش‌اوت اعمال
                                     # می‌شود، نه فقط در متن پرامپت.
                                     cashout = self._guard.cap_cashout(cashout)
@@ -492,7 +496,8 @@ class MonitorWorker(QThread):
                                 if advice is not None:
                                     # پیشنهاد صریح «تحلیل قبل از دست» بر تصمیم
                                     # خودکار اولویت دارد؛ هدف خروج از تنظیمات می‌آید.
-                                    clicker.set_smart_play(advice[0], advice[1],
+                                    clicker.set_smart_play(advice[0],
+                                                           None if color_only else advice[1],
                                                            prediction=None, source="MANUAL")
                                 else:
                                     clicker.set_smart_play(

@@ -81,6 +81,10 @@ class DesktopSettings:
     smart_play_two_colors: bool = True
     # حالت ربات: "classic" (قواعد فعلی) یا "turnbal" (تصمیم هوش مصنوعی + شرط سه‌رنگ)
     bot_mode: str = "classic"
+    # «فقط رنگ مدل» در ترنبال: مدل فقط رنگ را پیش‌بینی می‌کند و کلیکر همان رنگ
+    # را می‌زند؛ نه ضریب تحلیل می‌شود و نه کش‌اوتی بسته می‌شود. دوبل‌کردن طبق
+    # تنظیمات (double_bet_max) سر جایش می‌ماند.
+    turnbal_color_only: bool = False
     # «حالت ترنبال»: کالیبراسیون شرط سه‌رنگ؛ هر رنگ جدا سنجیده می‌شود
     turnbal_red_enabled: bool = True
     turnbal_green_enabled: bool = True

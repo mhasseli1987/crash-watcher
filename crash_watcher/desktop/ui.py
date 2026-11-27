@@ -1029,6 +1029,19 @@ class MainWindow(QMainWindow):
         ai_layout.addWidget(provider)
         layout.addWidget(ai_group)
 
+        color_group = QGroupBox("نوع شرط")
+        color_form = QFormLayout(color_group)
+        self.tb_color_only = QCheckBox("فقط رنگ پیش‌بینی‌شدهٔ مدل")
+        self.tb_color_only.setChecked(self.settings.turnbal_color_only)
+        color_form.addRow("تصمیم", self.tb_color_only)
+        color_hint = QLabel("روشن: مدل فقط رنگ را پیش‌بینی می‌کند و کلیکر همان رنگ را "
+                            "می‌زند؛ هیچ ضریب، کش‌اوت، نشانهٔ ردیف یا استریک اجرا نمی‌شود. "
+                            "دوبل‌کردن طبق تنظیمات خودت می‌ماند.")
+        color_hint.setWordWrap(True)
+        color_hint.setStyleSheet("color:#7fa694;font-size:12px")
+        color_form.addRow(color_hint)
+        layout.addWidget(color_group)
+
         calib_group = QGroupBox("کالیبراسیون شرط سه‌رنگ")
         grid = QGridLayout(calib_group)
         grid.setHorizontalSpacing(10)
@@ -1129,6 +1142,7 @@ class MainWindow(QMainWindow):
             getattr(self, f"tb_{key}_on").setChecked(getattr(defaults, f"turnbal_{key}_enabled"))
             getattr(self, f"tb_{key}_conf").setValue(round(getattr(defaults, f"turnbal_{key}_min_conf") * 100))
             getattr(self, f"tb_{key}_tries").setValue(getattr(defaults, f"turnbal_{key}_attempts"))
+        self.tb_color_only.setChecked(defaults.turnbal_color_only)
         self.tb_cashout_min.setValue(defaults.turnbal_cashout_min)
         self.tb_cashout_max.setValue(defaults.turnbal_cashout_max)
         self.tb_emergency.setValue(defaults.turnbal_emergency_exit)
@@ -1227,6 +1241,7 @@ class MainWindow(QMainWindow):
                        smart_compare_models=self.smart_compare.text().strip(),
                        smart_latency_budget_ms=self.smart_latency.value(),
                        bot_mode=self.settings.bot_mode,
+                       turnbal_color_only=self.tb_color_only.isChecked(),
                        turnbal_red_enabled=self.tb_red_on.isChecked(),
                        turnbal_green_enabled=self.tb_green_on.isChecked(),
                        turnbal_yellow_enabled=self.tb_yellow_on.isChecked(),
@@ -1738,6 +1753,7 @@ class MainWindow(QMainWindow):
         self.tb_red_tries.setValue(self.settings.turnbal_red_attempts)
         self.tb_green_tries.setValue(self.settings.turnbal_green_attempts)
         self.tb_yellow_tries.setValue(self.settings.turnbal_yellow_attempts)
+        self.tb_color_only.setChecked(self.settings.turnbal_color_only)
         self.tb_cashout_min.setValue(self.settings.turnbal_cashout_min)
         self.tb_cashout_max.setValue(self.settings.turnbal_cashout_max)
         self.tb_emergency.setValue(self.settings.turnbal_emergency_exit)

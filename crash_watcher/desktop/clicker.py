@@ -617,13 +617,18 @@ class AutoClicker:
             self._smart_play = ()
             self._smart_cashout = None
         turnbal = self.settings.bot_mode == "turnbal"
+        # «فقط رنگ مدل»: مدل فقط رنگ را پیش‌بینی می‌کند؛ هیچ قاعدهٔ ضریب‌محور،
+        # نشانهٔ ردیف/استریک/جفت‌معکوس و هیچ کش‌اوتی اجرا نمی‌شود. دوبل‌کردن
+        # طبق تنظیمات و تسویهٔ رنگ سر جایش می‌ماند.
+        color_only = turnbal and self.settings.turnbal_color_only
         color = self._color(value) if turnbal else None
         if self._pending_rule is not None:
             target_colors, rule, stake, payouts = self._pending_rule
             settled = self._cashout_settled(value)
             # خروجی که سایت تأییدش نکرد فقط «نامعلوم» است و هیچ‌وقت شرط دست بعد را
             # قفل نمی‌کند: ربات بدون توقف به دست بعد می‌رود.
-            unconfirmed = (self.settings.cashout_enabled and not self.settings.simulated
+            unconfirmed = (self.settings.cashout_enabled and not color_only
+                           and not self.settings.simulated
                            and not settled
                            and (self._cashout_attempted or self._cashout_planned_target is None
                                 or value >= self._cashout_planned_target))
@@ -673,11 +678,11 @@ class AutoClicker:
             self._streak += 1
         elif turnbal:
             self._streak_color, self._streak = color, 1
-        if (turnbal and self.settings.pair_flip_enabled and self._streak == 2
-                and color in ("RED", "GREEN")):
+        if (turnbal and not color_only and self.settings.pair_flip_enabled
+                and self._streak == 2 and color in ("RED", "GREEN")):
             # Two reds or two greens in a row: the user expects the opposite colour next.
             self._flip_color = "GREEN" if color == "RED" else "RED"
-        if (turnbal and self.settings.streak_signal_enabled
+        if (turnbal and not color_only and self.settings.streak_signal_enabled
                 and self._streak > self.settings.streak_signal_length
                 and color in ("RED", "GREEN") and self._streak_clicks <= 0):
             # Seven reds or greens in a row: the user reads a streak that long as
@@ -693,7 +698,7 @@ class AutoClicker:
                                count=self._clicks, remaining=self._armed)
         reading = self._chart_reading() if turnbal else None
         row_gap = self.settings.row_signal_gap
-        row_due = (turnbal and self.settings.row_signal_enabled
+        row_due = (turnbal and not color_only and self.settings.row_signal_enabled
                    and row_yellow_due(reading, row_gap, self.settings.row_signal_rows,
                                       self.settings.row_signal_recent_columns))
         row_cell = None
@@ -708,7 +713,8 @@ class AutoClicker:
         if row_cell is not None:
             self._row_cell = row_cell
         threshold = Decimal(self.settings.autoclick_threshold)
-        if turnbal and value >= threshold and self._armed <= 0 and self._waiting <= 0:
+        if (turnbal and not color_only and value >= threshold
+                and self._armed <= 0 and self._waiting <= 0):
             # A yellow arms a run: skip autoclick_skip_rounds rounds, then click the
             # next autoclick_max_clicks rounds whatever they close at. A second
             # yellow inside the run neither restarts the wait nor extends the burst.
@@ -722,7 +728,7 @@ class AutoClicker:
             self._row_uses -= 1
         row_detail = (f"row {row_cell[0]} was yellow {row_gap} columns back"
                       if row_click and row_cell else "")
-        value_color = (None if (not turnbal or row_click or self._armed > 0)
+        value_color = (None if (not turnbal or color_only or row_click or self._armed > 0)
                        else self._value_bet(value))
         streak_click = (not row_click
                         and self._armed <= 0 and value_color is None
@@ -748,6 +754,10 @@ class AutoClicker:
                     # تصمیم آمادهٔ مدل: یکی از قواعد بالا فعال نشده، پس نظر مدل
                     # را اجرا کن — یک رنگ یا دو رنگ هم‌زمان.
                     rule = "smart-play"
+                elif color_only:
+                    # بدون پیش‌بینی رنگ مدل هیچ شرطی بسته نمی‌شود.
+                    return ClickReport(False, "waiting for the model colour",
+                                       count=self._clicks, remaining=0)
                 elif low_close and not turnbal:
                     # قاعدهٔ ثابت کاربر: ضریب بسته‌شده زیر ۱٫۱۰ (۱٫۰۵، ۱٫۰۸ …)
                     # یعنی همین حالا برای دست بعد روی دکمهٔ شرط کلیک شود.
@@ -819,7 +829,7 @@ class AutoClicker:
         # در حالت آزمایشی/سایه سرمایه جابه‌جا نمی‌شود؛ مبلغ صفر ثبت می‌شود.
         stake = 0.0 if simulated else self._stake()
         cashout_target = None
-        if self.settings.cashout_enabled and (colors or rule == "smart-play"):
+        if self.settings.cashout_enabled and not color_only and (colors or rule == "smart-play"):
             # هدفِ خروج همیشه داخل بازهٔ کاربر (پیش‌فرض ۱٫۴۰ تا ۱٫۹۰) نگه داشته
             # می‌شود تا هیچ خروجی پایین‌تر از عددی که کاربر گذاشته کلیک نشود.
             floor, ceiling = self._cashout_bounds()

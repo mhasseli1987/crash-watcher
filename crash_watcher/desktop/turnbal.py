@@ -75,31 +75,27 @@ class TurnbalCalibration:
 
 
 SYSTEM_PROMPT = (
-    "تو موتور تصمیم یک ربات Crash (Trenball) هستی. ورودی، ضریب آخرین دست‌ها و "
-    "شبکهٔ رنگ نمودار است. فقط بر اساس همین داده و کالیبراسیون کاربر تحلیل کن، "
-    "هیچ ادعای قطعی نکن و پاسخ را همیشه در قالب JSON بده."
+    "تو موتور پیش‌بینی رنگ یک بازی سه‌شرط (Trenball) هستی. ورودی، شبکهٔ رنگ "
+    "نمودار است. فقط رنگ دست بعد را پیش‌بینی کن؛ ضریب‌ها و خروج هیچ نقشی در "
+    "تصمیم تو ندارند. پاسخ را همیشه در قالب JSON بده."
 )
 
 
 def _rules_text(calibration: TurnbalCalibration, threshold: str) -> list[str]:
+    del threshold  # اثری در تصمیم رنگ ندارد
     lines = ["کالیبراسیون شرط سه‌رنگ (فقط رنگ‌های زیر مجازند):"]
-    ranges = {"RED": f"کمتر از ۲٫۰۰", "GREEN": f"۲٫۰۰ تا {threshold}",
-              "YELLOW": f"{threshold} و بالاتر"}
     for color in COLORS:
         rule = calibration.rule(color)
         if rule.enabled:
-            lines.append(f"- {NAMES[color]}: بازهٔ ضریب {ranges[color]} | حداقل احتمال "
-                         f"{rule.min_conf:.0%} | حداکثر {rule.max_attempts} تلاش در چرخه")
+            lines.append(f"- {NAMES[color]}: حداقل احتمال {rule.min_conf:.0%} | "
+                         f"حداکثر {rule.max_attempts} تلاش در چرخه")
         else:
             lines.append(f"- {NAMES[color]}: غیرفعال — پیشنهادش پذیرفته نمی‌شود")
     lines += [
-        f"- ضریب خروج (کش‌اوت) فقط بین {calibration.cashout_min:.2f} و "
-        f"{calibration.cashout_max:.2f}",
         f"- اگر نرخ برد اندازه‌گیری‌شده از {calibration.min_cycle_win:.0%} کمتر شد، "
         "محافظه‌کارتر شو",
         f"- بیش از {calibration.max_streak} دست پشت‌سرهم شرط نبند؛ بین دو شرط دست‌کم "
         f"{calibration.min_gap} دست فاصله بگذار",
-        f"- خروج اضطراری روی {calibration.emergency_exit:.2f} است؛ دیرتر از آن نمان",
         "- لازم نیست هر دست بازی کنی؛ دست‌های بی‌اطمینان را SKIP کن",
     ]
     return lines
@@ -111,7 +107,6 @@ def build_prompt(snapshot: SmartSnapshot, calibration: TurnbalCalibration,
     """پرسمان کامل ترنبال؛ رنگ‌ها و حداقل‌ها را صریح می‌گوید."""
     from .smart_review import _grid_text  # همان متن شبکهٔ رنگ بخش بررسی هوشمند
 
-    recent = "، ".join(snapshot.recent[-20:]) or "ندارد"
     bets = "، ".join(f"{NAMES[name]} ({payout})" for name, payout in snapshot.bets)
     rules = _rules_text(calibration, threshold)
     if allow_two:
@@ -121,17 +116,16 @@ def build_prompt(snapshot: SmartSnapshot, calibration: TurnbalCalibration,
         rules.append("- " + extra_rules.strip())
     return (
         "وضعیت فعلی بازی:\n"
-        f"۱) ضریب آخرین دست‌ها (قدیمی به جدید): {recent}\n"
-        f"۲) ضریب دست فعلی/آخر: {snapshot.current or 'خوانده نشد'}\n"
-        "۳) شبکهٔ رنگ نمودار (هر ستون از بالا جدید به پایین قدیمی):\n"
+        "۱) شبکهٔ رنگ نمودار (هر ستون از بالا جدید به پایین قدیمی):\n"
         f"{_grid_text(snapshot)}\n"
-        f"۴) دکمه‌های شرط این دست: {bets}\n"
+        f"۲) دکمه‌های شرط این دست: {bets}\n"
         f"تعداد دورهای دیده‌شده در این جلسه: {snapshot.rounds_seen}\n\n"
         "قواعد و کالیبراسیون:\n" + "\n".join(rules) + "\n\n"
-        "برای دست بعد کدام رنگ بیشترین شانس را دارد؟ فقط JSON برگردان:\n"
+        "برای دست بعد کدام رنگ بیشترین شانس را دارد؟ فقط رنگ و احتمال را بده؛ "
+        "ضریب و خروج لازم نیست. فقط JSON برگردان:\n"
         + ('{"bet":"RED|GREEN|YELLOW|SKIP","second":"NONE|RED|GREEN|YELLOW",'
-           '"cashout":1.45,"confidence":0.0,"reason":"یک جمله فارسی"}' if allow_two else
-           '{"bet":"RED|GREEN|YELLOW|SKIP","cashout":1.45,"confidence":0.0,'
+           '"confidence":0.0,"reason":"یک جمله فارسی"}' if allow_two else
+           '{"bet":"RED|GREEN|YELLOW|SKIP","confidence":0.0,'
            '"reason":"یک جمله فارسی"}')
     )
 

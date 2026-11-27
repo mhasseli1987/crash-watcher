@@ -1312,7 +1312,49 @@ def test_turnbal_prompt_states_the_enforced_limits():
                                      min_cycle_win=0.55)
     text = turnbal_prompt(SmartSnapshot(recent=("1.20", "9.00")), calibration)
     assert "4 دست" in text and "2 دست" in text
-    assert "1.55" in text and "55%" in text
+    assert "55%" in text
+    # پرامپت ترنبال فقط رنگ می‌خواهد: نه ضریب دست‌ها و نه کش‌اوت/خروج اضطراری.
+    assert "9.00" not in text and "1.55" not in text and "کش‌اوت" not in text
+    assert '"cashout"' not in text
+
+
+def test_color_only_bets_the_model_colour_and_ignores_multiplier_rules(no_detection):
+    sender = _Sender()
+    clicker = AutoClicker(_clicker(turnbal_color_only=True, autoclick_threshold="100",
+                                   value_bets={"1.00": "YELLOW"},
+                                   bet_point_red=(71, 72), bet_point_green=(61, 62)),
+                          sender=sender)
+    clicker.set_smart_play(("RED",))
+    report = clicker.fire("r1", Decimal("1.00"))
+    assert report.clicked and report.rule == "smart-play" and report.target == "RED"
+    assert report.point == (71, 72)
+
+
+def test_color_only_never_bets_without_a_model_colour(no_detection):
+    clicker = AutoClicker(_clicker(turnbal_color_only=True, autoclick_threshold="100"),
+                          sender=_Sender())
+    report = clicker.fire("r1", Decimal("50.00"))
+    assert not report.clicked and "model colour" in report.reason
+
+
+def test_color_only_bets_the_colour_without_a_cashout_target(no_detection):
+    clicker = AutoClicker(_clicker(turnbal_color_only=True, cashout_enabled=True,
+                                   bet_point_red=(71, 72)), sender=_Sender())
+    clicker.set_smart_play(("RED",), 1.5)
+    assert clicker.fire("r1", Decimal("1.00")).clicked
+    assert not clicker.wants_cashout()
+
+
+def test_color_only_keeps_the_configured_doubling(no_detection):
+    clicker = AutoClicker(_clicker(turnbal_color_only=True, double_bet_enabled=True,
+                                   double_bet_max=2, double_bet_point=(453, 880),
+                                   halve_bet_point=(410, 864), bet_point_green=(61, 62)),
+                          sender=_Sender())
+    clicker.set_smart_play(("GREEN",))
+    assert clicker.fire("r1", Decimal("3.00")).clicked
+    # دست بعد قرمز بسته شد: باخت رنگ، دوبل طبق تنظیمات.
+    clicker.fire("r2", Decimal("1.20"))
+    assert clicker.double_level == 1
 
 
 def test_smart_planner_scores_the_second_colour_as_break_even_only():
