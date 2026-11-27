@@ -1201,7 +1201,9 @@ def test_a_round_closed_below_1_10_bets_the_next_hand_until_1_90(no_detection):
     sender = _Sender()
     clicker = AutoClicker(_clicker(bot_mode="classic", smart_play_learning_minutes=0,
                                    bet_region=Region(1, 100, 200, 300, 40),
-                                   cashout_enabled=True), sender=sender)
+                                   cashout_enabled=True, autoclick_delay_ms=900,
+                                   turnbal_cashout_max=1.80), sender=sender)
+    clicker.set_smart_play(("PLAY",), cashout=1.40)
     report = clicker.fire("r1", Decimal("1.08"))
     assert report.clicked and report.rule == "low-close"
     assert clicker._cashout_target == Decimal("1.90")
@@ -1211,6 +1213,29 @@ def test_a_round_closed_below_1_10_bets_the_next_hand_until_1_90(no_detection):
                                   bet_region=Region(1, 100, 200, 300, 40),
                                   cashout_enabled=True), sender=_Sender())
     assert not normal.fire("r1", Decimal("1.10")).clicked
+
+
+def test_inferred_cashout_uses_the_attempted_multiplier(no_detection):
+    settings = _clicker(bot_mode="classic", cashout_enabled=True,
+                        fixed_bet_amount="10", session_profit_limit="8")
+    clicker = AutoClicker(settings, sender=_Sender())
+    clicker.set_smart_play(("PLAY",))
+    assert clicker.fire("r1", Decimal("2.20")).clicked
+    clicker.tick(Decimal("1.30"))
+    clicker.tick(Decimal("1.45"))
+    clicker.set_smart_play(("PLAY",))
+    assert clicker.fire("r2", Decimal("1.54")).clicked
+    assert clicker.bankroll.realized == pytest.approx(4.5)
+
+
+def test_two_losing_color_bets_both_count_towards_loss_limit(no_detection):
+    settings = _clicker(fixed_bet_amount="10", session_loss_limit="15")
+    clicker = AutoClicker(settings, sender=_Sender())
+    clicker.set_smart_play(("RED", "GREEN"))
+    assert clicker.fire("r1", Decimal("1.50")).clicked
+    report = clicker.fire("r2", Decimal("12.00"))
+    assert not report.clicked and clicker.bankroll.loss_hit
+    assert clicker.bankroll.realized == -20
 
 
 def test_bankroll_settles_a_win_and_a_loss_with_the_colour_payout():

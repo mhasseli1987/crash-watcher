@@ -75,7 +75,7 @@ class PredictionManager:
             if self._frozen or target_round_id != self._target:
                 return None
             self._frozen = True
-            for source in ("ROUTER", "OLLAMA", "LOCAL_ENGINE"):
+            for source in ("OLLAMA", "ROUTER", "LOCAL_ENGINE"):
                 answer = self._answers.get(source)
                 if answer is not None:
                     return answer

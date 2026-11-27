@@ -337,13 +337,14 @@ class SnapshotAdviceWorker(QThread):
             except ValueError as exc:
                 raise ValueError(f"{exc} پاسخ خام: {raw[:160]!r}") from exc
             value = float(value) if value is not None else None
-            self.advice.emit(color, value, confidence)
             append_log(PROJECT_ROOT / "logs" / "snapshot-advice.jsonl",
                        {"time": stamp, "color": color, "multiplier": value,
                         "confidence": confidence,
                         "seconds": round(perf_counter() - started, 2), "error": ""})
             after = self.capture_regions()
             stale = any(not np.array_equal(a, b) for a, b in zip(frames, after))
+            if not stale:
+                self.advice.emit(color, value, confidence)
             result = (f"رنگ تخمینی: {NAMES[color]} | احتمال مدل: {confidence:.0%} | ضریب تخمینی: "
                       + (f"{value:.2f}x" if value is not None else "نامشخص") + "\n" + reason)
             self.done.emit(snapshot.text() + f"\nزمان عکس: {stamp}\n" + result + "\n"

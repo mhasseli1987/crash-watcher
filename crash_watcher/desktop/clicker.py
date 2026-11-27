@@ -1,7 +1,7 @@
 """کلیک موس روی دایرهٔ زرد؛ فقط کتابخانهٔ استاندارد."""
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
@@ -176,7 +176,7 @@ class AutoClicker:
         self.summary_path = summary_path or PROJECT_ROOT / "logs" / "summary.txt"
         self.report_path = report_path or PROJECT_ROOT / "logs" / "session-report.txt"
         self._rule_stats: dict[str, list[int]] = {}
-        self._pending_rule: tuple[str, str] | None = None
+        self._pending_rule: tuple[tuple[str, ...], str, float, dict[str, float]] | None = None
         self._rounds_seen = 0
         self._started = datetime.now()
         self._backend = None
@@ -206,6 +206,7 @@ class AutoClicker:
         # توقف کلیکِ تازه (مثل قرمزهای پیاپی)؛ شرط باز و کش‌اوت را نمی‌بندد.
         self._hold_until: datetime | None = None
         self._hold_reason = ""
+        self._red_hold_until = 0.0
         # ارزیابی اولیه: دقیقهٔ اول پایش فقط ضریب‌ها و رنگ‌ها دیده می‌شوند و
         # هیچ شرط تازه‌ای بسته نمی‌شود؛ ساعت از همین لحظهٔ شروع پایش است.
         minutes = max(0, int(getattr(settings, "smart_play_learning_minutes", 0) or 0))
@@ -292,14 +293,22 @@ class AutoClicker:
 
     def hold_clicks(self, seconds: float, reason: str = "") -> None:
         """تا این مدت هیچ شرط تازه‌ای بسته نشود؛ تسویه و کش‌اوت دست نمی‌خورند."""
-        self._hold_until = datetime.now(timezone.utc) + timedelta(seconds=max(0.0, float(seconds)))
-        self._hold_reason = reason
+        if reason == "red streak":
+            self._red_hold_until = self._clock() + max(0.0, float(seconds))
+        else:
+            self._hold_until = datetime.now(timezone.utc) + timedelta(seconds=max(0.0, float(seconds)))
+            self._hold_reason = reason
+            if seconds <= 0:
+                self._red_hold_until = 0.0
+
+    def red_hold_remaining(self) -> float:
+        return max(0.0, self._red_hold_until - self._clock())
 
     def hold_remaining(self) -> float:
         """چند ثانیه از توقف کلیک مانده است."""
-        if self._hold_until is None:
-            return 0.0
-        return max(0.0, (self._hold_until - datetime.now(timezone.utc)).total_seconds())
+        evaluation = ((self._hold_until - datetime.now(timezone.utc)).total_seconds()
+                      if self._hold_until is not None else 0.0)
+        return max(evaluation, self.red_hold_remaining())
 
     def _stake(self) -> float:
         """مبلغ این شرط: مبلغ پایه ضرب در دوبل‌های جبران باخت."""
@@ -649,10 +658,18 @@ class AutoClicker:
                            else None if not turnbal or color in target_colors[1:] else False)
                 if turnbal or outcome is not None:
                     self._track_doubling(outcome)
-            if self.bankroll is not None and target_colors and (turnbal or outcome is not None):
-                payout = (float(self._cashout_confirmed_multiplier) if self._cashout_confirmed
-                          else payouts.get(color) or min(payouts.values()))
-                self.bankroll.settle(stake, payout, outcome)
+            if self.bankroll is not None and target_colors and not unconfirmed:
+                if settled:
+                    multiplier = (self._cashout_confirmed_multiplier if self._cashout_confirmed
+                                  else self._cashout_attempt_multiplier)
+                    for _ in target_colors:
+                        self.bankroll.settle(stake, float(multiplier), True)
+                elif self.settings.cashout_enabled and not self.settings.simulated:
+                    for _ in target_colors:
+                        self.bankroll.settle(stake, 1.0, False)
+                elif turnbal:
+                    for target in target_colors:
+                        self.bankroll.settle(stake, payouts[target], target == color)
                 if self.bankroll.stopped:
                     # همین شرط کف را رد کرد؛ دیگر در همین دست هم کلیکی نمی‌شود.
                     return ClickReport(False, f"capital stop-loss: {self.bankroll.label()}",
@@ -689,7 +706,8 @@ class AutoClicker:
         remaining_hold = self.hold_remaining()
         if remaining_hold > 0:
             # توقف کلیک: شرط قبلی همین بالاتر تسویه شد، اما شرط تازه بسته نمی‌شود.
-            return ClickReport(False, f"hold {self._hold_reason}: {remaining_hold:.0f}s left",
+            reason = "red streak" if self.red_hold_remaining() else self._hold_reason
+            return ClickReport(False, f"hold {reason}: {remaining_hold:.0f}s left",
                                count=self._clicks, remaining=self._armed)
         reading = self._chart_reading() if turnbal else None
         row_gap = self.settings.row_signal_gap
@@ -744,15 +762,15 @@ class AutoClicker:
                 elif flip is not None:
                     target_color = flip
                     rule = "pair-flip"
-                elif self._smart_play:
-                    # تصمیم آمادهٔ مدل: یکی از قواعد بالا فعال نشده، پس نظر مدل
-                    # را اجرا کن — یک رنگ یا دو رنگ هم‌زمان.
-                    rule = "smart-play"
                 elif low_close and not turnbal:
                     # قاعدهٔ ثابت کاربر: ضریب بسته‌شده زیر ۱٫۱۰ (۱٫۰۵، ۱٫۰۸ …)
                     # یعنی همین حالا برای دست بعد روی دکمهٔ شرط کلیک شود.
                     target_color = "PLAY"
                     rule = "low-close"
+                elif self._smart_play:
+                    # تصمیم آمادهٔ مدل: یکی از قواعد بالا فعال نشده، پس نظر مدل
+                    # را اجرا کن — یک رنگ یا دو رنگ هم‌زمان.
+                    rule = "smart-play"
                 elif not turnbal or not self.settings.smart_click_enabled:
                     return ClickReport(False, (f"waiting for a round >= {threshold}" if turnbal
                                                else "waiting for a smart decision"),
@@ -825,7 +843,7 @@ class AutoClicker:
             floor, ceiling = self._cashout_bounds()
             if rule == "low-close":
                 # دست بعد از یک بستن زیر ۱٫۱۰ تا سقف بازه صبر می‌کند.
-                cashout_target = ceiling
+                cashout_target = CASHOUT_MAX_TARGET
             else:
                 try:
                     picked = Decimal(str(self._smart_cashout))
@@ -844,7 +862,8 @@ class AutoClicker:
                          provider_latency_ms=provider_latency)
         # تأخیر تنظیم‌شده هرگز در نخ خوانش خوابیده نمی‌شود: یک برنامهٔ زمان‌بندی‌شده
         # با مهلت یکنوا ساخته می‌شود و حلقهٔ پایش در اولین فرصت آن را ارسال می‌کند.
-        delay_s = min(max(0.0, self.settings.autoclick_delay_ms / 1000), CLICK_PLAN_TTL_S)
+        delay_s = (0.0 if rule == "low-close" else
+                   min(max(0.0, self.settings.autoclick_delay_ms / 1000), CLICK_PLAN_TTL_S))
         plan.not_before = now + delay_s
         plan.deadline = now + CLICK_PLAN_TTL_S
         self._model_prediction, self._model_source = "", ""
@@ -935,10 +954,15 @@ class AutoClicker:
         elif sent == len(results) and results:
             self._spend_budget(plan)
             reason, status, clicked = "clicked", "INPUT SENT", True
+        elif sent:
+            successful = tuple(point for point, ok in zip(plan.points, results) if ok)
+            colors = tuple(color for color, _ in successful if color)
+            plan = replace(plan, points=successful, colors=colors, target="+".join(colors))
+            self._spend_budget(plan)
+            reason = f"partial input dispatch ({sent}/{len(results)})"
+            status, clicked = "INPUT PARTIAL", True
         else:
-            reason = ("input dispatch failed" if sent == 0
-                      else f"partial input dispatch ({sent}/{len(results)})")
-            status, clicked = "INPUT FAILED", False
+            reason, status, clicked = "input dispatch failed", "INPUT FAILED", False
         report = ClickReport(clicked, reason, plan.points[0][1], self._clicks, self._armed,
                              forecast=plan.forecast, target=plan.target, rule=plan.rule,
                              detail=plan.detail, dry_run=self.settings.autoclick_dry_run,
@@ -981,6 +1005,10 @@ class AutoClicker:
         plan = self._plan
         if plan is None:
             return None
+        if not self.settings.autoclick_enabled or plan.simulated != self.settings.simulated:
+            return self._expire_plan("click settings changed before dispatch")
+        if self.hold_remaining() or (self.bankroll is not None and self.bankroll.stopped):
+            return self._expire_plan("new bets paused before dispatch")
         now = self._clock()
         if now > plan.deadline:
             return self._expire_plan("click window closed before dispatch")

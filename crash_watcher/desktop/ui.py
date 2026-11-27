@@ -446,7 +446,9 @@ class MainWindow(QMainWindow):
         save_settings(self.settings)
 
     def _red_hold_active(self) -> bool:
-        return monotonic() < getattr(self, "_red_hold_until", 0.0)
+        worker = getattr(self, "worker", None)
+        return (monotonic() < getattr(self, "_red_hold_until", 0.0)
+                or bool(worker and worker.red_hold_active()))
 
     def _snapshot_red_pause(self, text):
         """قرمزهای پیاپی: یک دقیقه شرط تازه بسته نمی‌شود تا روند تغییر کند."""
@@ -504,6 +506,8 @@ class MainWindow(QMainWindow):
         گذاشته می‌شود؛ زیر این آستانه همان دست رد می‌شود و تحلیل دست بعد
         دوباره گرفته می‌شود.
         """
+        if self._snapshot_pending or self._red_hold_active():
+            return
         worker = getattr(self, "worker", None)
         if color not in ("RED", "GREEN", "YELLOW"):
             self.snapshot_output.appendPlainText(

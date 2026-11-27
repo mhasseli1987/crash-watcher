@@ -75,7 +75,7 @@ def test_one_request_after_read_and_stale_result(monkeypatch, changed):
     worker.advice.connect(lambda color, value, confidence: advice_events.append((color, value)))
     worker.run()
     assert events == ["read", "ask"]
-    assert advice_events == [("UNKNOWN", None)]
+    assert advice_events == ([] if changed else [("UNKNOWN", None)])
     assert not errors and len(results) == 1
     assert ("قدیمی است" in results[0]) == changed
 
@@ -109,6 +109,8 @@ def test_low_confidence_advice_never_arms_a_click():
     submitted, texts = [], []
     window = SimpleNamespace(
         settings=DesktopSettings(),
+        _snapshot_pending=False,
+        _red_hold_active=lambda: False,
         snapshot_output=SimpleNamespace(appendPlainText=texts.append),
         worker=SimpleNamespace(isRunning=lambda: True,
                                submit_advice=lambda color, value=None: submitted.append(color)))

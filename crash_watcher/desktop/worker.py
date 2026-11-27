@@ -24,6 +24,7 @@ from .final_result import (BangDetector, BangRecognizer, bang_screen, newest_bad
 from .model_compare import (ModelAttempt, ModelLeaderboard, compare as compare_models,
                             parse_models)
 from .smart_play import SmartPlanner
+from .snapshot_advice import RED_PAUSE_SECONDS, RED_STREAK_LIMIT
 from .prediction_manager import PredictionManager
 from .ollama_provider import predict as predict_ollama, OllamaError
 from .smart_review import SmartVerdict
@@ -131,6 +132,7 @@ class MonitorWorker(QThread):
         self._recent: deque[str] = deque(maxlen=30)
         self._smart_seen = 0
         self._smart_rounds = 0
+        self._red_streak = 0
         self._smart_busy = False
         self._planner: SmartPlanner | None = None
         self._guard: TurnbalGuard | None = None
@@ -188,6 +190,19 @@ class MonitorWorker(QThread):
             return False
         clicker.hold_clicks(seconds, reason)
         return True
+
+    def red_hold_active(self) -> bool:
+        clicker = self._clicker
+        return bool(clicker and clicker.red_hold_remaining())
+
+    def _observe_red_streak(self, clicker: AutoClicker, multiplier: Decimal) -> None:
+        if self.settings.bot_mode != "turnbal" or clicker.color(multiplier) != "RED":
+            self._red_streak = 0
+            return
+        self._red_streak += 1
+        if self._red_streak == RED_STREAK_LIMIT:
+            clicker.hold_clicks(RED_PAUSE_SECONDS, "red streak")
+            self._take_advice()
 
     def _take_advice(self) -> tuple[tuple[str, ...], float | None] | None:
         with self._advice_lock:
@@ -284,6 +299,7 @@ class MonitorWorker(QThread):
                             self._resync_on_resume.clear()
                             # هیچ کلیک یا خروج برنامه‌ریزی‌شدهٔ قبل از توقف اجرا نمی‌شود.
                             clicker.resume_cleanup()
+                            self._red_streak = 0
                             self.detector.reset()
                             self._prediction_target = None
                             self._frozen_pending = None
@@ -298,6 +314,7 @@ class MonitorWorker(QThread):
                         try:
                             frame, events = capture.capture()
                             if events:
+                                self._red_streak = 0
                                 self.detector.reset()
                                 self._prediction_target = None
                                 self._frozen_pending = None
@@ -375,7 +392,9 @@ class MonitorWorker(QThread):
                             completed = self.detector.observe(frame.image, reading, frame.captured_at,
                                                               history_id, history_value,
                                                               bang=bang_now)
-                            if (self._smart_play_active()
+                            if completed is not None:
+                                self._observe_red_streak(clicker, completed.multiplier)
+                            if (self._smart_play_active() and not self.red_hold_active()
                                     and completed is None and self._prediction_target is None
                                     and self.detector.state.name == "ROUND_IN_PROGRESS"):
                                 self._start_hybrid(clicker)
@@ -471,6 +490,8 @@ class MonitorWorker(QThread):
                                     model_source = chosen.source if chosen else None
                                     model_latency = frozen_total_ms
                                     verdict = chosen.verdict if chosen else None
+                                    if self.red_hold_active():
+                                        verdict = SmartVerdict("SKIP", 0.0, "red streak")
                                     if verdict is not None and self._guard is not None:
                                         verdict, _ = self._guard.check(verdict)
                                     planner.store(verdict, completed.round_id)
@@ -540,6 +561,7 @@ class MonitorWorker(QThread):
                                 self._smart_seen += 1
                                 self._smart_rounds += 1
                                 if (not self._smart_play_active() and self.settings.smart_review_enabled
+                                        and not self.red_hold_active()
                                         and self._smart_rounds >= self.settings.smart_review_every_rounds):
                                     self._smart_rounds = 0
                                     self._start_smart_review(str(completed.multiplier))
@@ -561,6 +583,7 @@ class MonitorWorker(QThread):
                                     clicker.tick(ended=True)
                             self.preview.emit(frame.image.copy())
                         except Exception as exc:
+                            self._red_streak = 0
                             self.detector.reset()
                             self._prediction_target = None
                             self._frozen_pending = None

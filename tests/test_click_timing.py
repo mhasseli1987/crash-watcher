@@ -95,15 +95,38 @@ def test_duplicate_round_id_is_clicked_once(no_detection):
     assert len(sender.calls) == 1 and clicker.clicks == 1
 
 
-def test_partial_multi_color_execution_is_reported_not_counted(no_detection):
-    sender = Sender([True, False])
-    clicker = AutoClicker(_settings(), sender=sender)
+def test_partial_multi_color_execution_tracks_the_sent_bet(no_detection):
+    sender = Sender([False, True])
+    clicker = AutoClicker(_settings(cashout_enabled=True, bet_point_red=(10, 20),
+                                    bet_point_green=(30, 40)), sender=sender)
     clicker.set_smart_play(("RED", "GREEN"), 1.5)
     report = clicker.fire("r1", Decimal("1.50"))
     assert len(sender.calls) == 2
-    assert not report.clicked and report.status == "INPUT FAILED"
-    assert report.dispatch_result == "sent 1/2"
-    assert clicker.clicks == 0 and clicker._pending_rule is None
+    assert report.clicked and report.status == "INPUT PARTIAL"
+    assert report.dispatch_result == "sent 1/2" and report.target == "GREEN"
+    assert clicker.clicks == 1 and clicker._pending_rule[0] == ("GREEN",)
+    clicker.tick(Decimal("1.30"))
+    clicker.tick(Decimal("1.50"))
+    assert sender.calls[-1][:2] == (30, 40)
+
+
+def test_scheduled_click_is_cancelled_during_detected_red_streak(no_detection):
+    clock, sender = Clock(), Sender()
+    settings = _settings(autoclick_delay_ms=900, result_region=Region(1, 0, 0, 100, 100))
+    worker = MonitorWorker(settings, StrategyEngine(settings.strategy()))
+    clicker = worker._clicker = AutoClicker(settings, sender=sender, clock=clock)
+    clicker.set_smart_play(("RED",))
+    assert clicker.fire("r1", Decimal("1.50")).status == "CLICK SCHEDULED"
+    for _ in range(3):
+        worker._observe_red_streak(clicker, Decimal("1.50"))
+    assert not worker.red_hold_active()
+    worker.submit_advice("GREEN")
+    worker._observe_red_streak(clicker, Decimal("1.50"))
+    assert worker.red_hold_active() and worker._take_advice() is None
+    clock.advance(1)
+    assert clicker.drain_click().status == "EXPIRED"
+    clock.advance(60)
+    assert not sender.calls and not worker.red_hold_active()
 
 
 def test_click_deadline_expires_without_dispatch(no_detection):

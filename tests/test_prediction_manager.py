@@ -11,6 +11,7 @@ def test_priority_freeze_and_late_answer():
     assert not manager.reserve("next-1", version, "ROUTER")
     assert manager.submit("next-1", version, "LOCAL_ENGINE", SmartVerdict("RED", .5, ""))
     assert manager.submit("next-1", version, "OLLAMA", SmartVerdict("GREEN", .6, ""))
+    assert manager.submit("next-1", version, "ROUTER", SmartVerdict("RED", .9, ""))
     assert manager.freeze("next-1").source == "OLLAMA"
     assert not manager.submit("next-1", version, "ROUTER", SmartVerdict("RED", .9, ""))
     assert manager.freeze("next-1") is None
