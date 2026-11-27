@@ -14,7 +14,7 @@ import numpy as np
 from PySide6.QtCore import QThread, Signal
 
 from .color_grid import _centres, read_grid
-from .config import PROJECT_ROOT
+from .config import PROJECT_ROOT, Region
 from .smart_review import ask, _json_object, append_log, _COLOR_ALIASES
 from crash_watcher.vision.capture import ScreenCapture
 from crash_watcher.vision.recognition import RapidOCRReader
@@ -145,6 +145,82 @@ def read_snapshot(history, chart, reader, minimum=0.55):
     return HistorySnapshot(tuple(recent), cells, chart_sequence(cells))
 
 
+def capture_color_history(settings) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """Read the two color regions from one frame, without multiplier OCR."""
+    history, chart = settings.history_region, settings.chart_region
+    if history is None or chart is None:
+        raise ValueError("ابتدا نوار تاریخچه و جدول رنگ‌ها را مشخص کنید.")
+    if history.monitor != chart.monitor:
+        raise ValueError("نوار تاریخچه و جدول رنگ‌ها باید روی یک نمایشگر باشند.")
+    x, y = min(history.x, chart.x), min(history.y, chart.y)
+    right = max(history.x + history.width, chart.x + chart.width)
+    bottom = max(history.y + history.height, chart.y + chart.height)
+    area = Region(history.monitor, x, y, right - x, bottom - y)
+    with ScreenCapture(area.capture(settings.interval_ms)) as capture:
+        frame, _ = capture.capture()
+
+    def crop(region):
+        left, top = region.x - x, region.y - y
+        return frame.image[top:top + region.height, left:left + region.width]
+
+    strip = crop(history)
+    dots = sorted((px, py, color) for color in COLORS
+                  for px, py in _centres(strip, color, 40))
+    recent = tuple(color for _, _, color in dots)
+    grid = read_grid(crop(chart))
+    trend = chart_sequence((d.column, d.row, d.color) for d in grid.dots) if grid else ()
+    if not (recent or trend):
+        raise ValueError("هیچ رنگی در تصویر آغاز پایش خوانده نشد.")
+    return recent, trend
+
+
+def request_color_sequence(settings, recent, trend) -> tuple[tuple[str, float], ...]:
+    """Ask once for a fixed list. Reject incomplete or invalid answers as a whole."""
+    count = settings.color_sequence_count
+    schema = {
+        "type": "object",
+        "properties": {"rounds": {
+            "type": "array", "minItems": count, "maxItems": count,
+            "items": {
+                "type": "object",
+                "properties": {
+                    "color": {"type": "string", "enum": list(COLORS)},
+                    "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+                },
+                "required": ["color", "confidence"], "additionalProperties": False,
+            },
+        }},
+        "required": ["rounds"], "additionalProperties": False,
+    }
+    prompt = (
+        f"Use this fixed color history to suggest colors for exactly {count} successive rounds. "
+        "Item 1 is the first round after the list is ready, then item 2, and so on. "
+        "Each list below is oldest to newest; they may overlap, so do not concatenate them. "
+        "Past colors do not establish predictability. Report your uncertainty. "
+        'Return only JSON like {"rounds":[{"color":"GREEN","confidence":0.4}]}, '
+        "with the requested number of entries. Use RED, GREEN or YELLOW; never return multipliers.\n"
+        + json.dumps({"recent_colors": recent, "chart_colors": trend})
+    )
+    raw = request_advice(settings, prompt, schema).strip()
+    fenced = re.fullmatch(r"```(?:json)?\s*(.*?)\s*```", raw, re.DOTALL)
+    try:
+        data = json.loads(fenced[1] if fenced else raw)
+    except ValueError as exc:
+        raise ValueError("پاسخ فهرست رنگ‌ها JSON معتبر نیست.") from exc
+    rounds = data.get("rounds") if isinstance(data, dict) else None
+    if not isinstance(rounds, list) or len(rounds) != count:
+        raise ValueError(f"پاسخ مدل باید دقیقاً {count} پیشنهاد رنگ داشته باشد.")
+    result = []
+    for item in rounds:
+        color = item.get("color") if isinstance(item, dict) else None
+        confidence = item.get("confidence") if isinstance(item, dict) else None
+        if (color not in COLORS or type(confidence) not in (int, float)
+                or not 0 <= confidence <= 1):
+            raise ValueError("یکی از رنگ‌ها یا احتمال‌های پاسخ مدل معتبر نیست.")
+        result.append((color, float(confidence)))
+    return tuple(result)
+
+
 def build_advice_prompt(snapshot):
     return (
         "Analyze this fixed snapshot for the round AFTER the displayed history. "
@@ -196,16 +272,19 @@ def warm_local(settings):
 
 
 def _ask_local(settings, prompt, schema):
+    sequence_count = schema.get("properties", {}).get("rounds", {}).get("maxItems", 0)
     payload = {"model": settings.ollama_model, "stream": False, "think": False,
                "format": schema, "keep_alive": settings.ollama_keep_alive,
                # طول پاسخ همان هزینهٔ زمانی است: با ۶۴ توکن پاسخ کامل و سالم
                # در حدود ۳ ثانیه می‌رسد؛ با ۳۲ توکن JSON نیمه‌کاره می‌ماند.
-               "options": {"temperature": 0.2, "num_predict": 64},
+               "options": {"temperature": 0.2, "num_predict": max(64, 24 * sequence_count + 16)},
                "messages": [{"role": "user", "content": prompt}]}
     call = request.Request(settings.ollama_base_url.rstrip("/") + "/api/chat",
                            data=json.dumps(payload).encode("utf-8"),
                            headers={"Content-Type": "application/json"}, method="POST")
-    timeout = min(settings.ollama_timeout_ms / 1000, LOCAL_ADVICE_TIMEOUT_S)
+    timeout = settings.ollama_timeout_ms / 1000
+    if not sequence_count:
+        timeout = min(timeout, LOCAL_ADVICE_TIMEOUT_S)
     with request.urlopen(call, timeout=timeout) as response:
         return json.load(response)["message"]["content"]
 

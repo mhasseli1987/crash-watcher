@@ -285,3 +285,65 @@ def test_changed_history_while_busy_is_queued(monkeypatch):
     assert window._snapshot_pending
     MainWindow._snapshot_done(window, "old recommendation")
     assert "old recommendation" not in texts
+
+
+def test_color_history_reads_both_regions_from_one_grab(monkeypatch):
+    from types import SimpleNamespace
+    from crash_watcher.desktop.config import Region
+
+    history = cv2.imread(str(ASSETS / "advice-history.png"))
+    chart = cv2.imread(str(ASSETS / "advice-chart.png"))
+    hy, hx = history.shape[:2]
+    cy, cx = chart.shape[:2]
+    image = np.zeros((hy + cy, max(hx, cx), 3), dtype=np.uint8)
+    image[:hy, :hx] = history
+    image[hy:, :cx] = chart
+    grabs = []
+
+    class Capture:
+        def __init__(self, options):
+            self.options = options
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            pass
+
+        def capture(self):
+            grabs.append(self.options)
+            return SimpleNamespace(image=image), ()
+
+    monkeypatch.setattr(advice, "ScreenCapture", Capture)
+    settings = DesktopSettings(history_region=Region(1, -15, 20, hx, hy),
+                               chart_region=Region(1, -15, 20 + hy, cx, cy))
+    recent, trend = advice.capture_color_history(settings)
+    assert len(grabs) == 1 and (grabs[0].x, grabs[0].height) == (-15, hy + cy)
+    assert recent[:2] == ("RED", "GREEN")
+    assert len(trend) == 40 and trend[-2:] == ("GREEN", "YELLOW")
+
+
+@pytest.mark.parametrize("bad", [None, "missing", "invalid", "bool"])
+def test_color_sequence_model_gets_only_colors_and_must_return_exact_count(monkeypatch, bad):
+    import json
+
+    def ask(settings, prompt, schema):
+        assert json.loads(prompt.rsplit("\n", 1)[1]) == {
+            "recent_colors": ["RED"], "chart_colors": ["RED", "GREEN"]}
+        assert schema["properties"]["rounds"]["maxItems"] == 4
+        rounds = [{"color": "RED", "confidence": 0.6}] * 4
+        if bad == "missing":
+            rounds.pop()
+        elif bad == "invalid":
+            rounds[1] = {"color": "BLUE", "confidence": 0.8}
+        elif bad == "bool":
+            rounds[1] = {"color": "GREEN", "confidence": True}
+        return json.dumps({"rounds": rounds})
+
+    monkeypatch.setattr(advice, "request_advice", ask)
+    settings = DesktopSettings(color_sequence_count=4)
+    if bad:
+        with pytest.raises(ValueError):
+            advice.request_color_sequence(settings, ("RED",), ("RED", "GREEN"))
+    else:
+        assert advice.request_color_sequence(settings, ("RED",), ("RED", "GREEN")) == (("RED", 0.6),) * 4

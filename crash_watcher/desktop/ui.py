@@ -21,7 +21,7 @@ from crash_watcher.vision.capture import ScreenCapture
 from crash_watcher.vision.recognition import RapidOCRReader, tesseract_reader
 from .clicker import AutoClicker
 from .config import (DesktopSettings, Region, SETTINGS_PATH, PROJECT_ROOT, MAX_CLICK_DELAY_MS,
-                     load_settings, save_settings)
+                     MAX_SEQUENCE_COUNT, load_settings, save_settings)
 from .final_result import BangRecognizer
 from .preflight import failed as preflight_failed
 from .preflight import run_preflight, summary as preflight_summary
@@ -406,13 +406,25 @@ class MainWindow(QMainWindow):
         self.snapshot_only.setChecked(self.settings.snapshot_advice_only)
         self.snapshot_only.toggled.connect(self._snapshot_mode_changed)
         layout.addWidget(self.snapshot_only)
-        self.snapshot_auto = QCheckBox("بررسی تازه پس از تغییر ضرایب یا جدول رنگ‌ها")
+        self.sequence_enabled = QCheckBox("ترنبال: یک تصویر و یک فهرست رنگ در شروع پایش")
+        self.sequence_enabled.setChecked(self.settings.color_sequence_enabled)
+        layout.addWidget(self.sequence_enabled)
+        sequence_form = QFormLayout()
+        self.sequence_count = QSpinBox()
+        self.sequence_count.setRange(1, MAX_SEQUENCE_COUNT)
+        self.sequence_count.setValue(self.settings.color_sequence_count)
+        sequence_form.addRow("تعداد رنگ‌های فهرست", self.sequence_count)
+        layout.addLayout(sequence_form)
+        self.snapshot_auto = QCheckBox("روش قبلی: بررسی دوباره پس از تغییر تاریخچه")
         self.snapshot_auto.setChecked(True)
         layout.addWidget(self.snapshot_auto)
         self._snapshot_pending = False
         # قرمزهای پیاپی: تا این زمان هیچ تحلیل/کلیک تازه‌ای شروع نمی‌شود.
         self._red_hold_until = 0.0
-        note = QLabel("۱. نوار ضریب‌های آخر و جدول رنگ‌ها را مشخص کنید.\n"
+        note = QLabel("در روش فهرست، نوار تاریخچه و جدول رنگ‌ها را روی یک نمایشگر مشخص کنید. "
+                      "بعد از پایان فهرست، برای گرفتن فهرست تازه پایش را دوباره شروع کنید.\n"
+                      "در روش قبلی:\n"
+                      "۱. نوار ضریب‌های آخر و جدول رنگ‌ها را مشخص کنید.\n"
                       "۲. دقیقهٔ اول پایش ارزیابی است: مدل فقط ضریب‌ها و رنگ‌ها را می‌بیند و هیچ "
                       "شرطی بسته نمی‌شود.\n"
                       "۳. بعد از آن، اگر مدل حداقل ۴۰٪ احتمال بدهد که رنگش درست است، در شروع "
@@ -460,6 +472,8 @@ class MainWindow(QMainWindow):
         QTimer.singleShot(int((RED_PAUSE_SECONDS + 1) * 1000), self.start_snapshot_advice)
 
     def start_snapshot_advice(self):
+        if self.worker and self.worker.isRunning() and self.worker.uses_color_sequence:
+            return
         if getattr(self, "snapshot_worker", None) and self.snapshot_worker.isRunning():
             return
         if self._red_hold_active():
@@ -1183,6 +1197,8 @@ class MainWindow(QMainWindow):
 
     def _settings_from_form(self) -> DesktopSettings:
         return replace(self.settings, result_region=self._current_region(), fixed_bet_amount=self.amount.text(),
+                       color_sequence_enabled=self.sequence_enabled.isChecked(),
+                       color_sequence_count=self.sequence_count.value(),
                        double_bet_enabled=self.double_bet.isChecked(),
                        double_bet_max=self.double_max.value(),
                        max_attempts=self.attempts.value(), yellow_threshold=self.threshold.text(),
@@ -1614,7 +1630,23 @@ class MainWindow(QMainWindow):
                 return
         if not self.save_ui_settings():
             return
+        if self.settings.uses_color_sequence:
+            history, chart = self.settings.history_region, self.settings.chart_region
+            if not history or not chart or history.monitor != chart.monitor:
+                self.tabs.setCurrentIndex(self.snapshot_tab)
+                self.snapshot_output.setPlainText("برای فهرست، نوار تاریخچه و جدول رنگ‌ها را روی یک نمایشگر مشخص کنید.")
+                return
+            watch = getattr(self, "snapshot_watch", None)
+            if watch and watch.isRunning():
+                watch.stop()
+                watch.wait(1500)
+                if watch.isRunning():
+                    self.snapshot_output.setPlainText("منتظر توقف دیده‌بان تصویر بمانید و دوباره شروع کنید.")
+                    return
+            self._snapshot_pending = False
+            self.snapshot_output.clear()
         self.worker = MonitorWorker(self.settings, self.strategy)
+        self.worker.sequence_status.connect(self._on_color_sequence)
         self.worker.observation.connect(self._on_observation)
         self.worker.preview.connect(self._show_image)
         self.worker.problem.connect(self._on_problem)
@@ -1622,10 +1654,10 @@ class MainWindow(QMainWindow):
         self.worker.click_report.connect(self._on_click)
         self.worker.review_report.connect(self._on_review)
         self.worker.smart_report.connect(self._on_smart)
-        self.worker.start()
         # با کوچک‌شدن پنجره، ناحیه‌های بازی برای عکس‌گرفتن آزاد می‌مانند.
         self.showMinimized()
-        if (self.snapshot_auto.isChecked() and self.settings.history_region
+        self.worker.start()
+        if (not self.worker.uses_color_sequence and self.snapshot_auto.isChecked() and self.settings.history_region
                 and self.settings.chart_region):
             # مدل محلی هم‌زمان با شروع پایش در حافظه بارگذاری می‌شود تا اولین
             # تحلیل هم در چند ثانیه آماده باشد، نه پس از یک بارگذاری سرد.
@@ -1677,6 +1709,8 @@ class MainWindow(QMainWindow):
 
     def _sync_ui_to_settings(self):
         """همه فیلدهای UI را با تنظیمات فعلی همگام کن."""
+        self.sequence_enabled.setChecked(self.settings.color_sequence_enabled)
+        self.sequence_count.setValue(self.settings.color_sequence_count)
         self.amount.setText(self.settings.fixed_bet_amount)
         self.attempts.setValue(self.settings.max_attempts)
         self.threshold.setText(self.settings.yellow_threshold)
@@ -1752,6 +1786,10 @@ class MainWindow(QMainWindow):
         self.prediction_confidence.setValue(round(self.settings.prediction_min_confidence * 100))
         self.review_minutes.setValue(max(1, self.settings.review_window_s // 60))
         self._refresh_toggles()
+
+    def _on_color_sequence(self, message):
+        if self.sender() is self.worker:
+            self.snapshot_output.appendPlainText(message)
 
     def _on_status(self, status):
         self.values["وضعیت پایش"].setText({"MONITORING":"در حال پایش", "PAUSED":"مکث", "STOPPED":"متوقف"}.get(status,status))
@@ -1829,7 +1867,8 @@ class MainWindow(QMainWindow):
     def _on_observation(self, reading, completed, result):
         if completed is not None:
             self.confirmed += 1
-            if (not self.settings.snapshot_advice_only and self.snapshot_auto.isChecked()
+            if (not (self.worker and self.worker.uses_color_sequence)
+                    and not self.settings.snapshot_advice_only and self.snapshot_auto.isChecked()
                     and self.settings.history_region and self.settings.chart_region
                     and not (getattr(self, "snapshot_worker", None)
                              and self.snapshot_worker.isRunning())):

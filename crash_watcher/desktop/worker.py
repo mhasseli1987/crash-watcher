@@ -24,7 +24,8 @@ from .final_result import (BangDetector, BangRecognizer, bang_screen, newest_bad
 from .model_compare import (ModelAttempt, ModelLeaderboard, compare as compare_models,
                             parse_models)
 from .smart_play import SmartPlanner
-from .snapshot_advice import RED_PAUSE_SECONDS, RED_STREAK_LIMIT
+from .snapshot_advice import (NAMES, RED_PAUSE_SECONDS, RED_STREAK_LIMIT,
+                              capture_color_history, request_color_sequence)
 from .prediction_manager import PredictionManager
 from .ollama_provider import predict as predict_ollama, OllamaError
 from .smart_review import SmartVerdict
@@ -115,6 +116,7 @@ class MonitorWorker(QThread):
     smart_report = Signal(object)  # «بررسی هوشمند ضریب‌ها» verdict or error
     problem = Signal(str)
     status = Signal(str)
+    sequence_status = Signal(str)
 
     def __init__(self, settings: DesktopSettings, strategy: StrategyEngine) -> None:
         super().__init__()
@@ -150,6 +152,84 @@ class MonitorWorker(QThread):
         # پیشنهاد «تحلیل قبل از دست» برای دست بعد؛ یک‌بار مصرف می‌شود.
         self._advice_lock = Lock()
         self._advice: tuple[tuple[str, ...], float | None] | None = None
+        self._sequence_mode = settings.uses_color_sequence
+        self._sequence: deque[tuple[str, float]] = deque()
+        self._sequence_index = 0
+        self._sequence_ready_at = datetime.max.replace(tzinfo=timezone.utc)
+        self._sequence_round_id: str | None = None
+
+    @property
+    def uses_color_sequence(self) -> bool:
+        return self._sequence_mode
+
+    def _prepare_color_sequence(self, settings: DesktopSettings) -> None:
+        """Capture and request once, independently of the monitoring loop."""
+        try:
+            if self._stop.is_set():
+                return
+            recent, trend = capture_color_history(settings)
+            reds = ("RED",) * RED_STREAK_LIMIT
+            if any(colors[-RED_STREAK_LIMIT:] == reds for colors in (recent, trend)):
+                self.hold_clicks(RED_PAUSE_SECONDS, "red streak")
+                self.sequence_status.emit("چهار قرمز پیاپی در تصویر آغاز دیده شد؛ تحلیل انجام نشد. "
+                                          "پس از توقف قرمزها پایش را دوباره شروع کنید.")
+                return
+            if self._stop.is_set():
+                return
+            entries = request_color_sequence(settings, recent, trend)
+            with self._advice_lock:
+                if self._stop.is_set():
+                    return
+                self._sequence_ready_at = datetime.now(timezone.utc)
+                self._sequence.extend(entries)
+                labels = "، ".join(f"{index}. {NAMES[color]} ({confidence:.0%})"
+                                   for index, (color, confidence) in enumerate(entries, 1))
+                self.sequence_status.emit("ترتیب پیشنهادها: " + labels)
+        except Exception as exc:
+            if not self._stop.is_set():
+                self.sequence_status.emit("فهرست آماده نشد: " + str(exc))
+
+    def _discard_started_sequence(self) -> None:
+        with self._advice_lock:
+            if self._sequence_index and self._sequence:
+                self._sequence.clear()
+                self.sequence_status.emit("به‌دلیل وقفه در پایش، ادامهٔ فهرست لغو شد.")
+
+    def _fire_color_sequence(self, clicker: AutoClicker, completed) -> ClickReport | None:
+        """Consume at most one slot per confirmed round. Skipped slots never slide."""
+        if completed.round_id == self._sequence_round_id or self._stop.is_set():
+            return None
+        self._sequence_round_id = completed.round_id
+        window_s = CLICK_WINDOW_MS / 1000 - (
+            datetime.now(timezone.utc) - completed.timestamp).total_seconds()
+        entry = None
+        with self._advice_lock:
+            if (self._sequence and completed.timestamp >= self._sequence_ready_at
+                    and (self._sequence_index or (window_s > 0 and not clicker.hold_remaining()))):
+                entry = self._sequence.popleft()
+                self._sequence_index += 1
+                position = self._sequence_index
+                remaining = len(self._sequence)
+        target = None
+        if entry is not None:
+            color, confidence = entry
+            rule = TurnbalCalibration.from_settings(self.settings).rule(color)
+            minimum = max(0.40, self.settings.smart_play_min_confidence, rule.min_conf)
+            if rule.enabled and confidence >= minimum:
+                target = color
+        report = clicker.fire(completed.round_id, completed.multiplier, sequence=(target, window_s))
+        if entry is not None:
+            line = f"دست {position}: {NAMES[color]} ({confidence:.0%})"
+            if target is None:
+                line += " — رد شد: رنگ غیرفعال است یا اطمینان کافی نیست."
+            elif window_s <= 0:
+                line += " — رد شد: مهلت دست گذشته است."
+            elif not report.clicked and report.status not in ("CLICK SCHEDULED", "DRY RUN", "SHADOW"):
+                line += f" — {report.reason}"
+            if not remaining:
+                line += "\nفهرست تمام شد. برای فهرست تازه، پایش را دوباره شروع کنید."
+            self.sequence_status.emit(line)
+        return report
 
     def configure(self, settings: DesktopSettings) -> None:
         """Apply click settings from the window while the loop is running."""
@@ -231,6 +311,9 @@ class MonitorWorker(QThread):
             0.0 if self.settings.bot_mode == "turnbal" else self.settings.smart_play_min_confidence,
             self.settings.smart_play_two_colors)
         try:
+            if self._sequence_mode and not self._stop.is_set():
+                self.sequence_status.emit("در حال خواندن یک تصویر و آماده کردن فهرست رنگ‌ها…")
+                Thread(target=self._prepare_color_sequence, args=(self.settings,), daemon=True).start()
             if self.settings.tesseract_path:
                 import pytesseract
                 pytesseract.pytesseract.tesseract_cmd = self.settings.tesseract_path
@@ -299,6 +382,7 @@ class MonitorWorker(QThread):
                             self._resync_on_resume.clear()
                             # هیچ کلیک یا خروج برنامه‌ریزی‌شدهٔ قبل از توقف اجرا نمی‌شود.
                             clicker.resume_cleanup()
+                            self._discard_started_sequence()
                             self._red_streak = 0
                             self.detector.reset()
                             self._prediction_target = None
@@ -314,6 +398,7 @@ class MonitorWorker(QThread):
                         try:
                             frame, events = capture.capture()
                             if events:
+                                self._discard_started_sequence()
                                 self._red_streak = 0
                                 self.detector.reset()
                                 self._prediction_target = None
@@ -509,13 +594,13 @@ class MonitorWorker(QThread):
                                     # خروج اضطراری کالیبراسیون روی هدف کش‌اوت اعمال
                                     # می‌شود، نه فقط در متن پرامپت.
                                     cashout = self._guard.cap_cashout(cashout)
-                                advice = self._take_advice()
+                                advice = self._take_advice() if not self._sequence_mode else None
                                 if advice is not None:
                                     # پیشنهاد صریح «تحلیل قبل از دست» بر تصمیم
                                     # خودکار اولویت دارد؛ هدف خروج از تنظیمات می‌آید.
                                     clicker.set_smart_play(advice[0], advice[1],
                                                            prediction=None, source="MANUAL")
-                                else:
+                                elif not self._sequence_mode:
                                     clicker.set_smart_play(
                                         ready.bets if ready else (), cashout,
                                         prediction=model_prediction, source=model_source,
@@ -532,7 +617,11 @@ class MonitorWorker(QThread):
                                         self.problem.emit("Cashout confirmation OCR failed: " + str(exc))
                                 age_ms = (datetime.now(timezone.utc)
                                           - completed.timestamp).total_seconds() * 1000
-                                if age_ms > CLICK_WINDOW_MS:
+                                if self._sequence_mode:
+                                    report = self._fire_color_sequence(clicker, completed)
+                                    if report is None:
+                                        continue
+                                elif age_ms > CLICK_WINDOW_MS:
                                     # تشخیص دیر رسیده است: کلیک روی دکمهٔ شرط شرطی برای
                                     # دستی می‌بندد که در حال اجراست؛ به‌جای آن این دور
                                     # رد می‌شود تا آمار خراب نشود.
@@ -560,7 +649,8 @@ class MonitorWorker(QThread):
                                 self._recent.append(str(completed.multiplier))
                                 self._smart_seen += 1
                                 self._smart_rounds += 1
-                                if (not self._smart_play_active() and self.settings.smart_review_enabled
+                                if (not self._sequence_mode and not self._smart_play_active()
+                                        and self.settings.smart_review_enabled
                                         and not self.red_hold_active()
                                         and self._smart_rounds >= self.settings.smart_review_every_rounds):
                                     self._smart_rounds = 0
@@ -583,6 +673,7 @@ class MonitorWorker(QThread):
                                     clicker.tick(ended=True)
                             self.preview.emit(frame.image.copy())
                         except Exception as exc:
+                            self._discard_started_sequence()
                             self._red_streak = 0
                             self.detector.reset()
                             self._prediction_target = None
@@ -598,6 +689,7 @@ class MonitorWorker(QThread):
         except Exception as exc:
             self.problem.emit(str(exc))
         finally:
+            self._stop.set()
             if win_executor is not None:
                 win_executor.shutdown(wait=False, cancel_futures=True)
             if history_pool is not None:
@@ -768,6 +860,8 @@ class MonitorWorker(QThread):
 
     def _smart_play_active(self) -> bool:
         """ورود هوشمند فقط وقتی معنا دارد که بررسی هوشمند هم روشن باشد."""
+        if self._sequence_mode:
+            return False
         if self.settings.bot_mode == "turnbal":
             return bool(self.settings.smart_review_enabled)
         return bool(self.settings.smart_review_enabled and self.settings.smart_play_enabled)

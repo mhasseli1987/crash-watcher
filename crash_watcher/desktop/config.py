@@ -14,6 +14,7 @@ SETTINGS_PATH = PROJECT_ROOT / "settings.json"
 # Permanent rule: no click may be issued more than one second after the round
 # closes, so the window before every click is capped at this value.
 MAX_CLICK_DELAY_MS = 1000
+MAX_SEQUENCE_COUNT = 10
 
 @dataclass(frozen=True)
 class Region:
@@ -135,6 +136,8 @@ class DesktopSettings:
     theme: str = "dark"
     tesseract_path: str = ""
     snapshot_advice_only: bool = False
+    color_sequence_enabled: bool = True
+    color_sequence_count: int = 3
 
     def resolved_key(self) -> str:
         """کلید مؤثر: متغیر محیطی بر مقدار ذخیره‌شده اولویت دارد."""
@@ -150,6 +153,10 @@ class DesktopSettings:
         """هیچ کلیکی نباید فرستاده شود."""
         return bool(self.autoclick_dry_run or self.shadow_mode)
 
+    @property
+    def uses_color_sequence(self) -> bool:
+        return self.bot_mode == "turnbal" and self.color_sequence_enabled
+
     def strategy(self) -> StrategyConfig:
         return StrategyConfig(
             Decimal(self.fixed_bet_amount),
@@ -163,6 +170,10 @@ class DesktopSettings:
         self.strategy()
         if type(self.snapshot_advice_only) is not bool:
             raise ValueError("snapshot_advice_only must be a boolean")
+        if type(self.color_sequence_enabled) is not bool:
+            raise ValueError("color_sequence_enabled must be a boolean")
+        if type(self.color_sequence_count) is not int or not 1 <= self.color_sequence_count <= MAX_SEQUENCE_COUNT:
+            raise ValueError(f"color_sequence_count must be an integer between 1 and {MAX_SEQUENCE_COUNT}")
         if type(self.interval_ms) is not int or self.interval_ms < 20:
             raise ValueError("interval_ms must be an integer of at least 20")
         for name in ("result_region", "history_region", "click_region", "chart_region",

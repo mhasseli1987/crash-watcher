@@ -276,3 +276,86 @@ def test_stake_adjustment_failure_writes_one_log_line(no_detection, tmp_path):
     assert len(lines) == 1
     assert json.loads(lines[0])["final_status"] == "INPUT FAILED"
     assert clicker.clicks == 0
+
+
+def test_one_sequence_per_monitoring_run_with_no_round_model_requests(monkeypatch, tmp_path):
+    from datetime import datetime, timedelta, timezone
+    from types import SimpleNamespace
+
+    import numpy as np
+    import rapidocr
+    from crash_watcher.desktop import worker as module
+    from crash_watcher.desktop.final_result import ConfirmedFinal, FinalReading
+
+    settings = _settings(result_region=Region(1, 0, 0, 100, 100), interval_ms=20,
+                         smart_review_enabled=True, smart_play_enabled=True,
+                         smart_click_enabled=True, turnbal_yellow_enabled=True,
+                         color_sequence_count=4, bet_region=Region(1, 100, 200, 60, 40))
+    worker = MonitorWorker(settings, StrategyEngine(settings.strategy()))
+    sender = Sender()
+    clicker = AutoClicker(settings, sender=sender)
+    calls, reports = [], []
+    worker.click_report.connect(reports.append)
+    timestamp = lambda: datetime.now(timezone.utc)
+    old = timestamp() - timedelta(seconds=8)
+
+    def snapshot(_):
+        calls.append("capture")
+        return ("GREEN",), ("RED", "GREEN")
+
+    def predict(*_):
+        calls.append("model")
+        return (("RED", .8), ("YELLOW", .8), ("GREEN", .2), ("GREEN", .8))
+
+    class InlineThread:
+        def __init__(self, target, args, **_):
+            self.target, self.args = target, args
+
+        def start(self):
+            self.target(*self.args)
+
+    class Capture:
+        def __init__(self, _):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            pass
+
+        def capture(self):
+            return SimpleNamespace(image=np.zeros((40, 100, 3), dtype=np.uint8),
+                                   captured_at=timestamp()), ()
+
+    outcomes = iter([(None, None), ("before-ready", old), ("r1", None),
+                     ("r1", None), ("r2", None), ("r3", None), ("r4", None), ("r5", None)])
+
+    def observe(*_args, **_kwargs):
+        round_id, time = next(outcomes, ("stop", None))
+        if round_id == "stop":
+            worker.stop()
+            return None
+        return ConfirmedFinal(round_id, Decimal("12.00"), 1.0, time or timestamp()) if round_id else None
+
+    monkeypatch.setattr(module, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setattr(module, "ScreenCapture", Capture)
+    monkeypatch.setattr(module, "Thread", InlineThread)
+    monkeypatch.setattr(module, "AutoClicker", lambda _: clicker)
+    monkeypatch.setattr(module, "capture_color_history", snapshot)
+    monkeypatch.setattr(module, "request_color_sequence", predict)
+    monkeypatch.setattr(module, "RapidOCRReader", lambda: None)
+    monkeypatch.setattr(rapidocr, "RapidOCR", lambda: lambda _: None)
+    reading = FinalReading(None, 0, "", "", False)
+    monkeypatch.setattr(module, "BangRecognizer", lambda *_: SimpleNamespace(recognize=lambda _: reading))
+    monkeypatch.setattr(worker.detector, "observe", observe)
+    worker.detector.state = SimpleNamespace(name="ROUND_IN_PROGRESS")
+    monkeypatch.setattr(worker, "_start_hybrid", lambda *_: pytest.fail("no per-round request"))
+    monkeypatch.setattr(worker, "_start_smart_review", lambda *_: pytest.fail("no per-round review"))
+    monkeypatch.setattr(clicker, "_chart_reading", lambda: pytest.fail("no new chart read"))
+    worker.run()
+
+    assert calls == ["capture", "model"]
+    assert [(report.target_round_id, report.target) for report in reports if report.clicked] == [
+        ("r1", "RED"), ("r2", "YELLOW"), ("r4", "GREEN")]
+    assert sender.calls == [(110, 220, True), (150, 220, True), (130, 220, True)]
