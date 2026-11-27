@@ -1917,14 +1917,17 @@ class MainWindow(QMainWindow):
 
     def _refresh_toggles(self):
         real = not self.settings.autoclick_dry_run
-        self.mode_button.setText("حالت واقعی ⚡" if real else "حالت شبیه‌سازی")
-        self.mode_button.setToolTip("در حالت شبیه‌سازی کلیک واقعی ارسال نمی‌شود.")
-        self.mode_button.setStyleSheet(self._toggle_style(real))
+        shadow = self.settings.shadow_mode
+        self.mode_button.setText("حالت سایه" if shadow else "حالت واقعی ⚡" if real else "حالت شبیه‌سازی")
+        self.mode_button.setToolTip("برای کلیک واقعی، حالت سایه را در کالیبراسیون خاموش کنید."
+                                    if shadow else "در حالت شبیه‌سازی کلیک واقعی ارسال نمی‌شود.")
+        self.mode_button.setStyleSheet(self._toggle_style(real and not shadow))
         on = self.settings.autoclick_enabled
         self.autoclick_button.setText("کلیک خودکار: روشن" if on else "کلیک خودکار: خاموش")
         self.autoclick_button.setToolTip("کلیک خودکار را روشن یا خاموش می‌کند")
         self.autoclick_button.setStyleSheet(self._toggle_style(on))
-        self.setWindowTitle("Crash Watcher · REAL" if real else "Crash Watcher · SIMULATED")
+        mode = "SHADOW" if shadow else "REAL" if real else "SIMULATED"
+        self.setWindowTitle(f"Crash Watcher · {mode}")
         self._refresh_bot_mode()
 
     def apply_settings(self, **changes):

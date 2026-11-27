@@ -185,6 +185,8 @@ class MonitorWorker(QThread):
                 labels = "، ".join(f"{index}. {NAMES[color]} ({confidence:.0%})"
                                    for index, (color, confidence) in enumerate(entries, 1))
                 self.sequence_status.emit("ترتیب پیشنهادها: " + labels)
+                if not self.settings.autoclick_enabled:
+                    self.sequence_status.emit("کلیک خودکار خاموش است؛ فهرست تا روشن شدن آن منتظر می‌ماند.")
         except Exception as exc:
             if not self._stop.is_set():
                 self.sequence_status.emit("فهرست آماده نشد: " + str(exc))
@@ -205,7 +207,9 @@ class MonitorWorker(QThread):
         entry = None
         with self._advice_lock:
             if (self._sequence and completed.timestamp >= self._sequence_ready_at
-                    and (self._sequence_index or (window_s > 0 and not clicker.hold_remaining()))):
+                    and (self._sequence_index or
+                         (clicker.settings.autoclick_enabled and window_s > 0
+                          and not clicker.hold_remaining()))):
                 entry = self._sequence.popleft()
                 self._sequence_index += 1
                 position = self._sequence_index
@@ -220,11 +224,21 @@ class MonitorWorker(QThread):
         report = clicker.fire(completed.round_id, completed.multiplier, sequence=(target, window_s))
         if entry is not None:
             line = f"دست {position}: {NAMES[color]} ({confidence:.0%})"
-            if target is None:
-                line += " — رد شد: رنگ غیرفعال است یا اطمینان کافی نیست."
+            if not rule.enabled:
+                line += " — رد شد: این رنگ در تنظیمات ترنبال غیرفعال است."
+            elif confidence < minimum:
+                line += f" — رد شد: حداقل اطمینان این رنگ {minimum:.0%} است."
             elif window_s <= 0:
                 line += " — رد شد: مهلت دست گذشته است."
-            elif not report.clicked and report.status not in ("CLICK SCHEDULED", "DRY RUN", "SHADOW"):
+            elif report.status == "SHADOW" or (report.shadow and not report.clicked):
+                line += " — حالت سایه: کلیک واقعی ارسال نمی‌شود."
+            elif report.status == "DRY RUN" or (report.dry_run and not report.clicked):
+                line += " — شبیه‌سازی: کلیک واقعی ارسال نمی‌شود."
+            elif report.reason == "target not found":
+                line += " — محل دکمهٔ این رنگ را در کالیبراسیون تعیین کنید."
+            elif report.reason == "disabled":
+                line += " — رد شد: کلیک خودکار خاموش است."
+            elif not report.clicked and report.status != "CLICK SCHEDULED":
                 line += f" — {report.reason}"
             if not remaining:
                 line += "\nفهرست تمام شد. برای فهرست تازه، پایش را دوباره شروع کنید."

@@ -359,3 +359,31 @@ def test_one_sequence_per_monitoring_run_with_no_round_model_requests(monkeypatc
     assert [(report.target_round_id, report.target) for report in reports if report.clicked] == [
         ("r1", "RED"), ("r2", "YELLOW"), ("r4", "GREEN")]
     assert sender.calls == [(110, 220, True), (150, 220, True), (130, 220, True)]
+
+
+def test_color_sequence_waits_for_autoclick_before_first_slot(monkeypatch, tmp_path):
+    from dataclasses import replace
+    from datetime import datetime, timezone
+    from crash_watcher.desktop import worker as module
+    from crash_watcher.desktop.final_result import ConfirmedFinal
+
+    settings = _settings(autoclick_enabled=False, result_region=Region(1, 0, 0, 100, 100),
+                         bet_region=Region(1, 100, 200, 60, 40))
+    worker = MonitorWorker(settings, StrategyEngine(settings.strategy()))
+    sender = Sender()
+    clicker = AutoClicker(settings, sender=sender, log_path=tmp_path / "rounds.jsonl")
+    worker._clicker = clicker
+    monkeypatch.setattr(module, "capture_color_history", lambda _: (("GREEN",), ()))
+    monkeypatch.setattr(module, "request_color_sequence", lambda *_: (("RED", .9), ("GREEN", .9)))
+    worker._prepare_color_sequence(settings)
+
+    def fire(round_id):
+        round_result = ConfirmedFinal(round_id, Decimal("3.00"), 1.0, datetime.now(timezone.utc))
+        return worker._fire_color_sequence(clicker, round_result)
+
+    assert fire("off").reason == "disabled"
+    assert sender.calls == []
+    worker.configure(replace(settings, autoclick_enabled=True))
+    assert fire("on").target == "RED"
+    assert fire("next").target == "GREEN"
+    assert sender.calls == [(110, 220, True), (130, 220, True)]
