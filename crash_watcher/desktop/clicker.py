@@ -497,8 +497,9 @@ class AutoClicker:
             self._record(round_id, value, report)
 
     def fire(self, round_id: str, value: Decimal, *,
-             sequence: tuple[str | None, float] | None = None) -> ClickReport:
-        report = self._decide(round_id, value, sequence=sequence)
+             sequence: tuple[str | None, float] | None = None,
+             rule_window_s: float | None = None) -> ClickReport:
+        report = self._decide(round_id, value, sequence=sequence, rule_window_s=rule_window_s)
         if self.settings.autoclick_enabled:
             self._record(round_id, value, report)
         return report
@@ -601,7 +602,8 @@ class AutoClicker:
             pass
 
     def _decide(self, round_id: str, value: Decimal, *,
-                sequence: tuple[str | None, float] | None = None) -> ClickReport:
+                sequence: tuple[str | None, float] | None = None,
+                rule_window_s: float | None = None) -> ClickReport:
         if not self.settings.autoclick_enabled:
             return ClickReport(False, "disabled", count=self._clicks, status="SKIPPED")
         if self.bankroll is not None and self.bankroll.stopped:
@@ -711,6 +713,9 @@ class AutoClicker:
             reason = "red streak" if self.red_hold_remaining() else self._hold_reason
             return ClickReport(False, f"hold {reason}: {remaining_hold:.0f}s left",
                                count=self._clicks, remaining=self._armed)
+        if rule_window_s is not None and rule_window_s <= 0:
+            return ClickReport(False, "click window closed", count=self._clicks,
+                               status="EXPIRED", target_round_id=round_id)
         if sequence is not None:
             target_color, window_s = sequence
             if not turnbal or target_color not in ("RED", "GREEN", "YELLOW") or window_s <= 0:
@@ -880,7 +885,8 @@ class AutoClicker:
         delay_s = (0.0 if rule == "low-close" else
                    min(max(0.0, self.settings.autoclick_delay_ms / 1000), CLICK_PLAN_TTL_S))
         plan.not_before = now + delay_s
-        plan.deadline = now + (CLICK_PLAN_TTL_S if sequence is None else window_s)
+        entry_window = rule_window_s if sequence is None else window_s
+        plan.deadline = now + (CLICK_PLAN_TTL_S if entry_window is None else entry_window)
         if plan.not_before > plan.deadline:
             return ClickReport(False, "click delay exceeds round window", count=self._clicks,
                                status="EXPIRED", target_round_id=round_id)

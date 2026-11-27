@@ -352,13 +352,15 @@ def test_one_sequence_per_monitoring_run_with_no_round_model_requests(monkeypatc
     worker.detector.state = SimpleNamespace(name="ROUND_IN_PROGRESS")
     monkeypatch.setattr(worker, "_start_hybrid", lambda *_: pytest.fail("no per-round request"))
     monkeypatch.setattr(worker, "_start_smart_review", lambda *_: pytest.fail("no per-round review"))
-    monkeypatch.setattr(clicker, "_chart_reading", lambda: pytest.fail("no new chart read"))
+    monkeypatch.setattr(worker, "_start_sequence_evaluation", lambda _: worker._prepare_color_sequence(settings))
+    monkeypatch.setattr(clicker, "_chart_reading", lambda: None)
     worker.run()
 
     assert calls == ["capture", "model"]
     assert [(report.target_round_id, report.target) for report in reports if report.clicked] == [
-        ("r1", "RED"), ("r2", "YELLOW"), ("r4", "GREEN")]
-    assert sender.calls == [(110, 220, True), (150, 220, True), (130, 220, True)]
+        ("r1", "RED"), ("r2", "YELLOW"), ("r3", "YELLOW"), ("r4", "GREEN"), ("r5", "YELLOW")]
+    assert sender.calls == [(110, 220, True), (150, 220, True), (150, 220, True),
+                            (130, 220, True), (150, 220, True)]
 
 
 def test_color_sequence_waits_for_autoclick_before_first_slot(monkeypatch, tmp_path):
@@ -387,3 +389,39 @@ def test_color_sequence_waits_for_autoclick_before_first_slot(monkeypatch, tmp_p
     assert fire("on").target == "RED"
     assert fire("next").target == "GREEN"
     assert sender.calls == [(110, 220, True), (130, 220, True)]
+
+
+def test_evaluation_discards_late_model_and_clicks_by_existing_rules(monkeypatch):
+    from datetime import datetime, timezone
+    from crash_watcher.desktop import worker as module
+    from crash_watcher.desktop.final_result import ConfirmedFinal
+
+    settings = _settings(result_region=Region(1, 0, 0, 30, 30),
+                         bet_region=Region(1, 100, 200, 60, 40))
+    worker = MonitorWorker(settings, StrategyEngine(settings.strategy()))
+    clock = Clock()
+    sender = Sender()
+    clicker = AutoClicker(settings, sender=sender, clock=clock)
+    worker._evaluation_deadline = clock.now + 60
+    worker._recent.append("3.20")
+    worker._first_evaluation_round.set()
+    monkeypatch.setattr(module, "perf_counter", clock)
+    monkeypatch.setattr(module, "capture_color_history", lambda _: ("GREEN",))
+    monkeypatch.setattr(clicker, "_chart_reading", lambda: None)
+
+    def completed(name):
+        return ConfirmedFinal(name, Decimal("12.00"), 1.0, datetime.now(timezone.utc))
+
+    assert not worker._fire_color_sequence(clicker, completed("during")).clicked
+
+    def slow_response(_, chart, *, recent, deadline):
+        assert chart == ("GREEN",) and recent == ("3.20",) and deadline == 1060
+        clock.advance(60)
+        return (("GREEN", .99),) * 3
+
+    monkeypatch.setattr(module, "request_color_sequence", slow_response)
+    worker._prepare_color_sequence(settings)
+    assert not worker._sequence
+    report = worker._fire_color_sequence(clicker, completed("after"))
+    assert report.clicked and report.rule == "yellow-run" and report.target == "YELLOW"
+    assert sender.calls == [(150, 220, True)]

@@ -44,6 +44,7 @@ DECISION_TIMEOUT_S = 3.5
 # می‌ایستاد. تا وقتی شمارش معکوس دست تازه تمام نشده، کلیک روی دکمهٔ شرط همان
 # شرطِ دست بعد است، پس این پنجره ۶ ثانیه شد.
 CLICK_WINDOW_MS = 6000.0
+COLOR_EVALUATION_SECONDS = 60.0
 
 
 def live_multiplier(reader, image, minimum: float = 0.55):
@@ -157,10 +158,19 @@ class MonitorWorker(QThread):
         self._sequence_index = 0
         self._sequence_ready_at = datetime.max.replace(tzinfo=timezone.utc)
         self._sequence_round_id: str | None = None
+        self._evaluation_deadline: float | None = None
+        self._evaluation_announced = False
+        self._first_evaluation_round = Event()
 
     @property
     def uses_color_sequence(self) -> bool:
         return self._sequence_mode
+
+    def _start_sequence_evaluation(self, clicker: AutoClicker) -> None:
+        self._evaluation_deadline = perf_counter() + COLOR_EVALUATION_SECONDS
+        clicker.hold_clicks(COLOR_EVALUATION_SECONDS, "evaluation")
+        self.sequence_status.emit("ارزیابی یک‌دقیقه‌ای شروع شد؛ کلیک خودکار پس از آن فعال می‌شود.")
+        Thread(target=self._prepare_color_sequence, args=(self.settings,), daemon=True).start()
 
     def _prepare_color_sequence(self, settings: DesktopSettings) -> None:
         """Capture and request once, independently of the monitoring loop."""
@@ -176,9 +186,18 @@ class MonitorWorker(QThread):
                 return
             if self._stop.is_set():
                 return
-            entries = request_color_sequence(settings, trend)
+            deadline = self._evaluation_deadline
+            if deadline is None:
+                entries = request_color_sequence(settings, trend)
+            else:
+                self._first_evaluation_round.wait(min(8.0, max(0.0, deadline - perf_counter())))
+                if self._stop.is_set() or perf_counter() >= deadline:
+                    return
+                with self._advice_lock:
+                    recent = tuple(self._recent)
+                entries = request_color_sequence(settings, trend, recent=recent, deadline=deadline)
             with self._advice_lock:
-                if self._stop.is_set():
+                if self._stop.is_set() or (deadline is not None and perf_counter() >= deadline):
                     return
                 self._sequence_ready_at = datetime.now(timezone.utc)
                 self._sequence.extend(entries)
@@ -188,8 +207,9 @@ class MonitorWorker(QThread):
                 if not self.settings.autoclick_enabled:
                     self.sequence_status.emit("کلیک خودکار خاموش است؛ فهرست تا روشن شدن آن منتظر می‌ماند.")
         except Exception as exc:
-            if not self._stop.is_set():
-                self.sequence_status.emit("فهرست آماده نشد: " + str(exc))
+            if (not self._stop.is_set() and (self._evaluation_deadline is None
+                                           or perf_counter() < self._evaluation_deadline)):
+                self.sequence_status.emit("فهرست آماده نشد؛ بعد از ارزیابی، قوانین کلیکر اجرا می‌شوند: " + str(exc))
 
     def _discard_started_sequence(self) -> None:
         with self._advice_lock:
@@ -205,8 +225,12 @@ class MonitorWorker(QThread):
         window_s = CLICK_WINDOW_MS / 1000 - (
             datetime.now(timezone.utc) - completed.timestamp).total_seconds()
         entry = None
+        evaluating = self._evaluation_deadline is not None and perf_counter() < self._evaluation_deadline
+        if not evaluating and not self._evaluation_announced and self._evaluation_deadline is not None:
+            self._evaluation_announced = True
+            self.sequence_status.emit("ارزیابی تمام شد؛ پاسخ دیررس مدل استفاده نمی‌شود. کلیکر مستقل ادامه می‌دهد.")
         with self._advice_lock:
-            if (self._sequence and completed.timestamp >= self._sequence_ready_at
+            if (not evaluating and self._sequence and completed.timestamp >= self._sequence_ready_at
                     and (self._sequence_index or
                          (clicker.settings.autoclick_enabled and window_s > 0
                           and not clicker.hold_remaining()))):
@@ -221,7 +245,10 @@ class MonitorWorker(QThread):
             minimum = max(0.40, self.settings.smart_play_min_confidence, rule.min_conf)
             if rule.enabled and confidence >= minimum:
                 target = color
-        report = clicker.fire(completed.round_id, completed.multiplier, sequence=(target, window_s))
+        if evaluating or target is not None:
+            report = clicker.fire(completed.round_id, completed.multiplier, sequence=(target, window_s))
+        else:
+            report = clicker.fire(completed.round_id, completed.multiplier, rule_window_s=window_s)
         if entry is not None:
             line = f"دست {position}: {NAMES[color]} ({confidence:.0%})"
             if not rule.enabled:
@@ -240,8 +267,10 @@ class MonitorWorker(QThread):
                 line += " — رد شد: کلیک خودکار خاموش است."
             elif not report.clicked and report.status != "CLICK SCHEDULED":
                 line += f" — {report.reason}"
+            if target is None:
+                line += " قوانین کلیکر بررسی شدند."
             if not remaining:
-                line += "\nفهرست تمام شد. برای فهرست تازه، پایش را دوباره شروع کنید."
+                line += "\nفهرست تمام شد؛ کلیکر با قوانین خودش ادامه می‌دهد."
             self.sequence_status.emit(line)
         return report
 
@@ -326,8 +355,7 @@ class MonitorWorker(QThread):
             self.settings.smart_play_two_colors)
         try:
             if self._sequence_mode and not self._stop.is_set():
-                self.sequence_status.emit("در حال خواندن یک تصویر از جدول و آماده کردن فهرست رنگ‌ها…")
-                Thread(target=self._prepare_color_sequence, args=(self.settings,), daemon=True).start()
+                self._start_sequence_evaluation(clicker)
             if self.settings.tesseract_path:
                 import pytesseract
                 pytesseract.pytesseract.tesseract_cmd = self.settings.tesseract_path
@@ -660,7 +688,9 @@ class MonitorWorker(QThread):
                                 review = clicker.take_review() if turnbal else None
                                 if review is not None:
                                     self.review_report.emit(review)
-                                self._recent.append(str(completed.multiplier))
+                                with self._advice_lock:
+                                    self._recent.append(str(completed.multiplier))
+                                self._first_evaluation_round.set()
                                 self._smart_seen += 1
                                 self._smart_rounds += 1
                                 if (not self._sequence_mode and not self._smart_play_active()
@@ -677,7 +707,8 @@ class MonitorWorker(QThread):
                                 if bang_now:
                                     # صفحهٔ پایان دست: پنجرهٔ خروج بسته است و
                                     # کلیک روی دکمهٔ شرط شرط تازه باز می‌کند.
-                                    clicker.tick(ended=True)
+                                    if not cashout_wait_for_live:
+                                        clicker.tick(ended=True)
                                 elif reading.value is None:
                                     live = live_multiplier(reader, frame.image)
                                     if live is not None:

@@ -400,3 +400,18 @@ def test_manual_preview_retains_sequence_when_history_changes(monkeypatch):
             window.snapshot_worker.wait(4000)
         app.processEvents()
         window.close()
+
+
+def test_evaluation_does_not_start_cloud_fallback_after_deadline(monkeypatch):
+    now = [28.0]
+    monkeypatch.setattr(advice, "perf_counter", lambda: now[0])
+    settings = DesktopSettings(ollama_enabled=True, smart_review_enabled=True)
+
+    def local(*_, **__):
+        now[0] = 30.0
+        raise OSError("local timeout")
+
+    monkeypatch.setattr(advice, "_ask_local", local)
+    monkeypatch.setattr(advice, "ask", lambda *_, **__: pytest.fail("evaluation expired"))
+    with pytest.raises(TimeoutError):
+        advice.request_advice(settings, "prompt", deadline=30)

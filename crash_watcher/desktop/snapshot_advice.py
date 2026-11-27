@@ -158,7 +158,7 @@ def capture_color_history(settings) -> tuple[str, ...]:
     return chart_sequence((dot.column, dot.row, dot.color) for dot in grid.dots)
 
 
-def request_color_sequence(settings, trend) -> tuple[tuple[str, float], ...]:
+def request_color_sequence(settings, trend, *, recent=(), deadline=None) -> tuple[tuple[str, float], ...]:
     """Ask once for a fixed list. Reject incomplete or invalid answers as a whole."""
     count = settings.color_sequence_count
     schema = {
@@ -185,7 +185,10 @@ def request_color_sequence(settings, trend) -> tuple[tuple[str, float], ...]:
         "with the requested number of entries. Use RED, GREEN or YELLOW; never return multipliers.\n"
         + json.dumps({"chart_colors": trend})
     )
-    raw = request_advice(settings, prompt, schema).strip()
+    if recent:
+        prompt += "\nRecent confirmed multipliers in order: " + json.dumps(recent)
+    raw = (request_advice(settings, prompt, schema) if deadline is None else
+           request_advice(settings, prompt, schema, deadline=deadline)).strip()
     fenced = re.fullmatch(r"```(?:json)?\s*(.*?)\s*```", raw, re.DOTALL)
     try:
         data = json.loads(fenced[1] if fenced else raw)
@@ -282,7 +285,7 @@ def warm_local(settings):
     return True
 
 
-def _ask_local(settings, prompt, schema):
+def _ask_local(settings, prompt, schema, *, deadline=None):
     sequence_count = schema.get("properties", {}).get("rounds", {}).get("maxItems", 0)
     payload = {"model": settings.ollama_model, "stream": False, "think": False,
                "format": schema, "keep_alive": settings.ollama_keep_alive,
@@ -296,11 +299,20 @@ def _ask_local(settings, prompt, schema):
     timeout = settings.ollama_timeout_ms / 1000
     if not sequence_count:
         timeout = min(timeout, LOCAL_ADVICE_TIMEOUT_S)
-    with request.urlopen(call, timeout=timeout) as response:
+    with request.urlopen(call, timeout=_evaluation_timeout(timeout, deadline)) as response:
         return json.load(response)["message"]["content"]
 
 
-def request_advice(settings, prompt, schema=None):
+def _evaluation_timeout(timeout, deadline):
+    if deadline is None:
+        return timeout
+    remaining = deadline - perf_counter()
+    if remaining <= 0:
+        raise TimeoutError("زمان ارزیابی مدل تمام شده است.")
+    return min(timeout, remaining)
+
+
+def request_advice(settings, prompt, schema=None, *, deadline=None):
     """مدل محلی اول جواب می‌دهد؛ مسیر ابری فقط پشتیبان است.
 
     در حالت hybrid درخواست‌های این تب پیش‌تر به مسیر ابری می‌رفتند و ۱۲ تا ۳۸
@@ -311,12 +323,14 @@ def request_advice(settings, prompt, schema=None):
     schema = schema or ADVICE_SCHEMA
     if settings.ollama_enabled or settings.ai_provider == "local":
         try:
-            return _ask_local(settings, prompt, schema)
+            if deadline is None:
+                return _ask_local(settings, prompt, schema)
+            return _ask_local(settings, prompt, schema, deadline=deadline)
         except Exception:
             if settings.ai_provider == "local" or not settings.smart_review_enabled:
                 raise
     return ask(settings.smart_review_url, settings.resolved_key(), settings.smart_review_model,
-               prompt, settings.smart_review_timeout_s,
+               prompt, _evaluation_timeout(settings.smart_review_timeout_s, deadline),
                system="Analyze supplied data only. Return the requested JSON. No tools or actions.")
 
 
