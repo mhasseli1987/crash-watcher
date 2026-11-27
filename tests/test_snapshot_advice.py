@@ -277,6 +277,7 @@ def test_changed_history_while_busy_is_queued(monkeypatch):
     from crash_watcher.desktop.ui import MainWindow
     texts = []
     window = SimpleNamespace(_snapshot_pending=False,
+        sequence_enabled=SimpleNamespace(isChecked=lambda: False),
         snapshot_output=SimpleNamespace(setPlainText=texts.append),
         snapshot_worker=SimpleNamespace(isRunning=lambda: True),
         _snapshot_finished=lambda: pytest.fail("must not start parallel requests"))
@@ -347,3 +348,61 @@ def test_color_sequence_model_gets_only_colors_and_must_return_exact_count(monke
             advice.request_color_sequence(settings, ("RED",), ("RED", "GREEN"))
     else:
         assert advice.request_color_sequence(settings, ("RED",), ("RED", "GREEN")) == (("RED", 0.6),) * 4
+
+
+def test_manual_preview_retains_sequence_when_history_changes(monkeypatch):
+    import json
+    from threading import Event
+    from time import monotonic, sleep
+    from PySide6.QtWidgets import QApplication
+    from crash_watcher.desktop import ui
+    from crash_watcher.desktop.config import Region
+
+    app = QApplication.instance() or QApplication([])
+    region = Region(1, 0, 0, 30, 30)
+    settings = DesktopSettings(history_region=region, chart_region=region)
+    monkeypatch.setattr(ui, "load_settings", lambda: settings)
+    monkeypatch.setattr(ui.MainWindow, "save_ui_settings", lambda self: True)
+    monkeypatch.setattr(ui, "SnapshotWatchWorker",
+                        lambda *_: pytest.fail("sequence mode must never start the old watcher"))
+    timeline = []
+    response = Event()
+
+    def capture(_):
+        timeline.append("capture")
+        return ("GREEN",), ("RED", "GREEN")
+
+    def ask(*_):
+        timeline.append("model")
+        assert response.wait(3)
+        return json.dumps({"rounds": [
+            {"color": color, "confidence": .8} for color in ("RED", "GREEN", "YELLOW")]})
+
+    monkeypatch.setattr(advice, "capture_color_history", capture)
+    monkeypatch.setattr(advice, "request_advice", ask)
+    window = ui.MainWindow()
+
+    def wait_for(condition):
+        deadline = monotonic() + 2
+        while not condition() and monotonic() < deadline:
+            app.processEvents()
+            sleep(.01)
+        assert condition()
+
+    try:
+        window.start_snapshot_advice()
+        wait_for(lambda: timeline == ["capture", "model"])
+        window._snapshot_changed()
+        window._restart_legacy_snapshot()
+        response.set()
+        wait_for(lambda: window.snapshot_button.isEnabled())
+        assert "ترتیب پیشنهادها: " in window.snapshot_output.toPlainText()
+        assert "3." in window.snapshot_output.toPlainText()
+        assert not window._snapshot_pending
+        assert timeline == ["capture", "model"]
+    finally:
+        response.set()
+        if getattr(window, "snapshot_worker", None):
+            window.snapshot_worker.wait(4000)
+        app.processEvents()
+        window.close()

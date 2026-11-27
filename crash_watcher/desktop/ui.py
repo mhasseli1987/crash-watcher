@@ -29,7 +29,8 @@ from .smart_review import (DEFAULT_BASE_URL, DEFAULT_MODEL, append_log, chat_com
                            probe_models)
 from .worker import MonitorWorker
 from .ollama_provider import installed_models
-from .snapshot_advice import (RED_PAUSE_SECONDS, SnapshotAdviceWorker, SnapshotWatchWorker,
+from .snapshot_advice import (RED_PAUSE_SECONDS, ColorSequenceAdviceWorker,
+                              SnapshotAdviceWorker, SnapshotWatchWorker,
                               warm_local)
 
 _FA_DIGITS = str.maketrans("0123456789", "۰۱۲۳۴۵۶۷۸۹")
@@ -418,6 +419,8 @@ class MainWindow(QMainWindow):
         self.snapshot_auto = QCheckBox("روش قبلی: بررسی دوباره پس از تغییر تاریخچه")
         self.snapshot_auto.setChecked(True)
         layout.addWidget(self.snapshot_auto)
+        self.snapshot_auto.setEnabled(not self.sequence_enabled.isChecked())
+        self.sequence_enabled.toggled.connect(lambda enabled: self.snapshot_auto.setEnabled(not enabled))
         self._snapshot_pending = False
         # قرمزهای پیاپی: تا این زمان هیچ تحلیل/کلیک تازه‌ای شروع نمی‌شود.
         self._red_hold_until = 0.0
@@ -437,7 +440,7 @@ class MainWindow(QMainWindow):
             button = QPushButton(title)
             button.clicked.connect(lambda _=False, t=target: self.select_region(t))
             layout.addWidget(button)
-        self.snapshot_button = QPushButton("بررسی تصاویر و پیشنهاد دست بعد")
+        self.snapshot_button = QPushButton("تحلیل دستی تصویر (فقط نمایش پیشنهاد)")
         self.snapshot_button.clicked.connect(self.start_snapshot_advice)
         layout.addWidget(self.snapshot_button)
         self.snapshot_output = QPlainTextEdit()
@@ -469,12 +472,40 @@ class MainWindow(QMainWindow):
         if worker and worker.isRunning():
             worker.hold_clicks(RED_PAUSE_SECONDS, "red streak")
         self.snapshot_output.setPlainText(text)
-        QTimer.singleShot(int((RED_PAUSE_SECONDS + 1) * 1000), self.start_snapshot_advice)
+        QTimer.singleShot(int((RED_PAUSE_SECONDS + 1) * 1000), self._restart_legacy_snapshot)
+
+    def _restart_legacy_snapshot(self):
+        if not self.sequence_enabled.isChecked():
+            self.start_snapshot_advice()
+
+    def _start_manual_color_sequence(self):
+        watch = getattr(self, "snapshot_watch", None)
+        if watch and watch.isRunning():
+            watch.stop()
+            if not watch.wait(1500):
+                self.snapshot_output.setPlainText("منتظر توقف دیده‌بان تصویر بمانید و دوباره امتحان کنید.")
+                return
+        self._snapshot_pending = False
+        self.snapshot_button.setEnabled(False)
+        self.snapshot_output.setPlainText("در حال تحلیل یک تصویر از رنگ‌های قبلی؛ پایان دور پاسخ را لغو نمی‌کند…")
+        self.snapshot_worker = ColorSequenceAdviceWorker(self.settings)
+        self.snapshot_worker.captured.connect(self.showNormal)
+        self.snapshot_worker.done.connect(self.snapshot_output.setPlainText)
+        self.snapshot_worker.failed.connect(
+            lambda error: self.snapshot_output.setPlainText("تحلیل انجام نشد: " + error))
+        self.snapshot_worker.finished.connect(self._snapshot_finished)
+        self.snapshot_worker.finished.connect(self.showNormal)
+        self.showMinimized()
+        QTimer.singleShot(250, self.snapshot_worker.start)
 
     def start_snapshot_advice(self):
-        if self.worker and self.worker.isRunning() and self.worker.uses_color_sequence:
+        active = bool(self.worker and self.worker.isRunning())
+        if active and self.worker.uses_color_sequence:
             return
-        if getattr(self, "snapshot_worker", None) and self.snapshot_worker.isRunning():
+        if active and (self.settings.color_sequence_enabled or self.sequence_enabled.isChecked()):
+            self.snapshot_output.setPlainText("برای اجرای فهرست رنگ، پایش را متوقف کنید، ترنبال را انتخاب کنید و دوباره پایش را شروع کنید.")
+            return
+        if not self.snapshot_button.isEnabled():
             return
         if self._red_hold_active():
             # در توقف قرمزهای پیاپی، هیچ درخواست مدل یا کلیکی شروع نمی‌شود.
@@ -489,6 +520,9 @@ class MainWindow(QMainWindow):
             return
         # در حین پایش تنظیمات قفل است؛ همان تنظیمات فعال پایش استفاده می‌شود.
         if not (self.worker and self.worker.isRunning()) and not self.save_ui_settings():
+            return
+        if not active and self.settings.color_sequence_enabled:
+            self._start_manual_color_sequence()
             return
         watch = getattr(self, "snapshot_watch", None)
         if watch and (watch.settings.history_region != self.settings.history_region or
@@ -550,6 +584,8 @@ class MainWindow(QMainWindow):
             "طبق تنظیمات تب کلیک انجام می‌شود.")
 
     def _snapshot_changed(self):
+        if self.sequence_enabled.isChecked():
+            return
         self._snapshot_pending = True
         self.snapshot_output.setPlainText("تاریخچه تغییر کرد؛ پیشنهاد قبلی نامعتبر است.")
         if not (getattr(self, "snapshot_worker", None) and self.snapshot_worker.isRunning()):
@@ -564,7 +600,7 @@ class MainWindow(QMainWindow):
     def _snapshot_finished(self):
         self.snapshot_button.setEnabled(True)
         if self._snapshot_pending and self.snapshot_auto.isChecked():
-            QTimer.singleShot(0, self.start_snapshot_advice)
+            QTimer.singleShot(0, self._restart_legacy_snapshot)
 
     def _metric(self, layout, row, column, label):
         box = QFrame()
@@ -1610,8 +1646,7 @@ class MainWindow(QMainWindow):
             grid.addWidget(box, index // columns, index % columns)
 
     def start_monitoring(self):
-        if self.settings.snapshot_advice_only or (getattr(self, "snapshot_worker", None)
-                                                   and self.snapshot_worker.isRunning()):
+        if self.settings.snapshot_advice_only or not self.snapshot_button.isEnabled():
             self.tabs.setCurrentIndex(self.snapshot_tab)
             self.snapshot_output.setPlainText("حالت تحلیل قبل از دست فعال است؛ از دکمهٔ بررسی تصاویر استفاده کنید.")
             return
@@ -1657,7 +1692,7 @@ class MainWindow(QMainWindow):
         # با کوچک‌شدن پنجره، ناحیه‌های بازی برای عکس‌گرفتن آزاد می‌مانند.
         self.showMinimized()
         self.worker.start()
-        if (not self.worker.uses_color_sequence and self.snapshot_auto.isChecked() and self.settings.history_region
+        if (not self.settings.color_sequence_enabled and self.snapshot_auto.isChecked() and self.settings.history_region
                 and self.settings.chart_region):
             # مدل محلی هم‌زمان با شروع پایش در حافظه بارگذاری می‌شود تا اولین
             # تحلیل هم در چند ثانیه آماده باشد، نه پس از یک بارگذاری سرد.
@@ -1665,7 +1700,7 @@ class MainWindow(QMainWindow):
                 settings = self.settings
                 Thread(target=warm_local, args=(settings,), daemon=True).start()
             # تحلیل قبل از دست با شروع پایش خودکار شروع می‌شود تا دست‌ها بی‌تصمیم نمانند.
-            QTimer.singleShot(0, self.start_snapshot_advice)
+            QTimer.singleShot(0, self._restart_legacy_snapshot)
         self._refresh()
 
     def stop_monitoring(self):
@@ -1867,14 +1902,14 @@ class MainWindow(QMainWindow):
     def _on_observation(self, reading, completed, result):
         if completed is not None:
             self.confirmed += 1
-            if (not (self.worker and self.worker.uses_color_sequence)
+            if (not self.settings.color_sequence_enabled
                     and not self.settings.snapshot_advice_only and self.snapshot_auto.isChecked()
                     and self.settings.history_region and self.settings.chart_region
                     and not (getattr(self, "snapshot_worker", None)
                              and self.snapshot_worker.isRunning())):
                 # هر دست که تمام شد، پیشنهاد دست بعد تازه گرفته می‌شود؛ مستقل از
                 # اینکه دیده‌بان پیکسلی هنوز زنده باشد یا نه.
-                QTimer.singleShot(300, self.start_snapshot_advice)
+                QTimer.singleShot(300, self._restart_legacy_snapshot)
         self.values["ضریب شناسایی‌شده"].setText(str(reading.value) if reading.value else "—")
         self.values["دسته"].setText(
             "—" if self.settings.bot_mode == "classic" else
@@ -2082,7 +2117,7 @@ class MainWindow(QMainWindow):
                 writer.writerows(self.history)
 
     def closeEvent(self, event):
-        if getattr(self, "snapshot_worker", None) and self.snapshot_worker.isRunning():
+        if not self.snapshot_button.isEnabled():
             self.snapshot_output.appendPlainText("برای بستن برنامه منتظر پایان تحلیل بمانید…")
             event.ignore()
             return

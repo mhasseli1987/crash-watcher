@@ -221,6 +221,34 @@ def request_color_sequence(settings, recent, trend) -> tuple[tuple[str, float], 
     return tuple(result)
 
 
+class ColorSequenceAdviceWorker(QThread):
+    """Preview the same one-shot sequence used by monitoring, without placing bets."""
+
+    captured = Signal()
+    done = Signal(str)
+    failed = Signal(str)
+
+    def __init__(self, settings):
+        super().__init__()
+        self.settings = settings
+
+    def run(self):
+        try:
+            recent, trend = capture_color_history(self.settings)
+            self.captured.emit()
+            if (self.settings.bot_mode == "turnbal"
+                    and any(colors[-RED_STREAK_LIMIT:] == ("RED",) * RED_STREAK_LIMIT
+                            for colors in (recent, trend))):
+                self.done.emit("چهار قرمز پیاپی در تصویر دیده شد؛ تحلیل انجام نشد.")
+                return
+            entries = request_color_sequence(self.settings, recent, trend)
+            labels = "، ".join(f"{i}. {NAMES[color]} ({confidence:.0%})"
+                               for i, (color, confidence) in enumerate(entries, 1))
+            self.done.emit("ترتیب پیشنهادها: " + labels)
+        except Exception as exc:
+            self.failed.emit(str(exc))
+
+
 def build_advice_prompt(snapshot):
     return (
         "Analyze this fixed snapshot for the round AFTER the displayed history. "
