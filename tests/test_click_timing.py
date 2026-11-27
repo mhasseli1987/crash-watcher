@@ -294,7 +294,8 @@ def test_one_sequence_per_monitoring_run_with_no_round_model_requests(monkeypatc
     worker = MonitorWorker(settings, StrategyEngine(settings.strategy()))
     sender = Sender()
     clicker = AutoClicker(settings, sender=sender)
-    calls, reports = [], []
+    calls, reports, cashout_ticks = [], [], []
+    frame_number = 0
     worker.click_report.connect(reports.append)
     timestamp = lambda: datetime.now(timezone.utc)
     old = timestamp() - timedelta(seconds=8)
@@ -325,11 +326,13 @@ def test_one_sequence_per_monitoring_run_with_no_round_model_requests(monkeypatc
             pass
 
         def capture(self):
+            nonlocal frame_number
+            frame_number += 1
             return SimpleNamespace(image=np.zeros((40, 100, 3), dtype=np.uint8),
                                    captured_at=timestamp()), ()
 
     outcomes = iter([(None, None), ("before-ready", old), ("r1", None),
-                     ("r1", None), ("r2", None), ("r3", None), ("r4", None), ("r5", None)])
+                     (None, None), (None, None), ("r1", None), ("r2", None), ("r3", None), ("r4", None), ("r5", None)])
 
     def observe(*_args, **_kwargs):
         round_id, time = next(outcomes, ("stop", None))
@@ -345,6 +348,12 @@ def test_one_sequence_per_monitoring_run_with_no_round_model_requests(monkeypatc
     monkeypatch.setattr(module, "capture_color_history", snapshot)
     monkeypatch.setattr(module, "request_color_sequence", predict)
     monkeypatch.setattr(module, "RapidOCRReader", lambda: None)
+    monkeypatch.setattr(module, "bang_screen", lambda _: frame_number == 4)
+    monkeypatch.setattr(module, "live_multiplier",
+                        lambda *_: Decimal("1.25") if frame_number == 5 else None)
+    monkeypatch.setattr(clicker, "wants_cashout", lambda: bool(sender.calls))
+    monkeypatch.setattr(clicker, "tick",
+                        lambda live=None, ended=False: cashout_ticks.append((live, ended)))
     monkeypatch.setattr(rapidocr, "RapidOCR", lambda: lambda _: None)
     reading = FinalReading(None, 0, "", "", False)
     monkeypatch.setattr(module, "BangRecognizer", lambda *_: SimpleNamespace(recognize=lambda _: reading))
@@ -357,6 +366,7 @@ def test_one_sequence_per_monitoring_run_with_no_round_model_requests(monkeypatc
     worker.run()
 
     assert calls == ["capture", "model"]
+    assert cashout_ticks == [(Decimal("1.25"), False)]
     assert [(report.target_round_id, report.target) for report in reports if report.clicked] == [
         ("r1", "RED"), ("r2", "YELLOW"), ("r3", "YELLOW"), ("r4", "GREEN"), ("r5", "YELLOW")]
     assert sender.calls == [(110, 220, True), (150, 220, True), (150, 220, True),
