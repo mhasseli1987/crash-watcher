@@ -301,7 +301,7 @@ def test_one_sequence_per_monitoring_run_with_no_round_model_requests(monkeypatc
 
     def snapshot(_):
         calls.append("capture")
-        return ("GREEN",), ("RED", "GREEN")
+        return ("RED", "GREEN")
 
     def predict(*_):
         calls.append("model")
@@ -373,7 +373,7 @@ def test_color_sequence_waits_for_autoclick_before_first_slot(monkeypatch, tmp_p
     sender = Sender()
     clicker = AutoClicker(settings, sender=sender, log_path=tmp_path / "rounds.jsonl")
     worker._clicker = clicker
-    monkeypatch.setattr(module, "capture_color_history", lambda _: (("GREEN",), ()))
+    monkeypatch.setattr(module, "capture_color_history", lambda _: ("GREEN",))
     monkeypatch.setattr(module, "request_color_sequence", lambda *_: (("RED", .9), ("GREEN", .9)))
     worker._prepare_color_sequence(settings)
 

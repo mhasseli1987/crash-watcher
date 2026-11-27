@@ -288,17 +288,12 @@ def test_changed_history_while_busy_is_queued(monkeypatch):
     assert "old recommendation" not in texts
 
 
-def test_color_history_reads_both_regions_from_one_grab(monkeypatch):
+def test_color_history_reads_only_chart_from_one_grab(monkeypatch):
     from types import SimpleNamespace
     from crash_watcher.desktop.config import Region
 
-    history = cv2.imread(str(ASSETS / "advice-history.png"))
-    chart = cv2.imread(str(ASSETS / "advice-chart.png"))
-    hy, hx = history.shape[:2]
-    cy, cx = chart.shape[:2]
-    image = np.zeros((hy + cy, max(hx, cx), 3), dtype=np.uint8)
-    image[:hy, :hx] = history
-    image[hy:, :cx] = chart
+    image = cv2.imread(str(ASSETS / "advice-chart.png"))
+    height, width = image.shape[:2]
     grabs = []
 
     class Capture:
@@ -316,11 +311,10 @@ def test_color_history_reads_both_regions_from_one_grab(monkeypatch):
             return SimpleNamespace(image=image), ()
 
     monkeypatch.setattr(advice, "ScreenCapture", Capture)
-    settings = DesktopSettings(history_region=Region(1, -15, 20, hx, hy),
-                               chart_region=Region(1, -15, 20 + hy, cx, cy))
-    recent, trend = advice.capture_color_history(settings)
-    assert len(grabs) == 1 and (grabs[0].x, grabs[0].height) == (-15, hy + cy)
-    assert recent[:2] == ("RED", "GREEN")
+    chart = Region(1, -15, 20, width, height)
+    settings = DesktopSettings(chart_region=chart)
+    trend = advice.capture_color_history(settings)
+    assert grabs == [chart.capture(settings.interval_ms)]
     assert len(trend) == 40 and trend[-2:] == ("GREEN", "YELLOW")
 
 
@@ -330,7 +324,7 @@ def test_color_sequence_model_gets_only_colors_and_must_return_exact_count(monke
 
     def ask(settings, prompt, schema):
         assert json.loads(prompt.rsplit("\n", 1)[1]) == {
-            "recent_colors": ["RED"], "chart_colors": ["RED", "GREEN"]}
+            "chart_colors": ["RED", "GREEN"]}
         assert schema["properties"]["rounds"]["maxItems"] == 4
         rounds = [{"color": "RED", "confidence": 0.6}] * 4
         if bad == "missing":
@@ -345,9 +339,9 @@ def test_color_sequence_model_gets_only_colors_and_must_return_exact_count(monke
     settings = DesktopSettings(color_sequence_count=4)
     if bad:
         with pytest.raises(ValueError):
-            advice.request_color_sequence(settings, ("RED",), ("RED", "GREEN"))
+            advice.request_color_sequence(settings, ("RED", "GREEN"))
     else:
-        assert advice.request_color_sequence(settings, ("RED",), ("RED", "GREEN")) == (("RED", 0.6),) * 4
+        assert advice.request_color_sequence(settings, ("RED", "GREEN")) == (("RED", 0.6),) * 4
 
 
 def test_manual_preview_retains_sequence_when_history_changes(monkeypatch):
@@ -360,7 +354,7 @@ def test_manual_preview_retains_sequence_when_history_changes(monkeypatch):
 
     app = QApplication.instance() or QApplication([])
     region = Region(1, 0, 0, 30, 30)
-    settings = DesktopSettings(history_region=region, chart_region=region)
+    settings = DesktopSettings(chart_region=region)
     monkeypatch.setattr(ui, "load_settings", lambda: settings)
     monkeypatch.setattr(ui.MainWindow, "save_ui_settings", lambda self: True)
     monkeypatch.setattr(ui, "SnapshotWatchWorker",
@@ -370,7 +364,7 @@ def test_manual_preview_retains_sequence_when_history_changes(monkeypatch):
 
     def capture(_):
         timeline.append("capture")
-        return ("GREEN",), ("RED", "GREEN")
+        return ("RED", "GREEN")
 
     def ask(*_):
         timeline.append("model")

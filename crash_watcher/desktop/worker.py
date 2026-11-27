@@ -167,16 +167,16 @@ class MonitorWorker(QThread):
         try:
             if self._stop.is_set():
                 return
-            recent, trend = capture_color_history(settings)
+            trend = capture_color_history(settings)
             reds = ("RED",) * RED_STREAK_LIMIT
-            if any(colors[-RED_STREAK_LIMIT:] == reds for colors in (recent, trend)):
+            if trend[-RED_STREAK_LIMIT:] == reds:
                 self.hold_clicks(RED_PAUSE_SECONDS, "red streak")
                 self.sequence_status.emit("چهار قرمز پیاپی در تصویر آغاز دیده شد؛ تحلیل انجام نشد. "
                                           "پس از توقف قرمزها پایش را دوباره شروع کنید.")
                 return
             if self._stop.is_set():
                 return
-            entries = request_color_sequence(settings, recent, trend)
+            entries = request_color_sequence(settings, trend)
             with self._advice_lock:
                 if self._stop.is_set():
                     return
@@ -326,7 +326,7 @@ class MonitorWorker(QThread):
             self.settings.smart_play_two_colors)
         try:
             if self._sequence_mode and not self._stop.is_set():
-                self.sequence_status.emit("در حال خواندن یک تصویر و آماده کردن فهرست رنگ‌ها…")
+                self.sequence_status.emit("در حال خواندن یک تصویر از جدول و آماده کردن فهرست رنگ‌ها…")
                 Thread(target=self._prepare_color_sequence, args=(self.settings,), daemon=True).start()
             if self.settings.tesseract_path:
                 import pytesseract

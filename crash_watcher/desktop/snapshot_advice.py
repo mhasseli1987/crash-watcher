@@ -14,7 +14,7 @@ import numpy as np
 from PySide6.QtCore import QThread, Signal
 
 from .color_grid import _centres, read_grid
-from .config import PROJECT_ROOT, Region
+from .config import PROJECT_ROOT
 from .smart_review import ask, _json_object, append_log, _COLOR_ALIASES
 from crash_watcher.vision.capture import ScreenCapture
 from crash_watcher.vision.recognition import RapidOCRReader
@@ -145,36 +145,20 @@ def read_snapshot(history, chart, reader, minimum=0.55):
     return HistorySnapshot(tuple(recent), cells, chart_sequence(cells))
 
 
-def capture_color_history(settings) -> tuple[tuple[str, ...], tuple[str, ...]]:
-    """Read the two color regions from one frame, without multiplier OCR."""
-    history, chart = settings.history_region, settings.chart_region
-    if history is None or chart is None:
-        raise ValueError("ابتدا نوار تاریخچه و جدول رنگ‌ها را مشخص کنید.")
-    if history.monitor != chart.monitor:
-        raise ValueError("نوار تاریخچه و جدول رنگ‌ها باید روی یک نمایشگر باشند.")
-    x, y = min(history.x, chart.x), min(history.y, chart.y)
-    right = max(history.x + history.width, chart.x + chart.width)
-    bottom = max(history.y + history.height, chart.y + chart.height)
-    area = Region(history.monitor, x, y, right - x, bottom - y)
-    with ScreenCapture(area.capture(settings.interval_ms)) as capture:
+def capture_color_history(settings) -> tuple[str, ...]:
+    """Read the color chart from one frame, without multiplier OCR."""
+    chart = settings.chart_region
+    if chart is None:
+        raise ValueError("ابتدا ناحیهٔ جدول رنگ‌ها را مشخص کنید.")
+    with ScreenCapture(chart.capture(settings.interval_ms)) as capture:
         frame, _ = capture.capture()
-
-    def crop(region):
-        left, top = region.x - x, region.y - y
-        return frame.image[top:top + region.height, left:left + region.width]
-
-    strip = crop(history)
-    dots = sorted((px, py, color) for color in COLORS
-                  for px, py in _centres(strip, color, 40))
-    recent = tuple(color for _, _, color in dots)
-    grid = read_grid(crop(chart))
-    trend = chart_sequence((d.column, d.row, d.color) for d in grid.dots) if grid else ()
-    if not (recent or trend):
-        raise ValueError("هیچ رنگی در تصویر آغاز پایش خوانده نشد.")
-    return recent, trend
+    grid = read_grid(frame.image)
+    if grid is None:
+        raise ValueError("هیچ رنگی در تصویر جدول خوانده نشد.")
+    return chart_sequence((dot.column, dot.row, dot.color) for dot in grid.dots)
 
 
-def request_color_sequence(settings, recent, trend) -> tuple[tuple[str, float], ...]:
+def request_color_sequence(settings, trend) -> tuple[tuple[str, float], ...]:
     """Ask once for a fixed list. Reject incomplete or invalid answers as a whole."""
     count = settings.color_sequence_count
     schema = {
@@ -195,11 +179,11 @@ def request_color_sequence(settings, recent, trend) -> tuple[tuple[str, float], 
     prompt = (
         f"Use this fixed color history to suggest colors for exactly {count} successive rounds. "
         "Item 1 is the first round after the list is ready, then item 2, and so on. "
-        "Each list below is oldest to newest; they may overlap, so do not concatenate them. "
+        "The chart colors below are ordered from oldest to newest. "
         "Past colors do not establish predictability. Report your uncertainty. "
         'Return only JSON like {"rounds":[{"color":"GREEN","confidence":0.4}]}, '
         "with the requested number of entries. Use RED, GREEN or YELLOW; never return multipliers.\n"
-        + json.dumps({"recent_colors": recent, "chart_colors": trend})
+        + json.dumps({"chart_colors": trend})
     )
     raw = request_advice(settings, prompt, schema).strip()
     fenced = re.fullmatch(r"```(?:json)?\s*(.*?)\s*```", raw, re.DOTALL)
@@ -234,14 +218,13 @@ class ColorSequenceAdviceWorker(QThread):
 
     def run(self):
         try:
-            recent, trend = capture_color_history(self.settings)
+            trend = capture_color_history(self.settings)
             self.captured.emit()
             if (self.settings.bot_mode == "turnbal"
-                    and any(colors[-RED_STREAK_LIMIT:] == ("RED",) * RED_STREAK_LIMIT
-                            for colors in (recent, trend))):
+                    and trend[-RED_STREAK_LIMIT:] == ("RED",) * RED_STREAK_LIMIT):
                 self.done.emit("چهار قرمز پیاپی در تصویر دیده شد؛ تحلیل انجام نشد.")
                 return
-            entries = request_color_sequence(self.settings, recent, trend)
+            entries = request_color_sequence(self.settings, trend)
             labels = "، ".join(f"{i}. {NAMES[color]} ({confidence:.0%})"
                                for i, (color, confidence) in enumerate(entries, 1))
             self.done.emit("ترتیب پیشنهادها: " + labels)

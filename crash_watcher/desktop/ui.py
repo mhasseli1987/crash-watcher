@@ -424,7 +424,7 @@ class MainWindow(QMainWindow):
         self._snapshot_pending = False
         # قرمزهای پیاپی: تا این زمان هیچ تحلیل/کلیک تازه‌ای شروع نمی‌شود.
         self._red_hold_until = 0.0
-        note = QLabel("در روش فهرست، نوار تاریخچه و جدول رنگ‌ها را روی یک نمایشگر مشخص کنید. "
+        note = QLabel("در روش فهرست، فقط ناحیهٔ جدول رنگ‌ها را مشخص کنید. "
                       "بعد از پایان فهرست، برای گرفتن فهرست تازه پایش را دوباره شروع کنید.\n"
                       "در روش قبلی:\n"
                       "۱. نوار ضریب‌های آخر و جدول رنگ‌ها را مشخص کنید.\n"
@@ -487,7 +487,7 @@ class MainWindow(QMainWindow):
                 return
         self._snapshot_pending = False
         self.snapshot_button.setEnabled(False)
-        self.snapshot_output.setPlainText("در حال تحلیل یک تصویر از رنگ‌های قبلی؛ پایان دور پاسخ را لغو نمی‌کند…")
+        self.snapshot_output.setPlainText("در حال تحلیل یک تصویر از جدول رنگ‌های قبلی؛ پایان دور پاسخ را لغو نمی‌کند…")
         self.snapshot_worker = ColorSequenceAdviceWorker(self.settings)
         self.snapshot_worker.captured.connect(self.showNormal)
         self.snapshot_worker.done.connect(self.snapshot_output.setPlainText)
@@ -515,14 +515,17 @@ class MainWindow(QMainWindow):
             if self.worker and self.worker.isRunning():
                 self.snapshot_output.setPlainText("منتظر توقف پایش بمانید.")
                 return
-        if not self.settings.history_region or not self.settings.chart_region:
-            self.snapshot_output.setPlainText("ابتدا هر دو ناحیه را با دکمه‌های بالا انتخاب کنید.")
-            return
-        # در حین پایش تنظیمات قفل است؛ همان تنظیمات فعال پایش استفاده می‌شود.
-        if not (self.worker and self.worker.isRunning()) and not self.save_ui_settings():
+        # در حین پایش همان تنظیمات فعال استفاده می‌شود.
+        if not active and not self.save_ui_settings():
             return
         if not active and self.settings.color_sequence_enabled:
+            if not self.settings.chart_region:
+                self.snapshot_output.setPlainText("ابتدا ناحیهٔ جدول رنگ‌ها را مشخص کنید.")
+                return
             self._start_manual_color_sequence()
+            return
+        if not self.settings.history_region or not self.settings.chart_region:
+            self.snapshot_output.setPlainText("برای روش قبلی، ابتدا هر دو ناحیه را انتخاب کنید.")
             return
         watch = getattr(self, "snapshot_watch", None)
         if watch and (watch.settings.history_region != self.settings.history_region or
@@ -1666,10 +1669,9 @@ class MainWindow(QMainWindow):
         if not self.save_ui_settings():
             return
         if self.settings.uses_color_sequence:
-            history, chart = self.settings.history_region, self.settings.chart_region
-            if not history or not chart or history.monitor != chart.monitor:
+            if not self.settings.chart_region:
                 self.tabs.setCurrentIndex(self.snapshot_tab)
-                self.snapshot_output.setPlainText("برای فهرست، نوار تاریخچه و جدول رنگ‌ها را روی یک نمایشگر مشخص کنید.")
+                self.snapshot_output.setPlainText("برای فهرست، ابتدا ناحیهٔ جدول رنگ‌ها را مشخص کنید.")
                 return
             watch = getattr(self, "snapshot_watch", None)
             if watch and watch.isRunning():
